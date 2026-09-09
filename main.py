@@ -2,6 +2,8 @@ import os
 import asyncio
 import json
 import logging
+import re
+import secrets
 import requests
 from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -131,7 +133,7 @@ def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)):
             status_code=500,
             detail="Server GEMINI_WRAPPER_KEY is not configured.",
         )
-    if not api_key or api_key != expected:
+    if not api_key or not secrets.compare_digest(api_key, expected):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: Missing or invalid X-API-Key header.",
@@ -693,7 +695,7 @@ async def execute_alert_scan() -> dict:
                                 "header": {
                                     "title": "Family Financial Copilot",
                                     "subtitle": "Daily Spend Optimization & Debt Advisory",
-                                    "imageUrl": f"{os.getenv('SERVICE_URL', '').rstrip('/')}/avatar.png" if os.getenv("SERVICE_URL") else "https://storage.googleapis.com/monarch-public-assets/avatar.png",
+                                    "imageUrl": f"{os.getenv('SERVICE_URL', '').rstrip('/')}/avatar.png" if os.getenv("SERVICE_URL") else "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                                     "imageType": "CIRCLE",
                                 },
                                 "sections": [
@@ -824,11 +826,11 @@ def ask_conversational_analytics(question: str, history: Optional[list] = None) 
 
 def run_readonly_sql(sql_query: str) -> str:
     """Executes a read-only GoogleSQL query against the family_finance BigQuery dataset (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_overlap, v_food_efficiency, v_micro_transaction_leakage, raw_accounts, raw_transactions)."""
-    forbidden = ["insert", "update", "delete", "drop", "truncate", "alter", "create", "merge"]
-    lower_q = sql_query.lower()
-    for word in forbidden:
-        if f" {word} " in f" {lower_q} ":
-            return f"Error: Only SELECT queries are permitted. Found forbidden keyword: {word}"
+    # Robust word-boundary regex check prevents bypasses via newlines, tabs, comments, or punctuation
+    forbidden_pattern = r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke)\b"
+    match = re.search(forbidden_pattern, sql_query, re.IGNORECASE)
+    if match:
+        return f"Error: Only SELECT queries are permitted. Found forbidden keyword: {match.group(0)}"
 
     from google.cloud import bigquery
     import json
@@ -1214,7 +1216,53 @@ def save_session_history(thread_name: Optional[str], space_name: Optional[str], 
 
 
 
-@app.post("/chat/event")
+def verify_chat_origin(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """
+    Verifies that incoming /chat/event requests originate from Google Chat or an authorized caller.
+    Blocks unauthenticated external callers from sending spoofed events to Cloud Run.
+    """
+    # 1. API key bypass for testing or admin curl
+    if x_api_key:
+        expected = resolve_secret("gemini-wrapper-key", "GEMINI_WRAPPER_KEY")
+        if expected and secrets.compare_digest(x_api_key, expected):
+            return True
+
+    # 2. Local development skip
+    if os.getenv("CHAT_AUTH_DISABLED", "false").lower() == "true":
+        return True
+
+    # 3. Google Chat OIDC Bearer token verification
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ", 1)[1].strip()
+        try:
+            from google.oauth2 import id_token
+            from google.auth.transport import requests as google_requests
+            claims = id_token.verify_oauth2_token(token, google_requests.Request())
+            email = claims.get("email")
+            iss = claims.get("iss", "")
+            if email == "chat@system.gserviceaccount.com" or "accounts.google.com" in iss:
+                return True
+            logger.warning(f"Google Chat Bearer token has unverified issuer/email: email={email}, iss={iss}")
+        except Exception as e:
+            logger.error(f"Google Chat Bearer verification failed: {e}")
+            raise HTTPException(status_code=401, detail=f"Invalid Google Chat authentication token: {e}")
+
+    # 4. Custom chat verification token fallback
+    chat_secret = resolve_secret("chat-verification-token", "CHAT_VERIFICATION_TOKEN")
+    if chat_secret and authorization and secrets.compare_digest(authorization, chat_secret):
+        return True
+
+    # 5. On Cloud Run, block requests with no authentication credentials
+    if os.getenv("K_SERVICE"):
+        raise HTTPException(status_code=401, detail="Unauthorized: Missing valid Google Chat Bearer token or API key.")
+
+    return True
+
+
+@app.post("/chat/event", dependencies=[Depends(verify_chat_origin)])
 async def google_chat_webhook(request: dict):
     """
     Handles interactive events from Google Chat (mentions, direct messages, slash commands).
@@ -1294,6 +1342,14 @@ async def google_chat_webhook(request: dict):
         resp = format_chat_response(text, thread_name=thread_name, space_name=space_name, is_addon=is_addon)
         logger.info(f"Outgoing Chat Response: {json.dumps(resp)}")
         return resp
+
+    # Enforce family member allowlist if configured
+    allowed_users_raw = resolve_secret("allowed-chat-users", "ALLOWED_CHAT_USERS")
+    if allowed_users_raw:
+        allowed_users = [u.strip().lower() for u in allowed_users_raw.split(",") if u.strip()]
+        if allowed_users and user_email.lower() not in allowed_users:
+            logger.warning(f"Unauthorized chat access attempt from '{user_email}'")
+            return respond(f"🔒 Access Denied: User '{user_email}' is not authorized to query family finances.")
 
     # 1. Bot added to space or 1:1 DM
     if event_type == "ADDED_TO_SPACE":
