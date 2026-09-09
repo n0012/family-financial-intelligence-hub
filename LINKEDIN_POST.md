@@ -8,8 +8,6 @@ An experiment to make it easier for my wife and I to stay on top of our spend. â
 
 Like a lot of couples, we use Monarch to track our finances. But nobody actually wants to log into an app every day or sit down on Sunday night to comb through spreadsheets.
 
-Financial discipline isn't about staring at spreadsheets on Sunday night â€” it's about having deterministic answers the moment decisions happen.
-
 So I wanted to see if we could just ask questions in our family Google Chat and get real, immediate answers.
 
 The tricky part is that LLMs suck at math. If you ask an AI to calculate daily compounding interest on a variable-rate loan or tally up dining spend across three months, it'll happily make up a convincing number.
