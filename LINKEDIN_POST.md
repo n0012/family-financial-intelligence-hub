@@ -6,7 +6,7 @@
 
 "What's our daily interest burn right now?" — now our family Google Chat answers before my morning coffee. ☕📉
 
-Weekend build: a serverless financial intelligence hub for my partner and me that bridges Monarch Money into Google BigQuery, with Gemini 3.8 Flash acting as our continuous financial copilot right inside Google Chat.
+Weekend build: a serverless financial intelligence hub for my wife and I that bridges Monarch Money into Google BigQuery, with Gemini 3.8 Flash acting as our continuous financial copilot right inside Google Chat.
 
 Most budgeting apps do a fine job telling you where your money went last month. But none of them tell you what your debt is costing you today, or whether cutting two takeout orders this week actually makes a dent in a variable-rate balance.
 
