@@ -1,49 +1,40 @@
-![Automated Family Financial AI Workflow](./static/workflow.png)
+![Automated Family Financial Intelligence Hub](./static/workflow.png)
 
 ---
 
 ## Ready-to-Publish LinkedIn Post
 
-```markdown
-🚀 Built a Serverless Personal Finance Copilot with Monarch Money, Google BigQuery & Gemini 3.8 Flash
+"What's our daily interest burn right now?" — now our family Google Chat answers before my morning coffee. ☕📉
 
-Most personal finance apps (Monarch, Mint, YNAB) do a great job aggregating accounts and basic envelope budgeting. But when it comes to answering questions like:
-• "What is our exact daily interest burn on our variable-rate debt right now?"
-• "How much annual interest do we eliminate if we redirect our dining delivery markups to our HELOC?"
-• Or evaluating a complex 2026 compensation & bonus outlook...
-...you're usually stuck manually exporting CSVs into a spreadsheet.
+Weekend build: a serverless financial intelligence hub for my partner and me that bridges Monarch Money into Google BigQuery, with Gemini 3.8 Flash acting as our continuous financial copilot right inside Google Chat.
 
-I built an automated financial intelligence hub that turns our family financial data into an active, conversational copilot directly in Google Chat for my partner and me:
+Most budgeting apps do a fine job telling you where your money went last month. But none of them tell you what your debt is costing you today, or whether cutting two takeout orders this week actually makes a dent in a variable-rate balance.
 
-🧠 Key Architectural & Engineering Highlights:
+The fun part is the plumbing. 
 
-1️⃣ Deterministic Arithmetic over LLM Hallucination:
-AI models are notoriously prone to math errors when doing arithmetic in their heads. Instead of asking Gemini to compute interest or spot price creeps mentally, all financial logic (daily compounding interest, subscription price hikes, dining-to-grocery ratios, and micro-transaction leakage) is pre-modeled directly in BigQuery GoogleSQL analytical views. Gemini 3.8 Flash executes read-only SQL queries via Automatic Function Calling (AFC) to ground every recommendation in deterministic arithmetic.
+AI models are notoriously bad at doing math in their heads. Ask an LLM to calculate compounding interest on a variable-rate HELOC or spot subscription price creep across three years of transactions, and it'll happily hallucinate a convincing number. 
 
-2️⃣ Multimodal Vision in Google Chat:
-We can paste screenshots directly into our Google Chat space—whether it's an annual compensation breakdown, bonus projection table, or an external brokerage statement. The bot downloads the image, extracts line items and dates via Gemini Flash vision, and cross-references them against live bank balances in BigQuery.
+So Gemini doesn't do the math. BigQuery does.
 
-3️⃣ Dynamic Account & Migration Intelligence:
-When bank mergers happen or credit cards are replaced, the analytical layer dynamically evaluates transaction recency and balances to determine primary vs superseded accounts with zero hardcoded IDs.
+Every morning, Cloud Run synchronizes transactions via Monarch's API into BigQuery. Pre-computed SQL views model all the deterministic arithmetic:
+• Exact daily compounding interest cost ((balance * apr) / 365)
+• Subscription overlap and historical price creep detection
+• Food efficiency ratios (groceries vs dining & delivery markups)
+• Micro-transaction leakage under $35
 
-4️⃣ Serverless Economics (<$0.40 / month):
-Runs as a lightweight FastAPI service on Google Cloud Run with scale-to-zero, synchronizing transactions via automated TOTP/MFA and posting alerts via Google Chat Cards v2. The entire architecture operates comfortably within GCP's Always Free Tier.
+When either of us asks a question in Google Chat, Gemini uses Automatic Function Calling (AFC) to query those analytical views directly. The AI handles the natural language reasoning and contextual synthesis; the database handles the math.
 
-The full architecture, BigQuery analytical models, and Terraform scripts are open-sourced on GitHub: [Link to Repo]
+The multimodal piece is where it gets really fun: paste a screenshot of an annual compensation outlook, a bonus projection table, or an unlinked statement into the chat. Gemini Flash parses the visual layout, pulls the numbers, and models the optimal debt-payoff sweep on the spot.
 
-#GoogleCloud #BigQuery #GeminiAI #MachineLearning #PersonalFinance #Serverless #FastAPI #Fintech #Python
-```
+A few favorite details:
+• Daily proactive alerts land at 8:00 AM via Google Chat Cards v2 with actionable buttons
+• Fully configurable rates and account overrides via a clean local `config.yaml` or Secret Manager
+• Serverless economics: running on Cloud Run + BigQuery Always Free Tier costs ~$0.37/month
 
----
+Standing on shoulders: huge credit to the open-source community around the monarchmoney Python library that made programmatic ingestion possible, and an earlier inspiration thread (chatgpt.com/share/69f7d4a5-a8e4-83ea-b6e2-78fb8eb79339) that sparked the idea to turn personal finance into an interactive copilot.
 
-## Workflow Infographic Breakdown
+Full code, BigQuery analytical views, and Terraform configs are open-sourced on GitHub 👉 https://github.com/n0012/family-financial-intelligence-hub
 
-The visual infographic illustrates the end-to-end flow across three distinct tiers:
+Financial discipline isn't about staring at spreadsheets on Sunday night — it's about having deterministic answers the moment decisions actually happen. 
 
-1. **Monarch Money & Bank Accounts (Left)**: Live aggregation of salaries, credit card spend, utility bills, investments, and mortgage/HELOC payments.
-2. **Google BigQuery & Gemini AI Brain (Center)**: 
-   - Pre-computed SQL views: HELOC Interest Cost curve, Subscription Price Hike & Overlap Detection, and Fixed vs Discretionary Spend Classification.
-   - Grounded reasoning engine via Gemini 3.8 Flash.
-3. **Google Chat Family Interface (Right)**:
-   - **Partner A (Male)**: Natural language query on daily debt burn $\rightarrow$ instantaneous data-grounded metrics and repayment acceleration tips.
-   - **Partner B (Female)**: Pasted spreadsheet screenshot $\rightarrow$ multimodal visual analysis extracting line items and projecting cash flow impact.
+#GoogleCloud #BigQuery #GeminiAI #PersonalFinance #Serverless #CloudRun #Fintech #Python #FastAPI #BuildingInPublic
