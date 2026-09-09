@@ -1,0 +1,4 @@
+# Development and local visualization dependencies
+-r requirements.txt
+streamlit>=1.35.0
+pytest>=8.0.0
