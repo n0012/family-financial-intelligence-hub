@@ -1,0 +1,22 @@
+# Local environment & secret configs - NEVER CHECK IN
+.env*
+!.env.example
+config.yaml
+config.yml
+config.json
+!config.example.yaml
+!config.example.json
+secrets.env
+*.local.env
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/

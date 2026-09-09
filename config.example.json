@@ -1,0 +1,25 @@
+{
+  "rates": {
+    "default_heloc_apr": 0.0675,
+    "default_mortgage_apr": 0.035,
+    "default_debt_apr": 0.075
+  },
+  "account_overrides": {
+    "123456789012345678": {
+      "name": "Primary Home Equity Line of Credit",
+      "interest_rate": 0.0675
+    }
+  },
+  "decommissioned_account_ids": [
+    "987654321098765432",
+    "876543210987654321"
+  ],
+  "excluded_institutions": [
+    "defunct_bank_name",
+    "legacy_credit_union"
+  ],
+  "partners": {
+    "partner_a": "Partner A",
+    "partner_b": "Partner B"
+  }
+}
