@@ -24,4 +24,4 @@ Source code, SQL models + full writeup 👉 https://github.com/n0012/family-fina
 
 Financial discipline isn't about staring at spreadsheets on Sunday night — it's about having deterministic answers the moment decisions happen.
 
-#GoogleCloud #BigQuery #GeminiAI #PersonalFinance #Serverless #CloudRun #Fintech #Python #BuildingInPublic
+#GoogleCloud #BigQuery #GeminiAI #Monarch #MonarchMoney #PersonalFinance #Serverless #CloudRun #Fintech #Python #BuildingInPublic
