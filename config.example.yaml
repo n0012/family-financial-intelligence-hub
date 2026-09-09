@@ -1,0 +1,37 @@
+# ==============================================================================
+# Family Financial Intelligence Hub - Configuration Template
+# Copy this file to config.yaml (or config.json) to set your private customizations.
+# config.yaml is gitignored and will NEVER be committed to Git.
+# ==============================================================================
+
+# 1. Baseline Interest Rates (APRs)
+# Applied when the financial aggregator does not report an APR.
+rates:
+  default_heloc_apr: 0.0675          # Default APR for Home Equity Lines of Credit (e.g. 6.75%)
+  default_mortgage_apr: 0.0350       # Default APR for Mortgages (e.g. 3.50%)
+  default_debt_apr: 0.0750           # Baseline fallback for other debt/loans
+
+# 2. Specific Account Overrides
+# Map Monarch account IDs to custom rates, custom names, or credit limits.
+# Helpful for variable-rate loans or credit cards where Monarch reports 0% or null.
+account_overrides:
+  "123456789012345678":
+    name: "Primary Home Equity Line of Credit"
+    interest_rate: 0.0675            # 6.75% APR
+
+# 3. Decommissioned / Closed Accounts
+# Monarch account IDs to completely exclude from BigQuery historical sync.
+decommissioned_account_ids:
+  - "987654321098765432"
+  - "876543210987654321"
+
+# 4. Excluded Institutions
+# Keywords of defunct or merged institutions to filter out.
+excluded_institutions:
+  - "defunct_bank_name"
+  - "legacy_credit_union"
+
+# 5. Household / Partner Display Names (for chat cards and insights)
+partners:
+  partner_a: "Partner A"
+  partner_b: "Partner B"

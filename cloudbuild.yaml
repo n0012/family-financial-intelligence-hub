@@ -1,0 +1,95 @@
+steps:
+  # 1. Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest'
+      - '.'
+    id: 'build-image'
+
+  # 2. Push image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}'
+    id: 'push-sha-image'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest'
+    id: 'push-latest-image'
+
+  # 3. Deploy new revision to Cloud Run (Economical cost-controlled configuration)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE}'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}'
+      - '--region'
+      - '${_REGION}'
+      - '--service-account'
+      - 'monarch-gemini-run@${PROJECT_ID}.iam.gserviceaccount.com'
+      - '--min-instances'
+      - '1'
+      - '--no-cpu-throttling'
+      - '--max-instances'
+      - '1'
+      - '--memory'
+      - '1Gi'
+      - '--cpu'
+      - '1'
+      - '--set-env-vars'
+      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}'
+      - '--set-secrets'
+      - 'MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest,ALERT_WEBHOOK_URL=alert-webhook-url:latest,GEMINI_API_KEY=gemini-api-key:latest'
+      - '--allow-unauthenticated'
+    id: 'deploy-cloud-run'
+
+  # 4. Synchronize BigQuery schema and analytical views
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Applying BigQuery schema and analytical views..."
+        bq query --use_legacy_sql=false --project_id=${PROJECT_ID} < schema.sql
+    id: 'apply-bigquery-schema'
+
+  # 5. Smoke test health endpoint
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        SERVICE_URL=$$(gcloud run services describe ${_SERVICE} --region ${_REGION} --format="value(status.url)")
+        API_KEY=$$(gcloud secrets versions access latest --secret=gemini-wrapper-key)
+        echo "Validating health of deployed service at $$SERVICE_URL..."
+        HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: $$API_KEY" "$$SERVICE_URL/health")
+        if [ "$$HTTP_CODE" -eq 200 ]; then
+          echo "Health check passed (HTTP 200)!"
+        else
+          echo "Warning: Health check returned HTTP $$HTTP_CODE"
+        fi
+    id: 'verify-health'
+
+substitutions:
+  _REGION: 'us-central1'
+  _REPO: 'monarch-repo'
+  _SERVICE: 'monarch-gemini-wrapper'
+  _DATASET_ID: 'family_finance'
+  _COMMIT_SHA: 'latest'
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitution_option: 'ALLOW_LOOSE'

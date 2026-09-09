@@ -1,0 +1,8 @@
+project_id          = "your-gcp-project-id"
+region              = "us-central1"
+service_name        = "monarch-gemini-wrapper"
+artifact_repo_name  = "monarch-repo"
+bigquery_dataset_id = "family_finance"
+sync_schedule       = "0 4 * * *"
+alert_schedule      = "0 8 * * *"
+time_zone           = "America/New_York"
