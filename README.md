@@ -49,7 +49,7 @@ flowchart TD
 
     subgraph DataWarehouse ["Google BigQuery Data Warehouse"]
         RawTables["Raw Tables:<br/>• raw_accounts<br/>• raw_transactions<br/>• raw_categories<br/>• staging_transactions"]
-        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Carrying Cost &amp; Debt Sweeps)<br/>• v_active_subscriptions (Cadence &amp; Price Creep)<br/>• v_subscription_overlap (Redundant Services)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (&lt;$35 Convenience Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
+        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Carrying Cost & Debt Sweeps)<br/>• v_active_subscriptions (Cadence & Price Creep)<br/>• v_subscription_overlap (Redundant Services)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Convenience Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
     end
 
     subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface"]
@@ -58,21 +58,22 @@ flowchart TD
         GoogleChat["Google Chat Space &amp; 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Bidirectional Thread Replies"]
     end
 
-    CronSync -->|POST /sync/bigquery| FastAPI
+    CronSync -->|"POST /sync/bigquery"| FastAPI
     FastAPI --> MMClient
-    MMClient -->|GraphQL Extraction| RawTables
+    MMClient -->|"GraphQL Extraction"| RawTables
     RawTables --> Views
 
-    CronAlert -->|POST /advisor/scan-alerts| AdvisorEngine
+    CronAlert -->|"POST /advisor/scan-alerts"| AdvisorEngine
     Views --> AdvisorEngine
-    AdvisorEngine -->|Card v2 Notification| GoogleChat
+    AdvisorEngine -->|"Card v2 Notification"| GoogleChat
 
-    GoogleChat -->|Webhook Event (Text + PNG)| FastAPI
+    GoogleChat -->|"Webhook Event: Text & Images"| FastAPI
     FastAPI --> MediaDownloader
     MediaDownloader --> MultimodalVision
     MultimodalVision --> GeminiFlash
-    GeminiFlash <-->|AFC: run_readonly_sql| Views
-    GeminiFlash -->|Synthesized Advisory Response| GoogleChat
+    GeminiFlash -->|"Tool Call: run_readonly_sql"| Views
+    Views -->|"Query Results"| GeminiFlash
+    GeminiFlash -->|"Synthesized Advisory Response"| GoogleChat
 ```
 
 ---
