@@ -1,17 +1,30 @@
-import os
 import asyncio
+from datetime import date, datetime, timedelta
 import json
 import logging
+import os
 import re
 import secrets
-import requests
-from datetime import date, datetime, timedelta
-from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, Header, HTTPException, Query, Security, Depends, Response
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, Security
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+import google.auth
+from google.auth.transport import requests as google_requests
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.cloud import bigquery, secretmanager
+from google.oauth2 import id_token
 from monarchmoney import MonarchMoney
-from google.cloud import bigquery
+import pyotp
+import requests
+import yaml
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monarch-gemini")
@@ -32,7 +45,6 @@ def resolve_secret(secret_name: str, env_var: str) -> Optional[str]:
     """Resolves secret from Secret Manager latest version, falling back to environment variable."""
     # Try fetching latest version from Secret Manager first
     try:
-        from google.cloud import secretmanager
         sm_client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{BQ_PROJECT_ID}/secrets/{secret_name}/versions/latest"
         resp = sm_client.access_secret_version(name=name)
@@ -103,7 +115,6 @@ async def get_monarch_client(mfa_code: Optional[str] = None) -> MonarchMoney:
                 except Exception as login_err:
                     is_mfa_error = "mfa" in type(login_err).__name__.lower() or "mfa" in str(login_err).lower()
                     if is_mfa_error and clean_secret:
-                        import pyotp
                         totp_code = pyotp.TOTP(clean_secret).now()
                         logger.info(f"Submitting generated TOTP code for {email}")
                         await client.multi_factor_authenticate(
@@ -236,14 +247,10 @@ def load_local_config() -> dict:
         if file_path and os.path.exists(file_path):
             try:
                 if file_path.endswith((".yaml", ".yml")):
-                    try:
-                        import yaml
-                        with open(file_path, "r") as f:
-                            data = yaml.safe_load(f)
-                            if isinstance(data, dict):
-                                return data
-                    except ImportError:
-                        logger.warning("pyyaml not installed; install pyyaml or use config.json")
+                    with open(file_path, "r") as f:
+                        data = yaml.safe_load(f)
+                        if isinstance(data, dict):
+                            return data
                 else:
                     with open(file_path, "r") as f:
                         data = json.load(f)
@@ -589,18 +596,14 @@ async def sync_to_bigquery(
     return await execute_sync(days_back=effective_days, mfa_code=mfa_code)
 
 
-ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")
-
 async def execute_alert_scan() -> dict:
     """
     Scans BigQuery financial optimization views and generates proactive alerts
     with concrete suggestions to reduce spend and accelerate HELOC paydown.
-    Optionally posts the summary to ALERT_WEBHOOK_URL (Discord/Slack/Telegram).
+    Optionally posts the summary to ALERT_WEBHOOK_URL (Google Chat/Slack/Discord).
     """
     if not BQ_PROJECT_ID:
         raise HTTPException(status_code=500, detail="PROJECT_ID not set.")
-
-    import requests
 
     bq = bigquery.Client(project=BQ_PROJECT_ID)
     alerts = []
@@ -746,13 +749,9 @@ def ask_conversational_analytics(question: str, history: Optional[list] = None) 
     grounded in family_finance BigQuery dataset, with optional multi-turn conversation history.
     """
     try:
-        import google.auth
-        from google.auth.transport.requests import Request
-        import requests
-
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         if not creds.valid:
-            creds.refresh(Request())
+            creds.refresh(GoogleAuthRequest())
         token = creds.token
 
         ca_parent = f"projects/{BQ_PROJECT_ID}/locations/global"
@@ -832,8 +831,6 @@ def run_readonly_sql(sql_query: str) -> str:
     if match:
         return f"Error: Only SELECT queries are permitted. Found forbidden keyword: {match.group(0)}"
 
-    from google.cloud import bigquery
-    import json
     try:
         logger.info(f"Executing Gemini SQL tool call: {sql_query}")
         bq = bigquery.Client(project=BQ_PROJECT_ID)
@@ -863,11 +860,11 @@ def ask_gemini_brain(
     gemini_key = resolve_secret("gemini-api-key", "GEMINI_API_KEY")
 
     try:
-        from google import genai
-        from google.genai import types
+        if not genai:
+            logger.warning("google-genai library not available, falling back to Conversational Analytics")
+            return ask_conversational_analytics(question)
 
         # Prioritize API Key if available (which supports gemini-3.8-flash), falling back to Vertex AI
-        gemini_key = resolve_secret("gemini-api-key", "GEMINI_API_KEY")
         if gemini_key:
             client = genai.Client(api_key=gemini_key)
         else:
@@ -990,6 +987,16 @@ def ask_gemini_brain(
 
 
 
+def format_advisory_reply(answer: str, sql: Optional[str] = None, suggestions: Optional[list] = None) -> str:
+    """Formats the financial advisor response with optional SQL block and follow-up suggestions."""
+    reply_lines = [f"💡 *Financial Advisory Response*:\n{answer}"]
+    if sql:
+        reply_lines.append(f"\n```sql\n{sql}\n```")
+    if suggestions:
+        reply_lines.append("\n*Suggested Follow-ups*:\n" + "\n".join([f"• {s}" for s in suggestions[:3]]))
+    return "\n".join(reply_lines)
+
+
 def format_chat_response(text: str, thread_name: Optional[str] = None, space_name: Optional[str] = None, is_addon: bool = True) -> dict:
     """
     Returns a clean, robust message response that strictly conforms to Google Workspace Add-ons
@@ -1033,10 +1040,8 @@ def post_to_chat_thread(text: str, thread_name: Optional[str] = None, space_name
     # 1. Primary: Use Google Chat API with ADC (Service Account)
     if space_name:
         try:
-            import google.auth
-            from google.auth.transport.requests import Request
             creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/chat.bot"])
-            creds.refresh(Request())
+            creds.refresh(GoogleAuthRequest())
             headers = {
                 "Authorization": f"Bearer {creds.token}",
                 "Content-Type": "application/json",
@@ -1079,10 +1084,8 @@ def post_to_chat_thread(text: str, thread_name: Optional[str] = None, space_name
 def download_chat_attachment(attachment: dict) -> Optional[tuple[bytes, str]]:
     """Download an uploaded media attachment from Google Chat using bot credentials."""
     try:
-        import google.auth
-        from google.auth.transport.requests import Request
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/chat.bot"])
-        creds.refresh(Request())
+        creds.refresh(GoogleAuthRequest())
         headers = {"Authorization": f"Bearer {creds.token}"}
 
         resource_name = attachment.get("name")
@@ -1145,7 +1148,6 @@ def get_session_history(thread_name: Optional[str], space_name: Optional[str]) -
         return []
 
     try:
-        from google.cloud import bigquery
         bq = bigquery.Client(project=BQ_PROJECT_ID)
         query = f"""
             SELECT user_text, model_response 
@@ -1180,7 +1182,6 @@ def save_session_history(thread_name: Optional[str], space_name: Optional[str], 
     """
     Saves conversation turn to in-memory caches and persists to BigQuery.
     """
-    from datetime import datetime
     turn_user = {"userMessage": {"text": user_text}}
     turn_model = {"systemMessage": {"text": {"parts": [model_text]}}}
 
@@ -1199,7 +1200,6 @@ def save_session_history(thread_name: Optional[str], space_name: Optional[str], 
     session_id = thread_name or space_name
     if session_id:
         try:
-            from google.cloud import bigquery
             bq = bigquery.Client(project=BQ_PROJECT_ID)
             bq.insert_rows_json(
                 f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.chat_history",
@@ -1238,8 +1238,6 @@ def verify_chat_origin(
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ", 1)[1].strip()
         try:
-            from google.oauth2 import id_token
-            from google.auth.transport import requests as google_requests
             claims = id_token.verify_oauth2_token(token, google_requests.Request())
             email = claims.get("email")
             iss = claims.get("iss", "")
@@ -1268,10 +1266,6 @@ async def google_chat_webhook(request: dict):
     Handles interactive events from Google Chat (mentions, direct messages, slash commands).
     Transforms Google Chat into a conversational interface for family finances.
     """
-    import asyncio
-    import json
-    import re
-
     logger.info(f"Incoming Raw Chat Payload: {json.dumps(request)}")
 
     is_addon = bool(request.get("commonEventObject") or request.get("chat"))
@@ -1388,23 +1382,10 @@ async def google_chat_webhook(request: dict):
     clean_text = re.sub(r"@Family\s*Finance\s*Copilot", "", raw_text, flags=re.IGNORECASE)
     clean_text = re.sub(r"@\S+", "", clean_text).strip()
 
-    if not clean_text:
-        if downloaded_images:
-            clean_text = "Please carefully examine the attached financial screenshot/document. Parse all numbers, projections, and line items, and provide a strategic financial analysis and recommendations."
-        else:
-            help_text = (
-                f"Hi {sender_name}! Here are some questions you can ask me:\n"
-                "• _What is our daily HELOC interest burden?_\n"
-                "• _What subscriptions had price increases recently?_\n"
-                "• _How much did we spend on dining out last month?_\n"
-                "• _What frequent small purchases are we making?_\n"
-                "• `/sync` to pull latest transactions\n"
-                "• `/alerts` to run proactive spend scan\n"
-                "• *You can also paste screenshots or financial documents!*"
-            )
-            return respond(help_text)
+    if not clean_text and downloaded_images:
+        clean_text = "Please carefully examine the attached financial screenshot/document. Parse all numbers, projections, and line items, and provide a strategic financial analysis and recommendations."
 
-    if clean_text.lower() in ("help", "/help"):
+    if not clean_text or clean_text.lower() in ("help", "/help"):
         help_text = (
             f"Hi {sender_name}! Here are some questions you can ask me:\n"
             "• _What is our daily HELOC interest burden?_\n"
@@ -1433,7 +1414,6 @@ async def google_chat_webhook(request: dict):
         or any(phrase in lower_text for phrase in ["please sync", "can you sync", "trigger sync", "run sync", "sync now", "sync data", "sync monarch", "refresh data", "pull history", "sync history", "backfill history"])
     )
     if is_sync_intent:
-        import re
         if any(term in lower_text for term in ["all", "everything", "history", "full", "backfill"]):
             days = None
             history_desc = "all available history"
@@ -1483,12 +1463,7 @@ async def google_chat_webhook(request: dict):
         if "no specific response was generated" not in answer.lower():
             save_session_history(thread_name, space_name, user_email, clean_text, answer)
 
-        reply_lines = [f"💡 *Financial Advisory Response*:\n{answer}"]
-        if sql:
-            reply_lines.append(f"\n```sql\n{sql}\n```")
-        if suggestions:
-            reply_lines.append("\n*Suggested Follow-ups*:\n" + "\n".join([f"• {s}" for s in suggestions[:3]]))
-        return respond("\n".join(reply_lines))
+        return respond(format_advisory_reply(answer, sql, suggestions))
     except asyncio.TimeoutError:
         logger.info(f"Query '{clean_text}' exceeded 12s budget; continuing in background to post to {space_name} (thread={thread_name})")
 
@@ -1502,12 +1477,7 @@ async def google_chat_webhook(request: dict):
                 if "no specific response was generated" not in ans.lower():
                     save_session_history(thread_name, space_name, user_email, clean_text, ans)
 
-                lines = [f"💡 *Financial Advisory Response*:\n{ans}"]
-                if s:
-                    lines.append(f"\n```sql\n{s}\n```")
-                if suggs:
-                    lines.append("\n*Suggested Follow-ups*:\n" + "\n".join([f"• {x}" for x in suggs[:3]]))
-                post_to_chat_thread("\n".join(lines), thread_name, space_name)
+                post_to_chat_thread(format_advisory_reply(ans, s, suggs), thread_name, space_name)
             except Exception as ex:
                 logger.error(f"Background query post failed: {ex}")
                 post_to_chat_thread(f"⚠️ Query processing failed: {ex}", thread_name, space_name)
