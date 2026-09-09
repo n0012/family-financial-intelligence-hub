@@ -18,7 +18,7 @@ Every morning, Cloud Run pulls our transactions into BigQuery via the Monarch AP
 
 We can also drop a screenshot of a statement or a bonus projection table right into the chat, and it pulls the numbers into the conversation on the spot.
 
-Simple, runs on GCP's free tier for pennies a month, and most importantly: we actually use it.
+Simple, runs on GCP's free tier for pennies a month, and the hope is we'll use it often via gchat!
 
 Credit to @hammem for the monarchmoney Python library that made pulling the data possible, and an earlier concept thread (https://lnkd.in/g9jpP3Zq) that sparked the idea.
 
