@@ -1,27 +1,29 @@
-![Automated Family Financial Intelligence Hub](./static/workflow.png)
+![Family Financial Intelligence Hub](./static/workflow.png)
 
 ---
 
 ## Ready-to-Publish LinkedIn Post
 
-"What's our daily interest burn right now?" — now our family Google Chat answers before my morning coffee. ☕📉
+An experiment to make it easier for my wife and I to stay on top of our spend. ☕💳
 
-Weekend build: a serverless financial intelligence hub for my wife and I that bridges Monarch Money into Google BigQuery, with Gemini 3.8 Flash answering our questions right inside Google Chat.
-
-The fun part is the plumbing. 
-
-AI models are notoriously bad at doing math in their heads — ask one to calculate compounding interest on variable-rate debt or spot subscription price creep across 3 years of transactions, and it'll happily hallucinate a convincing number. 
-
-So Gemini doesn't do the math; BigQuery does. 
-
-Every morning, Cloud Run syncs transactions via Monarch's API into BigQuery. Pre-computed SQL views model the deterministic arithmetic: exact daily compounding interest ((balance * apr) / 365), subscription overlap, food efficiency ratios (dining vs groceries), and micro-transaction leakage under $35. When either of us asks a question in chat, Gemini queries those views directly via Automatic Function Calling.
-
-You can even paste a screenshot of a compensation outlook or an unlinked statement into the chat — Gemini Flash parses the visual layout and models the debt payoff impact on the spot. Proactive spend alerts hit our phones at 8 AM via Google Chat Cards v2, and the whole stack runs on GCP's free tier for ~$0.37/month.
-
-Standing on shoulders: credit to @hammem for the monarchmoney library that made programmatic access possible, and an earlier concept thread (chatgpt.com/share/69f7d4a5-a8e4-83ea-b6e2-78fb8eb79339) that sparked the idea to turn personal finance into an interactive copilot.
-
-Source code, SQL models + full writeup 👉 https://github.com/n0012/family-financial-intelligence-hub
+Like a lot of couples, we use Monarch to track our finances. But nobody actually wants to log into an app every day or sit down on Sunday night to comb through spreadsheets.
 
 Financial discipline isn't about staring at spreadsheets on Sunday night — it's about having deterministic answers the moment decisions happen.
 
-#GoogleCloud #BigQuery #GeminiAI #Monarch #MonarchMoney #PersonalFinance #Serverless #CloudRun #Fintech #Python #BuildingInPublic
+So I wanted to see if we could just ask questions in our family Google Chat and get real, immediate answers.
+
+The tricky part is that LLMs suck at math. If you ask an AI to calculate daily compounding interest on a variable-rate loan or tally up dining spend across three months, it'll happily make up a convincing number.
+
+So Gemini doesn't do the math. BigQuery does.
+
+Every morning, Cloud Run pulls our transactions into BigQuery. A few SQL views handle the actual numbers — daily interest cost on our debt, subscription price creep, dining vs groceries, and small convenience charges under $35. When either of us asks a question in Google Chat, Gemini just queries those views and tells us what they say.
+
+We can also drop a screenshot of a statement or a bonus projection table right into the chat, and it pulls the numbers into the conversation on the spot.
+
+Simple, runs on GCP's free tier for pennies a month, and most importantly: we actually use it.
+
+Standing on shoulders: credit to @hammem for the monarchmoney Python library that made pulling the data possible, and an earlier concept thread (chatgpt.com/share/69f7d4a5-a8e4-83ea-b6e2-78fb8eb79339) that sparked the idea.
+
+Code + SQL views 👉 https://github.com/n0012/family-financial-intelligence-hub
+
+#Monarch #MonarchMoney #GoogleCloud #BigQuery #GeminiAI #PersonalFinance #Homelab
