@@ -10,28 +10,28 @@ Provides:
    - `get_live_transaction`: Live transaction details & pending status.
    - `request_plaid_refresh`: Cooldown-guarded on-demand institution sync.
 """
+
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from datetime import date, datetime, timedelta, timezone
 import contextvars
 import hashlib
 import hmac
 import json
 import logging
-import os
 import re
 import secrets
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
-from google.cloud import bigquery
-from bq_service import get_bq_client
-from monarchmoney import MonarchMoney
 import pyotp
+from google.cloud import bigquery
+from monarchmoney import MonarchMoney
 
-from config import (
+from app.bq_service import get_bq_client
+from app.config import (
     BQ_DATASET_ID,
     BQ_PROJECT_ID,
     get_account_overrides,
@@ -43,22 +43,24 @@ from config import (
 
 logger = logging.getLogger("monarch-gemini.monarch_service")
 
-_monarch_client: Optional[MonarchMoney] = None
+_monarch_client: MonarchMoney | None = None
 _lock = asyncio.Lock()
 
 # In-memory cooldown tracking for upstream Plaid refreshes (institution_name_lower -> last_requested_utc)
-_PLAID_REFRESH_COOLDOWNS: Dict[str, datetime] = {}
+_PLAID_REFRESH_COOLDOWNS: dict[str, datetime] = {}
 PLAID_REFRESH_COOLDOWN_MINUTES = 60
 
 # Context variables for thread-safe request contextualization
 CURRENT_USER_EMAIL: contextvars.ContextVar[str] = contextvars.ContextVar("CURRENT_USER_EMAIL", default="unknown")
-CURRENT_PROPOSED_CARD: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("CURRENT_PROPOSED_CARD", default=None)
+CURRENT_PROPOSED_CARD: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "CURRENT_PROPOSED_CARD", default=None
+)
 
 # HMAC signing configuration for human-in-the-loop mutation confirmation
 HMAC_EXPIRATION_SECONDS = 900  # 15 minutes
 
 # Cached category registry
-_CATEGORY_CACHE: Dict[str, Any] = {
+_CATEGORY_CACHE: dict[str, Any] = {
     "by_id": {},
     "by_name": {},
     "last_fetched": 0.0,
@@ -79,7 +81,7 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
-async def get_monarch_client(mfa_code: Optional[str] = None) -> MonarchMoney:
+async def get_monarch_client(mfa_code: str | None = None) -> MonarchMoney:
     """
     Initializes and authenticates the MonarchMoney client.
     Reuses existing authenticated session where possible.
@@ -151,6 +153,7 @@ async def get_monarch_client(mfa_code: Optional[str] = None) -> MonarchMoney:
 # INGESTION & BIGQUERY SYNC
 # =====================================================================
 
+
 async def sync_all_accounts(
     client: MonarchMoney,
     bq: bigquery.Client,
@@ -209,20 +212,24 @@ async def sync_all_accounts(
         else:
             int_rate = None
 
-        account_rows.append({
-            "account_id": str(acc.get("id")),
-            "account_name": acc.get("displayName") or acc.get("id"),
-            "display_name": acc.get("displayName"),
-            "type_name": acc_type.get("name") if isinstance(acc_type, dict) else str(acc_type),
-            "subtype_name": acc_subtype.get("name") if isinstance(acc_subtype, dict) else str(acc_subtype),
-            "current_balance": float(acc.get("currentBalance") or 0.0),
-            "available_balance": float(acc.get("availableBalance") or 0.0) if acc.get("availableBalance") is not None else None,
-            "credit_limit": float(acc.get("creditLimit") or 0.0) if acc.get("creditLimit") is not None else None,
-            "interest_rate": int_rate,
-            "institution_name": inst_name,
-            "is_asset": acc.get("isAsset", False),
-            "updated_at": now_ts,
-        })
+        account_rows.append(
+            {
+                "account_id": str(acc.get("id")),
+                "account_name": acc.get("displayName") or acc.get("id"),
+                "display_name": acc.get("displayName"),
+                "type_name": acc_type.get("name") if isinstance(acc_type, dict) else str(acc_type),
+                "subtype_name": acc_subtype.get("name") if isinstance(acc_subtype, dict) else str(acc_subtype),
+                "current_balance": float(acc.get("currentBalance") or 0.0),
+                "available_balance": float(acc.get("availableBalance") or 0.0)
+                if acc.get("availableBalance") is not None
+                else None,
+                "credit_limit": float(acc.get("creditLimit") or 0.0) if acc.get("creditLimit") is not None else None,
+                "interest_rate": int_rate,
+                "institution_name": inst_name,
+                "is_asset": acc.get("isAsset", False),
+                "updated_at": now_ts,
+            }
+        )
 
     if not account_rows:
         return 0
@@ -262,14 +269,16 @@ async def sync_all_categories(
 
     for cat in cats_list:
         group = cat.get("group") or {}
-        cat_rows.append({
-            "category_id": str(cat.get("id")),
-            "category_name": cat.get("name"),
-            "group_name": group.get("name") if isinstance(group, dict) else str(group),
-            "is_income": cat.get("isIncome", False),
-            "monthly_budget": float(cat.get("budgetAmount") or 0.0) if cat.get("budgetAmount") else None,
-            "updated_at": now_ts,
-        })
+        cat_rows.append(
+            {
+                "category_id": str(cat.get("id")),
+                "category_name": cat.get("name"),
+                "group_name": group.get("name") if isinstance(group, dict) else str(group),
+                "is_income": cat.get("isIncome", False),
+                "monthly_budget": float(cat.get("budgetAmount") or 0.0) if cat.get("budgetAmount") else None,
+                "updated_at": now_ts,
+            }
+        )
 
     if not cat_rows:
         return 0
@@ -294,7 +303,7 @@ async def sync_all_categories(
 async def sync_transactions(
     client: MonarchMoney,
     bq: bigquery.Client,
-    days_back: Optional[int],
+    days_back: int | None,
     now_ts: str,
 ) -> int:
     """Paginates transactions from Monarch and merges into raw_transactions via staging."""
@@ -312,7 +321,9 @@ async def sync_transactions(
     batch_limit = 1000
 
     while True:
-        logger.info(f"Syncing transactions from Monarch: start_date={start_date}, end_date={end_date}, offset={offset}, limit={batch_limit}")
+        logger.info(
+            f"Syncing transactions from Monarch: start_date={start_date}, end_date={end_date}, offset={offset}, limit={batch_limit}"
+        )
         raw_txn_data = await client.get_transactions(
             start_date=start_date,
             end_date=end_date,
@@ -351,20 +362,24 @@ async def sync_transactions(
 
         cat = txn.get("category") or {}
         merchant = txn.get("merchant") or {}
-        txn_rows.append({
-            "transaction_id": str(txn.get("id")),
-            "account_id": str(acc.get("id") or txn.get("accountId") or ""),
-            "transaction_date": txn.get("date"),
-            "amount": float(txn.get("amount") or 0.0),
-            "merchant_name": merchant.get("name") if isinstance(merchant, dict) else (txn.get("plaidName") or txn.get("name")),
-            "clean_merchant_name": merchant.get("name") if isinstance(merchant, dict) else None,
-            "category_id": str(cat.get("id") or ""),
-            "category_name": cat.get("name") if isinstance(cat, dict) else str(cat),
-            "notes": txn.get("notes"),
-            "is_recurring": txn.get("isRecurring", False),
-            "pending": txn.get("pending", False),
-            "updated_at": now_ts,
-        })
+        txn_rows.append(
+            {
+                "transaction_id": str(txn.get("id")),
+                "account_id": str(acc.get("id") or txn.get("accountId") or ""),
+                "transaction_date": txn.get("date"),
+                "amount": float(txn.get("amount") or 0.0),
+                "merchant_name": merchant.get("name")
+                if isinstance(merchant, dict)
+                else (txn.get("plaidName") or txn.get("name")),
+                "clean_merchant_name": merchant.get("name") if isinstance(merchant, dict) else None,
+                "category_id": str(cat.get("id") or ""),
+                "category_name": cat.get("name") if isinstance(cat, dict) else str(cat),
+                "notes": txn.get("notes"),
+                "is_recurring": txn.get("isRecurring", False),
+                "pending": txn.get("pending", False),
+                "updated_at": now_ts,
+            }
+        )
 
     if not txn_rows:
         return 0
@@ -417,11 +432,11 @@ async def sync_transactions(
     return len(txn_rows)
 
 
-async def execute_sync(days_back: Optional[int] = 30, mfa_code: Optional[str] = None) -> dict:
+async def execute_sync(days_back: int | None = 30, mfa_code: str | None = None) -> dict:
     """Orchestrates full sync of accounts, categories, and transactions into BigQuery."""
     client = await get_monarch_client(mfa_code=mfa_code)
     bq = get_bq_client(BQ_PROJECT_ID)
-    now_ts = datetime.now(timezone.utc).isoformat()
+    now_ts = datetime.now(UTC).isoformat()
 
     synced_counts = {"accounts": 0, "categories": 0, "transactions": 0}
     try:
@@ -443,6 +458,7 @@ async def execute_sync(days_back: Optional[int] = 30, mfa_code: Optional[str] = 
 # LIVE CONFIRMATION READ TOOLS (Safe for Gemini AFC / Agent / CLI)
 # =====================================================================
 
+
 async def get_live_account_balance_async(account_identifier: str) -> dict:
     """
     Fetches the live balance, available credit, and sync recency directly from Monarch Money.
@@ -462,16 +478,22 @@ async def get_live_account_balance_async(account_identifier: str) -> dict:
         inst_name = (inst.get("name") if isinstance(inst, dict) else str(inst or "")).lower()
 
         if target == acc_id or target in disp_name or target in inst_name:
-            matches.append({
-                "account_id": acc.get("id"),
-                "display_name": acc.get("displayName"),
-                "institution_name": inst.get("name") if isinstance(inst, dict) else str(inst or ""),
-                "current_balance": float(acc.get("currentBalance") or 0.0),
-                "available_balance": float(acc.get("availableBalance") or 0.0) if acc.get("availableBalance") is not None else None,
-                "credit_limit": float(acc.get("creditLimit") or 0.0) if acc.get("creditLimit") is not None else None,
-                "is_asset": acc.get("isAsset", False),
-                "updated_at": acc.get("updatedAt"),
-            })
+            matches.append(
+                {
+                    "account_id": acc.get("id"),
+                    "display_name": acc.get("displayName"),
+                    "institution_name": inst.get("name") if isinstance(inst, dict) else str(inst or ""),
+                    "current_balance": float(acc.get("currentBalance") or 0.0),
+                    "available_balance": float(acc.get("availableBalance") or 0.0)
+                    if acc.get("availableBalance") is not None
+                    else None,
+                    "credit_limit": float(acc.get("creditLimit") or 0.0)
+                    if acc.get("creditLimit") is not None
+                    else None,
+                    "is_asset": acc.get("isAsset", False),
+                    "updated_at": acc.get("updatedAt"),
+                }
+            )
 
     if not matches:
         return {
@@ -516,7 +538,9 @@ async def get_live_transaction_async(transaction_id: str) -> dict:
             "transaction_id": txn.get("id"),
             "date": txn.get("date"),
             "amount": float(txn.get("amount") or 0.0),
-            "merchant_name": merchant.get("name") if isinstance(merchant, dict) else (txn.get("plaidName") or txn.get("name")),
+            "merchant_name": merchant.get("name")
+            if isinstance(merchant, dict)
+            else (txn.get("plaidName") or txn.get("name")),
             "category_name": cat.get("name") if isinstance(cat, dict) else str(cat),
             "account_name": acc.get("displayName") if isinstance(acc, dict) else str(acc),
             "pending": txn.get("pending", False),
@@ -546,7 +570,7 @@ async def request_plaid_refresh_async(institution_name: str) -> dict:
     Protected by an in-memory 60-minute cooldown rate limiter per institution.
     """
     inst_key = institution_name.strip().lower()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Cooldown check
     last_req = _PLAID_REFRESH_COOLDOWNS.get(inst_key)
@@ -619,6 +643,7 @@ def request_plaid_refresh(institution_name: str) -> str:
 # PR 4: Carefully Guarded Mutations & Interactive Recategorization
 # -------------------------------------------------------------------------
 
+
 def get_mutation_hmac_secret() -> str:
     """Retrieves or derives the secret key used to sign mutation confirmation cards."""
     return (
@@ -637,7 +662,7 @@ def generate_mutation_signature(
 ) -> str:
     """Generates a SHA-256 HMAC signature tying transaction, category, user, and timestamp."""
     key = get_mutation_hmac_secret().encode("utf-8")
-    payload = f"{transaction_id}:{category_id}:{user_email.strip().lower()}:{timestamp}".encode("utf-8")
+    payload = f"{transaction_id}:{category_id}:{user_email.strip().lower()}:{timestamp}".encode()
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
@@ -648,21 +673,24 @@ def verify_mutation_signature(
     timestamp: int,
     signature: str,
     max_age_seconds: int = HMAC_EXPIRATION_SECONDS,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """Validates signature authenticity and timestamp freshness."""
     if not signature:
         return False, "Missing cryptographic signature."
-    now = int(datetime.now(timezone.utc).timestamp())
+    now = int(datetime.now(UTC).timestamp())
     age = abs(now - timestamp)
     if age > max_age_seconds:
-        return False, f"Confirmation expired (card age: {age}s > limit: {max_age_seconds}s). Please request a fresh confirmation."
+        return (
+            False,
+            f"Confirmation expired (card age: {age}s > limit: {max_age_seconds}s). Please request a fresh confirmation.",
+        )
     expected = generate_mutation_signature(transaction_id, category_id, user_email, timestamp)
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch. Action parameters may have been altered."
     return True, "Valid"
 
 
-async def get_cached_categories(client: Optional[MonarchMoney] = None, force_refresh: bool = False) -> Dict[str, Any]:
+async def get_cached_categories(client: MonarchMoney | None = None, force_refresh: bool = False) -> dict[str, Any]:
     """Fetches and caches categories indexed by ID and normalized name."""
     global _CATEGORY_CACHE
     now = time.time()
@@ -716,7 +744,7 @@ async def get_cached_categories(client: Optional[MonarchMoney] = None, force_ref
     return _CATEGORY_CACHE
 
 
-async def resolve_category(category_query: str, client: Optional[MonarchMoney] = None) -> Optional[Dict[str, Any]]:
+async def resolve_category(category_query: str, client: MonarchMoney | None = None) -> dict[str, Any] | None:
     """Resolves category name or ID using exact, normalized, and fuzzy matching."""
     cats = await get_cached_categories(client=client)
     by_id = cats.get("by_id", {})
@@ -841,8 +869,8 @@ def build_recategorization_card(
 def build_recategorization_success_card(
     transaction_id: str,
     category_name: str,
-    merchant_name: Optional[str] = None,
-    amount: Optional[float] = None,
+    merchant_name: str | None = None,
+    amount: float | None = None,
 ) -> dict:
     """Builds a confirmation Card v2 acknowledging successful recategorization in Monarch."""
     details = f"Transaction <code>#{transaction_id}</code>"
@@ -912,7 +940,7 @@ async def propose_transaction_recategorization_async(
     cat_match = await resolve_category(new_category, client=client)
     if not cat_match:
         cats = await get_cached_categories(client=client)
-        sample_cats = sorted(list(set(c["name"] for c in cats.get("by_id", {}).values())))[:10]
+        sample_cats = sorted({c["name"] for c in cats.get("by_id", {}).values()})[:10]
         return {
             "status": "error",
             "message": f"Category '{new_category}' is not recognized in Monarch Money. Available categories include: {', '.join(sample_cats)}.",
@@ -930,7 +958,7 @@ async def propose_transaction_recategorization_async(
 
     # 5. Sign proposal with HMAC
     user_email = CURRENT_USER_EMAIL.get()
-    timestamp = int(datetime.now(timezone.utc).timestamp())
+    timestamp = int(datetime.now(UTC).timestamp())
     sig = generate_mutation_signature(cleaned_id, new_cat_id, user_email, timestamp)
 
     # 6. Build Card v2
@@ -981,7 +1009,7 @@ def propose_transaction_recategorization(transaction_id: str, new_category: str)
 async def execute_guarded_recategorization(
     transaction_id: str,
     category_id: str,
-    category_name: Optional[str] = None,
+    category_name: str | None = None,
 ) -> dict:
     """
     Executes transaction recategorization in Monarch Money and updates BigQuery raw_transactions.
@@ -993,7 +1021,9 @@ async def execute_guarded_recategorization(
             transaction_id=str(transaction_id),
             category_id=str(category_id),
         )
-        logger.info(f"Monarch Money transaction #{transaction_id} recategorized to category #{category_id}: {update_res}")
+        logger.info(
+            f"Monarch Money transaction #{transaction_id} recategorized to category #{category_id}: {update_res}"
+        )
 
         # Synchronize BigQuery raw_transactions in background
         try:
@@ -1032,7 +1062,7 @@ async def execute_guarded_recategorization(
         }
 
 
-def extract_card_action_parameters(payload: dict) -> Tuple[Optional[str], Dict[str, str]]:
+def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str, str]]:
     """
     Extracts action name and string key-value parameters from Google Chat or
     Google Workspace Add-on CARD_CLICKED interaction payloads.

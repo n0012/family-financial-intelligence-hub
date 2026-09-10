@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-import memory_service
-from monarch_service import CURRENT_USER_EMAIL
+from app import memory_service
+from app.monarch_service import CURRENT_USER_EMAIL
 
 
 class TestMemoryService(unittest.TestCase):
@@ -26,7 +26,7 @@ class TestMemoryService(unittest.TestCase):
 
     def test_retrieve_user_memories_success(self):
         mock_mem1 = MagicMock()
-        mock_mem1.memory.fact = "Nick's financial preferences: Capped dining spend at $400/month."
+        mock_mem1.memory.fact = "User's financial preferences: Capped dining spend at $400/month."
         mock_mem2 = MagicMock()
         mock_mem2.memory.fact = "Target HELOC payoff date: December 2026."
 
@@ -106,7 +106,7 @@ class TestMemoryService(unittest.TestCase):
         )
         self.assertFalse(success)
 
-    @patch("memory_service.save_user_preference")
+    @patch("app.memory_service.save_user_preference")
     def test_store_user_preference_tool_success(self, mock_save):
         mock_save.return_value = True
         CURRENT_USER_EMAIL.set("user@example.com")
@@ -116,7 +116,7 @@ class TestMemoryService(unittest.TestCase):
         self.assertIn("user@example.com", reply)
         self.assertIn("Prioritize HELOC debt payoff", reply)
 
-    @patch("memory_service.save_user_preference")
+    @patch("app.memory_service.save_user_preference")
     def test_store_user_preference_tool_failure(self, mock_save):
         mock_save.return_value = False
         CURRENT_USER_EMAIL.set("user@example.com")

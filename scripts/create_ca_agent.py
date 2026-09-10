@@ -10,9 +10,8 @@ import json
 import os
 import subprocess
 import sys
-import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 PROJECT_ID = os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
 DATASET_ID = os.getenv("BQ_DATASET_ID", "family_finance")
@@ -28,9 +27,7 @@ CA_PARENT = f"projects/{PROJECT_ID}/locations/global"
 
 def get_access_token():
     try:
-        token = subprocess.check_output(
-            ["gcloud", "auth", "print-access-token"], text=True
-        ).strip()
+        token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
         return token
     except Exception as e:
         print(f"Error obtaining gcloud token: {e}")
@@ -110,8 +107,7 @@ def create_agent():
                 "datasource_references": {
                     "bq": {
                         "table_references": [
-                            {"projectId": PROJECT_ID, "datasetId": DATASET_ID, "tableId": t}
-                            for t in TABLES
+                            {"projectId": PROJECT_ID, "datasetId": DATASET_ID, "tableId": t} for t in TABLES
                         ]
                     }
                 },

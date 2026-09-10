@@ -5,6 +5,7 @@ Batch entrypoint for Cloud Run Jobs.
 Runs the scheduled/manual workloads (Monarch -> BigQuery sync, spend alert scan)
 without starting an HTTP server, so the workload has no network ingress at all.
 """
+
 import argparse
 import asyncio
 import json
@@ -19,13 +20,13 @@ logger = logging.getLogger("monarch-gemini.job")
 
 
 async def run_sync(days_back: int | None) -> dict:
-    from monarch_service import execute_sync
+    from app.monarch_service import execute_sync
 
     return await execute_sync(days_back=days_back)
 
 
 async def run_alerts() -> dict:
-    from alerts import execute_alert_scan
+    from app.alerts import execute_alert_scan
 
     return await execute_alert_scan()
 

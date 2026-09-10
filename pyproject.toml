@@ -1,0 +1,27 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long (SQL queries and long prompts)
+    "B008",  # do not perform function calls in argument defaults (FastAPI Depends)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "scripts"]

@@ -151,7 +151,7 @@ gcloud run jobs deploy monarch-sync-job \
   --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID" \
   --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest \
   --command "python" \
-  --args "job.py,sync,--days-back,30" \
+  --args "-m,app.job,sync,--days-back,30" \
   --max-retries 1 \
   --task-timeout 600s \
   --project="$PROJECT_ID"
@@ -164,7 +164,7 @@ gcloud run jobs deploy monarch-alerts-job \
   --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID" \
   --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest \
   --command "python" \
-  --args "job.py,alerts" \
+  --args "-m,app.job,alerts" \
   --max-retries 1 \
   --task-timeout 300s \
   --project="$PROJECT_ID"

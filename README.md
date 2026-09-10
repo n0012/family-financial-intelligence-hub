@@ -1,4 +1,4 @@
-# Family Financial Intelligence Hub
+# FinSage: Family Financial Intelligence Hub
 **Automated Personal Finance & Spend Optimization via Monarch Money, Google BigQuery & Gemini 3.8 Flash**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
@@ -13,7 +13,7 @@
   <img src="static/workflow.png" alt="Automated Family Financial AI Workflow" width="100%">
 </p>
 
-An enterprise-grade, serverless family financial advisor and spend optimization hub deployed to **Google Cloud Platform**. It bridges **Monarch Money**'s GraphQL API directly into **Google BigQuery** data warehouse models, powered by a bidirectional **Google Chat Advisor (Sage)** running **Gemini 3.8 Flash** with **Automatic Function Calling (AFC)** and **Multimodal Vision**.
+An enterprise-grade, serverless family financial advisor and spend optimization hub deployed to **Google Cloud Platform**. It bridges **Monarch Money**'s GraphQL API directly into **Google BigQuery** data warehouse models, powered by a bidirectional **Google Chat Advisor (FinSage)** running **Gemini 3.8 Flash** with **Automatic Function Calling (AFC)** and **Multimodal Vision**.
 
 ---
 
@@ -111,7 +111,7 @@ The data warehouse decouples storage from analytical modeling, allowing queries 
 
 ---
 
-## Interactive Google Chat Advisor (Sage)
+## Interactive Google Chat Advisor (FinSage)
 
 The microservice functions as a registered **Google Chat Bot** supporting both 1:1 direct messages and collaborative family spaces:
 
@@ -129,14 +129,14 @@ Paste images directly into Google Chat:
 * **External Brokerage / Loan Statements**: Paste a PDF or PNG statement from an unlinked institution. Gemini extracts balances, interest rates, and minimum payments to incorporate into your debt snow-ball calculations.
 
 ### 3. Persistent User Preferences & Long-Term Memory
-Powered by Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank**, Sage remembers your family's financial targets, payoff milestones, and budget ceilings across conversation threads. It automatically consolidates preferences and resolves conflicting goals without database schema bloat.
+Powered by Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank**, FinSage remembers your family's financial targets, payoff milestones, and budget ceilings across conversation threads. It automatically consolidates preferences and resolves conflicting goals without database schema bloat.
 
 ### 4. Interactive Transaction Recategorization (Card v2)
-When asking Sage to recategorize a transaction, it verifies the transaction state, checks category taxonomies, and generates an interactive **Card v2** widget with "Confirm Update" and "Cancel" buttons secured by 15-minute expiring HMAC-SHA256 cryptographic signatures.
+When asking FinSage to recategorize a transaction, it verifies the transaction state, checks category taxonomies, and generates an interactive **Card v2** widget with "Confirm Update" and "Cancel" buttons secured by 15-minute expiring HMAC-SHA256 cryptographic signatures.
 
 ### 5. Chat Commands & Shortcuts
 * `/sync` — Pulls latest transactions from Monarch Money into BigQuery immediately.
-* `/alerts` — Triggers an on-demand scan across all BigQuery optimization views and posts the alert summary.
+* `/alerts` — Triggers an on-demand scan across all BigQuery optimization views and posts the alert summary with snooze actions.
 * `/help` — Displays quick reference guides and sample prompts.
 
 ---
@@ -191,14 +191,14 @@ cp config.example.yaml config.yaml
 ```yaml
 # config.yaml (gitignored - safe for private local use)
 rates:
-  default_heloc_apr: 0.0675          # Default APR for HELOCs (6.75%)
-  default_mortgage_apr: 0.0350       # Default APR for Mortgages (3.50%)
+  default_heloc_apr: 0.0700          # Default APR for HELOCs (7.00%)
+  default_mortgage_apr: 0.0400       # Default APR for Mortgages (4.00%)
   default_debt_apr: 0.0750           # Baseline fallback for loans/debt
 
 account_overrides:
   "123456789012345678":
-    name: "Primary Home Equity Line of Credit"
-    interest_rate: 0.0675            # Explicit rate for a specific account
+    name: "Sample Variable Rate Credit Line"
+    interest_rate: 0.0700            # Explicit rate for a specific account
 
 decommissioned_account_ids:
   - "987654321098765432"             # Account IDs to omit from sync
