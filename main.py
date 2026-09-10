@@ -23,11 +23,18 @@ from bq_service import (
     save_session_history,
 )
 from monarch_service import (
+    CURRENT_PROPOSED_CARD,
+    CURRENT_USER_EMAIL,
+    build_recategorization_success_card,
+    execute_guarded_recategorization,
     execute_sync,
+    extract_card_action_parameters,
     get_live_account_balance,
     get_live_transaction,
     get_monarch_client,
+    propose_transaction_recategorization,
     request_plaid_refresh,
+    verify_mutation_signature,
 )
 import requests
 import yaml
@@ -282,13 +289,16 @@ def ask_gemini_brain(
             "8. Keep responses structured, concise, and formatted in clean markdown with bold metrics and bullet points.\n"
             "9. Format all currency as $X,XXX.XX.\n"
             "10. Multimodal Understanding: When the user provides images, screenshots, paystubs, statements, or compensation/outlook plans, thoroughly examine the visual data, parse every figure and projection, and integrate them directly into your financial analysis and debt paydown calculations.\n"
-            "11. Live Monarch Confirmation & Plaid Tools: BigQuery is your primary historical analytical engine. If the user asks for up-to-the-minute balance checks (e.g. 'what is my balance right now?', 'did that payment post?'), call `get_live_account_balance(account_identifier)` to confirm live figures directly from Monarch. To inspect a specific transaction's pending status, call `get_live_transaction(transaction_id)`. If an institution's data appears stale, call `request_plaid_refresh(institution_name)`."
+            "11. Live Monarch Confirmation & Plaid Tools: BigQuery is your primary historical analytical engine. If the user asks for up-to-the-minute balance checks (e.g. 'what is my balance right now?', 'did that payment post?'), call `get_live_account_balance(account_identifier)` to confirm live figures directly from Monarch. To inspect a specific transaction's pending status, call `get_live_transaction(transaction_id)`. If an institution's data appears stale, call `request_plaid_refresh(institution_name)`.\n"
+            "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions."
         )
 
         try:
             thinking_config = types.ThinkingConfig(thinking_level="MEDIUM")
         except Exception:
             thinking_config = types.ThinkingConfig(thinking_budget=2048)
+
+        CURRENT_PROPOSED_CARD.set(None)
 
         chat = client.chats.create(
             model="gemini-3.8-flash",
@@ -302,6 +312,7 @@ def ask_gemini_brain(
                     get_live_account_balance,
                     get_live_transaction,
                     request_plaid_refresh,
+                    propose_transaction_recategorization,
                 ],
             ),
         )
@@ -340,11 +351,13 @@ def ask_gemini_brain(
             logger.warning(f"Could not extract executed SQL from chat history: {e}")
 
         sql_summary = "\n\n".join(executed_sqls) if executed_sqls else None
+        proposed_card = CURRENT_PROPOSED_CARD.get()
 
         return {
             "answer": answer_text,
             "sql": sql_summary,
             "suggestions": [],
+            "card": proposed_card,
         }
     except Exception as e:
         logger.error(f"Gemini 3.8 Flash query failed: {e}; falling back to Conversational Analytics API.")
@@ -362,11 +375,18 @@ def format_advisory_reply(answer: str, sql: Optional[str] = None, suggestions: O
     return "\n".join(reply_lines)
 
 
-def format_chat_response(text: str, thread_name: Optional[str] = None, space_name: Optional[str] = None, is_addon: bool = True) -> dict:
+def format_chat_response(
+    text: str,
+    thread_name: Optional[str] = None,
+    space_name: Optional[str] = None,
+    is_addon: bool = True,
+    cards_v2: Optional[list] = None,
+) -> dict:
     """
     Returns a clean, robust message response that strictly conforms to Google Workspace Add-ons
     (google.apps.card.v1.DataActions) and Google Chat API.
     Crucially anchors to thread_name and space_name so replies stay in the exact conversational thread.
+    Optionally attaches cardsV2 for interactive mutations or rich widgets.
     """
     formatted_text = text.replace("**", "*")
     msg_dict: dict = {"text": formatted_text}
@@ -374,6 +394,8 @@ def format_chat_response(text: str, thread_name: Optional[str] = None, space_nam
         msg_dict["thread"] = {"name": thread_name}
     if space_name:
         msg_dict["space"] = {"name": space_name}
+    if cards_v2:
+        msg_dict["cardsV2"] = cards_v2
 
     if is_addon:
         # Strictly google.apps.card.v1.DataActions
@@ -391,7 +413,12 @@ def format_chat_response(text: str, thread_name: Optional[str] = None, space_nam
         return msg_dict
 
 
-def post_to_chat_thread(text: str, thread_name: Optional[str] = None, space_name: Optional[str] = None) -> bool:
+def post_to_chat_thread(
+    text: str,
+    thread_name: Optional[str] = None,
+    space_name: Optional[str] = None,
+    cards_v2: Optional[list] = None,
+) -> bool:
     """
     Posts a follow-up message into a specific Google Chat thread or space.
     Attempts Google Chat REST API via Application Default Credentials (chat.bot scope),
@@ -412,9 +439,11 @@ def post_to_chat_thread(text: str, thread_name: Optional[str] = None, space_name
                 "Content-Type": "application/json",
             }
             url = f"https://chat.googleapis.com/v1/{space_name}/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
-            payload = {"text": formatted_text}
+            payload: dict = {"text": formatted_text}
             if thread_name:
                 payload["thread"] = {"name": thread_name}
+            if cards_v2:
+                payload["cardsV2"] = cards_v2
             resp = requests.post(url, headers=headers, json=payload, timeout=10)
             logger.info(f"Google Chat API async reply to {space_name} (thread={thread_name}): status={resp.status_code}")
             if resp.status_code == 200:
@@ -436,6 +465,8 @@ def post_to_chat_thread(text: str, thread_name: Optional[str] = None, space_name
     payload = {"text": formatted_text}
     if thread_name:
         payload["thread"] = {"name": thread_name}
+    if cards_v2:
+        payload["cardsV2"] = cards_v2
 
     try:
         resp = requests.post(url, json=payload, timeout=10)
@@ -601,6 +632,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     )
     event_type = (
         raw_payload.get("type")
+        or ("CARD_CLICKED" if raw_payload.get("action") or (raw_payload.get("commonEventObject", {}).get("invokedFunction")) else None)
         or ("SLASH_COMMAND" if app_command_payload else None)
         or ("ADDED_TO_SPACE" if "addedToSpacePayload" in chat_obj else None)
         or ("MESSAGE" if message else "UNKNOWN")
@@ -615,6 +647,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     )
     user_email = user_info.get("email") or user_info.get("displayName") or "unknown"
     sender_name = user_info.get("displayName", "there")
+    CURRENT_USER_EMAIL.set(user_email)
 
     logger.info(f"Parsed Chat Event: type={event_type}, user={user_email}, text={message.get('text')}")
 
@@ -650,11 +683,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
     logger.info(f"Interaction Session Anchors: space={space_name}, thread={thread_name}")
 
-    def respond(text: str) -> dict:
+    def respond(text: str, cards_v2: Optional[list] = None) -> dict:
         if is_pubsub:
-            post_to_chat_thread(text, thread_name=thread_name, space_name=space_name)
+            post_to_chat_thread(text, thread_name=thread_name, space_name=space_name, cards_v2=cards_v2)
             return {"status": "ok"}
-        resp = format_chat_response(text, thread_name=thread_name, space_name=space_name, is_addon=is_addon)
+        resp = format_chat_response(text, thread_name=thread_name, space_name=space_name, is_addon=is_addon, cards_v2=cards_v2)
         logger.info(f"Outgoing Chat Response: {json.dumps(resp)}")
         return resp
 
@@ -665,6 +698,54 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         if allowed_users and user_email.lower() not in allowed_users:
             logger.warning(f"Unauthorized chat access attempt from '{user_email}'")
             return respond(f"🔒 Access Denied: User '{user_email}' is not authorized to query family finances.")
+
+    # 0. Interactive Card Action Click (Guarded recategorization confirmation)
+    if event_type == "CARD_CLICKED":
+        action_name, action_params = extract_card_action_parameters(raw_payload)
+        logger.info(f"Card Action Clicked: action={action_name}, params={action_params}")
+
+        if action_name == "confirm_recategorize":
+            txn_id = action_params.get("transaction_id", "")
+            cat_id = action_params.get("category_id", "")
+            cat_name = action_params.get("category_name", "Updated Category")
+            ts_str = action_params.get("timestamp", "0")
+            target_user = action_params.get("user_email", "unknown")
+            sig = action_params.get("signature", "")
+
+            try:
+                ts = int(ts_str)
+            except ValueError:
+                return respond("⛔ Invalid timestamp in confirmation card.")
+
+            # Validate cryptographic signature & freshness
+            is_valid, reason = verify_mutation_signature(txn_id, cat_id, target_user, ts, sig)
+            if not is_valid:
+                logger.warning(f"Mutation signature rejected: {reason} (txn={txn_id}, user={user_email})")
+                return respond(f"⛔ Confirmation rejected: {reason}")
+
+            # Execute guarded mutation
+            mutation_result = await execute_guarded_recategorization(
+                transaction_id=txn_id,
+                category_id=cat_id,
+                category_name=cat_name,
+            )
+
+            if mutation_result.get("success"):
+                success_card = build_recategorization_success_card(
+                    transaction_id=txn_id,
+                    category_name=cat_name,
+                )
+                success_msg = f"✅ Transaction #{txn_id} was successfully reclassified to *{cat_name}* in Monarch Money."
+                return respond(success_msg, cards_v2=[success_card])
+            else:
+                err = mutation_result.get("error", "Unknown error")
+                return respond(f"⚠️ Failed to update transaction #{txn_id}: {err}")
+
+        elif action_name == "cancel_recategorize":
+            txn_id = action_params.get("transaction_id", "")
+            return respond(f"🚫 Recategorization for transaction #{txn_id} was cancelled. No changes were made.")
+
+        return respond("ℹ️ Action received.")
 
     # 1. Bot added to space or 1:1 DM
     if event_type == "ADDED_TO_SPACE":
@@ -771,6 +852,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     session_history = get_session_history(thread_name, space_name)
     logger.info(f"Querying Gemini Brain with {len(session_history)} prior turns and {len(downloaded_images)} images (thread={thread_name}, space={space_name})")
 
+    CURRENT_USER_EMAIL.set(user_email)
+    CURRENT_PROPOSED_CARD.set(None)
+
     loop = asyncio.get_event_loop()
     analysis_future = loop.run_in_executor(None, ask_gemini_brain, clean_text, session_history, downloaded_images)
 
@@ -779,11 +863,13 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         answer = result.get("answer", "No response generated.")
         sql = result.get("sql")
         suggestions = result.get("suggestions", [])
+        proposed_card = result.get("card")
+        cards_list = [proposed_card] if proposed_card else None
 
         if "no specific response was generated" not in answer.lower():
             save_session_history(thread_name, space_name, user_email, clean_text, answer)
 
-        return respond(format_advisory_reply(answer, sql, suggestions))
+        return respond(format_advisory_reply(answer, sql, suggestions), cards_v2=cards_list)
     except asyncio.TimeoutError:
         logger.info(f"Query '{clean_text}' exceeded 12s budget; continuing in background to post to {space_name} (thread={thread_name})")
 
@@ -793,11 +879,13 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 ans = res.get("answer", "No response generated.")
                 s = res.get("sql")
                 suggs = res.get("suggestions", [])
+                p_card = res.get("card")
+                p_cards_list = [p_card] if p_card else None
 
                 if "no specific response was generated" not in ans.lower():
                     save_session_history(thread_name, space_name, user_email, clean_text, ans)
 
-                post_to_chat_thread(format_advisory_reply(ans, s, suggs), thread_name, space_name)
+                post_to_chat_thread(format_advisory_reply(ans, s, suggs), thread_name, space_name, cards_v2=p_cards_list)
             except Exception as ex:
                 logger.error(f"Background query post failed: {ex}")
                 post_to_chat_thread(f"⚠️ Query processing failed: {ex}", thread_name, space_name)
