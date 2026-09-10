@@ -1,4 +1,4 @@
-# Project Master Plan: Monarch Money Financial Copilot & Spend Optimizer
+# Project Master Plan: Sage — Personal & Family Financial Intelligence Hub
 
 A comprehensive personal and family financial intelligence system connecting **Monarch Money** to **Google BigQuery** and **Google Gemini Conversational Analytics** (`geminidataanalytics.googleapis.com`).
 
@@ -111,11 +111,13 @@ To ensure this environment is repeatable, production-grade, and **effortless to 
 │         INFRASTRUCTURE AS CODE (Terraform)                 │
 │         Day-0 Foundation & Cloud Resources                 │
 │                                                            │
-│ • Enabled GCP APIs (Run, BQ, Secrets, Cloud Build, etc.)   │
+│ • Enabled GCP APIs (Run, BQ, Secrets, PubSub, etc.)        │
 │ • Service Accounts (Cloud Run SA, Scheduler SA)            │
 │ • Artifact Registry Docker Repository (`monarch-repo`)     │
 │ • BigQuery Dataset (`family_finance`)                      │
-│ • Secret Manager Placeholders & Generated Keys             │
+│ • Cloud Pub/Sub Topic & Subscription (Zero-Ingress Chat)   │
+│ • Cloud Scheduler Jobs (Authenticated via GCP OAuth IAM)   │
+│ • Secret Manager Placeholders & High-Entropy Generated Keys│
 │ • IAM Roles & Cloud Build Deployment Permissions           │
 └────────────────────────────┬───────────────────────────────┘
                              │
@@ -126,9 +128,9 @@ To ensure this environment is repeatable, production-grade, and **effortless to 
 │                                                            │
 │ 1. Builds Docker container with commit SHA & latest        │
 │ 2. Pushes container to Artifact Registry                   │
-│ 3. Deploys new revision to Cloud Run                       │
-│ 4. Applies schema.sql to BigQuery (syncs analytical views) │
-│ 5. Executes smoke test health check                        │
+│ 3. Deploys locked Cloud Run Service (internal ingress only)│
+│ 4. Deploys ephemeral Cloud Run Jobs (sync & alerts batch)  │
+│ 5. Applies schema.sql to BigQuery (syncs analytical views) │
 └────────────────────────────────────────────────────────────┘
 ```
 

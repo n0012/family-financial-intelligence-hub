@@ -196,3 +196,90 @@ resource "google_service_account" "scheduler_sa" {
   display_name = "Cloud Scheduler SA for Daily Monarch BigQuery Sync"
   depends_on   = [google_project_service.enabled_apis]
 }
+
+resource "google_project_iam_member" "scheduler_run_developer" {
+  project    = var.project_id
+  role       = "roles/run.developer"
+  member     = "serviceAccount:${google_service_account.scheduler_sa.email}"
+  depends_on = [google_project_service.enabled_apis]
+}
+
+# 9. Cloud Pub/Sub for Zero-Ingress Google Chat Integration
+resource "google_pubsub_topic" "chat_incoming" {
+  name       = "monarch-chat-incoming"
+  project    = var.project_id
+  depends_on = [google_project_service.enabled_apis]
+}
+
+resource "google_pubsub_topic_iam_member" "chat_api_publisher" {
+  topic   = google_pubsub_topic.chat_incoming.name
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:chat-api-push@system.gserviceaccount.com"
+}
+
+resource "google_pubsub_topic_iam_member" "gsuite_addons_publisher" {
+  topic   = google_pubsub_topic.chat_incoming.name
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
+}
+
+resource "google_pubsub_subscription" "chat_sub" {
+  name                 = "monarch-chat-sub"
+  topic                = google_pubsub_topic.chat_incoming.name
+  project              = var.project_id
+  ack_deadline_seconds = 60
+}
+
+resource "google_pubsub_subscription_iam_member" "run_subscriber" {
+  subscription = google_pubsub_subscription.chat_sub.name
+  project      = var.project_id
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${google_service_account.monarch_run.email}"
+}
+
+# 10. Cloud Scheduler Jobs for Automated Ingestion & Alerting (Via Cloud Run Jobs API)
+resource "google_cloud_scheduler_job" "daily_sync" {
+  name             = "monarch-daily-sync"
+  description      = "Triggers daily Monarch-to-BigQuery ingestion via Cloud Run Job"
+  schedule         = var.sync_schedule
+  time_zone        = var.time_zone
+  region           = var.region
+  project          = var.project_id
+  attempt_deadline = "600s"
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/monarch-sync-job:run"
+
+    oauth_token {
+      service_account_email = google_service_account.scheduler_sa.email
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_project_service.enabled_apis, google_project_iam_member.scheduler_run_developer]
+}
+
+resource "google_cloud_scheduler_job" "daily_alerts" {
+  name             = "monarch-daily-advisor-alerts"
+  description      = "Triggers daily proactive advisory alert scan via Cloud Run Job"
+  schedule         = var.alert_schedule
+  time_zone        = var.time_zone
+  region           = var.region
+  project          = var.project_id
+  attempt_deadline = "300s"
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/monarch-alerts-job:run"
+
+    oauth_token {
+      service_account_email = google_service_account.scheduler_sa.email
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_project_service.enabled_apis, google_project_iam_member.scheduler_run_developer]
+}

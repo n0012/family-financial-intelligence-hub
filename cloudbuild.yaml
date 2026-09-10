@@ -46,13 +46,45 @@ steps:
       - '--cpu'
       - '1'
       - '--set-env-vars'
-      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}'
+      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION},ENABLE_CHAT_PULL_WORKER=true,CHAT_SUBSCRIPTION=monarch-chat-sub'
       - '--set-secrets'
       - 'MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest,ALERT_WEBHOOK_URL=alert-webhook-url:latest,GEMINI_API_KEY=gemini-api-key:latest'
-      - '--allow-unauthenticated'
+      - '--no-allow-unauthenticated'
+      - '--ingress'
+      - 'internal'
     id: 'deploy-cloud-run'
 
-  # 4. Synchronize BigQuery schema and analytical views
+  # 4. Deploy Cloud Run Jobs for batch execution
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Deploying Cloud Run Jobs..."
+        gcloud run jobs deploy monarch-sync-job \
+          --image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}" \
+          --region="${_REGION}" \
+          --service-account="monarch-gemini-run@${PROJECT_ID}.iam.gserviceaccount.com" \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}" \
+          --set-secrets="MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest" \
+          --command="python" \
+          --args="job.py,sync" \
+          --max-retries=1 \
+          --task-timeout=600s
+
+        gcloud run jobs deploy monarch-alerts-job \
+          --image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}" \
+          --region="${_REGION}" \
+          --service-account="monarch-gemini-run@${PROJECT_ID}.iam.gserviceaccount.com" \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}" \
+          --set-secrets="MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest" \
+          --command="python" \
+          --args="job.py,alerts" \
+          --max-retries=1 \
+          --task-timeout=300s
+    id: 'deploy-cloud-run-jobs'
+
+  # 5. Synchronize BigQuery schema and analytical views
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
@@ -61,23 +93,6 @@ steps:
         echo "Applying BigQuery schema and analytical views..."
         bq query --use_legacy_sql=false --project_id=${PROJECT_ID} < schema.sql
     id: 'apply-bigquery-schema'
-
-  # 5. Smoke test health endpoint
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        SERVICE_URL=$$(gcloud run services describe ${_SERVICE} --region ${_REGION} --format="value(status.url)")
-        API_KEY=$$(gcloud secrets versions access latest --secret=gemini-wrapper-key)
-        echo "Validating health of deployed service at $$SERVICE_URL..."
-        HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: $$API_KEY" "$$SERVICE_URL/health")
-        if [ "$$HTTP_CODE" -eq 200 ]; then
-          echo "Health check passed (HTTP 200)!"
-        else
-          echo "Warning: Health check returned HTTP $$HTTP_CODE"
-        fi
-    id: 'verify-health'
 
 substitutions:
   _REGION: 'us-central1'

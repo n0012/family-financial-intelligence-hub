@@ -27,3 +27,13 @@ output "cloud_build_deploy_command" {
   value       = "gcloud builds submit --config=cloudbuild.yaml --project=${var.project_id}"
   description = "Command to build and deploy application revisions via Cloud Build."
 }
+
+output "chat_pubsub_topic" {
+  value       = google_pubsub_topic.chat_incoming.id
+  description = "Pub/Sub topic to configure in Google Chat API console."
+}
+
+output "chat_pubsub_subscription" {
+  value       = google_pubsub_subscription.chat_sub.id
+  description = "Pub/Sub subscription for the chat pull worker."
+}
