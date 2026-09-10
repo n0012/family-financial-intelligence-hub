@@ -67,7 +67,7 @@ Monarch Money is the single source of truth and data aggregation hub (connecting
 ## 3. Data Model & Optimization Engines
 
 ### A. Raw Tables (`schema.sql`)
-1. **`raw_accounts`**: Stores account balances, account type (`depository`, `credit`, `loan`), subtype (`checking`, `credit_card`, `heloc`), credit limits, and interest rates (e.g. `0.085` for 8.5% APR).
+1. **`raw_accounts`**: Stores account balances, account type (`depository`, `credit`, `loan`), subtype (`checking`, `credit_card`, `heloc`), credit limits, and interest rates (e.g. `0.070` for 7.0% APR).
 2. **`raw_transactions`**: Stores transaction records (`transaction_id`, `account_id`, `transaction_date`, `amount`, `merchant_name`, `clean_merchant_name`, `category_name`, `pending`).
 3. **`raw_categories`**: Budget group hierarchy (`Fixed`, `Discretionary`, `Debt`, `Income`, `Transfer`).
 

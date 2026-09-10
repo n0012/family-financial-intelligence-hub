@@ -628,7 +628,7 @@ async def request_plaid_refresh_async(institution_name: str) -> dict:
 
 def request_plaid_refresh(institution_name: str) -> str:
     """
-    Tool: Requests an on-demand upstream Plaid refresh for a financial institution (e.g. 'Chase', 'First Tech')
+    Tool: Requests an on-demand upstream Plaid refresh for a financial institution (e.g. 'Chase', 'Credit Union')
     to pull latest settled transactions into Monarch Money. Cooldown limited to once per hour per institution.
     """
     try:

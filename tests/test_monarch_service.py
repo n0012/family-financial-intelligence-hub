@@ -59,8 +59,8 @@ class TestMonarchReadTools(unittest.TestCase):
                 "accounts": [
                     {
                         "id": "acc_100",
-                        "displayName": "First Tech HELOC",
-                        "institution": {"name": "First Tech"},
+                        "displayName": "Credit Union HELOC",
+                        "institution": {"name": "Community Credit Union"},
                         "currentBalance": 45000.0,
                         "availableBalance": 55000.0,
                         "creditLimit": 100000.0,
