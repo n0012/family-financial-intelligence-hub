@@ -9,17 +9,16 @@ Enables 100% zero-ingress Google Chat bot operation:
 Pulls Chat event messages from Google Cloud Pub/Sub, processes them with the Advisor,
 and responds asynchronously via the Google Chat REST API.
 """
+
 import argparse
 import asyncio
-import base64
 import json
 import logging
 import os
 import signal
 import sys
 import threading
-from typing import Optional
-from concurrent.futures import TimeoutError
+
 from google.cloud import pubsub_v1
 
 logging.basicConfig(
@@ -31,7 +30,7 @@ logger = logging.getLogger("monarch-gemini.chat_worker")
 
 def process_message(message: pubsub_v1.subscriber.message.Message, loop: asyncio.AbstractEventLoop):
     """Callback invoked by Pub/Sub client when a message is received."""
-    from main import google_chat_webhook
+    from app.main import google_chat_webhook
 
     try:
         raw_data = message.data.decode("utf-8")
@@ -148,7 +147,7 @@ class BackgroundChatWorker:
 
 def start_chat_worker_background(
     project_id: str, subscription_name: str = "monarch-chat-sub"
-) -> Optional[BackgroundChatWorker]:
+) -> BackgroundChatWorker | None:
     """Helper to start the chat worker daemon in the background."""
     worker = BackgroundChatWorker(project_id, subscription_name)
     worker.start()
@@ -159,7 +158,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="chat_worker", description="Zero-ingress Google Chat Pub/Sub Pull Worker")
     parser.add_argument(
         "--project",
-        default=os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT", "losiern-vibe"),
+        default=os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT", "family-finance-hub"),
         help="GCP Project ID",
     )
     parser.add_argument(

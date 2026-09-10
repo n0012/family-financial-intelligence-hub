@@ -1,28 +1,46 @@
 import asyncio
 import base64
-from datetime import date, datetime, timedelta
 import json
 import logging
 import os
 import re
 import secrets
-from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, Security
-from fastapi.security import APIKeyHeader
 import google.auth
+import requests
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 from google.auth.transport import requests as google_requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from google.cloud import bigquery, secretmanager
+from google.cloud import bigquery
 from google.oauth2 import id_token
-from bq_service import (
+
+from app.alerts import (
+    build_chat_card_v2,
+    build_snooze_success_card,
+    execute_alert_scan,
+    snooze_spend_alert,
+    suppress_alert,
+)
+from app.bq_service import (
     ask_conversational_analytics,
     get_bq_client,
     get_session_history,
     run_readonly_sql,
     save_session_history,
 )
-from monarch_service import (
+from app.config import (
+    BQ_DATASET_ID,
+    BQ_PROJECT_ID,
+    IS_PROD,
+    resolve_secret,
+)
+from app.memory_service import (
+    format_memories_for_prompt,
+    retrieve_user_memories,
+    store_user_preference,
+)
+from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
     CURRENT_USER_EMAIL,
     build_recategorization_success_card,
@@ -36,15 +54,6 @@ from monarch_service import (
     request_plaid_refresh,
     verify_mutation_signature,
 )
-from memory_service import (
-    format_memories_for_prompt,
-    retrieve_user_memories,
-    save_user_preference,
-    store_user_preference,
-)
-
-import requests
-import yaml
 
 try:
     from google import genai
@@ -53,21 +62,7 @@ except ImportError:
     genai = None
     types = None
 
-from config import (
-    BQ_PROJECT_ID,
-    BQ_DATASET_ID,
-    IS_PROD,
-    resolve_secret,
-    load_local_config,
-)
 from contextlib import asynccontextmanager
-from alerts import (
-    execute_alert_scan,
-    build_chat_card_v2,
-    build_snooze_success_card,
-    suppress_alert,
-    snooze_spend_alert,
-)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monarch-gemini")
@@ -78,13 +73,13 @@ is_prod = IS_PROD
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker = None
-    should_run_worker = (
-        os.getenv("ENABLE_CHAT_PULL_WORKER", "false").lower() in ("true", "1", "yes")
-        or (os.getenv("K_SERVICE") and os.getenv("DISABLE_CHAT_PULL_WORKER", "false").lower() not in ("true", "1", "yes"))
+    should_run_worker = os.getenv("ENABLE_CHAT_PULL_WORKER", "false").lower() in ("true", "1", "yes") or (
+        os.getenv("K_SERVICE") and os.getenv("DISABLE_CHAT_PULL_WORKER", "false").lower() not in ("true", "1", "yes")
     )
     if should_run_worker:
         try:
-            from chat_worker import start_chat_worker_background
+            from app.chat_worker import start_chat_worker_background
+
             project = BQ_PROJECT_ID
             sub = os.getenv("CHAT_SUBSCRIPTION", "monarch-chat-sub")
             logger.info(f"Starting embedded Pub/Sub chat pull worker for {project}/{sub} (Zero Ingress Mode)...")
@@ -114,7 +109,7 @@ API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 # MonarchMoney client management and API calls are handled in monarch_service.py
 
 
-def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)):
+def verify_api_key(api_key: str | None = Security(API_KEY_HEADER)):
     """Validates the incoming X-API-Key against the secret stored in Secret Manager / environment."""
     expected = resolve_secret("gemini-wrapper-key", "GEMINI_WRAPPER_KEY")
     if not expected:
@@ -135,6 +130,7 @@ async def health(api_key: str = Security(verify_api_key)):
     """Health check endpoint to verify wrapper availability and key validity."""
     return {"status": "ok", "service": "monarch-gemini-bigquery-wrapper"}
 
+
 @app.post("/auth/mfa", tags=["Auth"])
 async def authenticate_with_mfa(
     code: str = Query(..., description="6-digit code from Google Authenticator"),
@@ -152,13 +148,13 @@ async def get_accounts(api_key: str = Security(verify_api_key)):
     try:
         return await client.get_accounts()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Monarch call get_accounts failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Monarch call get_accounts failed: {e}") from e
 
 
 @app.get("/transactions", tags=["Monarch Data"])
 async def get_transactions(
-    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format (inclusive)"),
-    end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD format (inclusive)"),
+    start_date: str | None = Query(None, description="Start date in YYYY-MM-DD format (inclusive)"),
+    end_date: str | None = Query(None, description="End date in YYYY-MM-DD format (inclusive)"),
     limit: int = Query(50, le=200, description="Maximum number of transactions to return"),
     api_key: str = Security(verify_api_key),
 ):
@@ -171,7 +167,7 @@ async def get_transactions(
             limit=limit,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Monarch call get_transactions failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Monarch call get_transactions failed: {e}") from e
 
 
 @app.get("/categories", tags=["Monarch Data"])
@@ -181,13 +177,13 @@ async def get_categories(api_key: str = Security(verify_api_key)):
     try:
         return await client.get_transaction_categories()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Monarch call get_categories failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Monarch call get_categories failed: {e}") from e
 
 
 @app.get("/cashflow", tags=["Monarch Data"])
 async def get_cashflow(
-    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
-    end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD format"),
+    start_date: str | None = Query(None, description="Start date in YYYY-MM-DD format"),
+    end_date: str | None = Query(None, description="End date in YYYY-MM-DD format"),
     api_key: str = Security(verify_api_key),
 ):
     """Fetch cashflow breakdown for a specific time window."""
@@ -195,17 +191,18 @@ async def get_cashflow(
     try:
         return await client.get_cashflow(start_date=start_date, end_date=end_date)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Monarch call get_cashflow failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Monarch call get_cashflow failed: {e}") from e
+
 
 # execute_sync is imported from monarch_service.py
 
 
-
-
 @app.post("/sync/bigquery", tags=["BigQuery Sync"])
 async def sync_to_bigquery(
-    days_back: Optional[int] = Query(90, description="How many days back to sync transactions (pass 0 or None for all history)"),
-    mfa_code: Optional[str] = Query(None, description="Optional 6-digit code from Google Authenticator"),
+    days_back: int | None = Query(
+        90, description="How many days back to sync transactions (pass 0 or None for all history)"
+    ),
+    mfa_code: str | None = Query(None, description="Optional 6-digit code from Google Authenticator"),
     api_key: str = Security(verify_api_key),
 ):
     """
@@ -214,7 +211,6 @@ async def sync_to_bigquery(
     """
     effective_days = days_back if (days_back is not None and days_back > 0) else None
     return await execute_sync(days_back=effective_days, mfa_code=mfa_code)
-
 
 
 @app.post("/advisor/scan-alerts", dependencies=[Depends(verify_api_key)], tags=["Spend Optimization Advisor"])
@@ -240,11 +236,10 @@ def run_readonly_sql_tool(sql_query: str) -> str:
 
 
 def ask_gemini_brain(
-
     question: str,
-    history: Optional[list] = None,
-    images: Optional[list[tuple[bytes, str]]] = None,
-    user_email: Optional[str] = None,
+    history: list | None = None,
+    images: list[tuple[bytes, str]] | None = None,
+    user_email: str | None = None,
 ) -> dict:
     """
     Primary AI Brain: Queries Google Gemini 3.8 Flash with MEDIUM thinking, live BigQuery analytical views,
@@ -277,12 +272,12 @@ def ask_gemini_brain(
                     if s_text:
                         gemini_history.append(types.Content(role="model", parts=[types.Part.from_text(text=s_text)]))
 
-        target_user = user_email or CURRENT_USER_EMAIL.get() or "nick@sagelycreations.com"
+        target_user = user_email or CURRENT_USER_EMAIL.get() or "user@example.com"
         user_memories = retrieve_user_memories(target_user)
         memory_block = format_memories_for_prompt(user_memories)
 
         system_instruction = (
-            "You are an expert personal financial advisor and spend optimization strategist for a family. "
+            "You are FinSage, an expert personal financial advisor and spend optimization strategist for a family. "
             f"Your single source of truth is Monarch Money synchronized into Google BigQuery dataset `{BQ_PROJECT_ID}.{BQ_DATASET_ID}`.\n\n"
             "CORE MISSION: Help the family optimize spending, eliminate waste, establish budget discipline, and aggressively pay down HELOC debt.\n\n"
             "ANALYTICAL VIEWS AND COLUMN SCHEMAS:\n"
@@ -351,7 +346,6 @@ def ask_gemini_brain(
                     store_user_preference,
                     snooze_spend_alert,
                 ],
-
             ),
         )
 
@@ -371,8 +365,12 @@ def ask_gemini_brain(
         # If AFC completed tools or hit limit without a final text response, prompt for final synthesis
         if not answer_text or not answer_text.strip():
             logger.info("Gemini response text was empty after tool execution; prompting for final synthesis.")
-            synthesis_resp = chat.send_message("Based on the data and query results above, provide your comprehensive financial analysis and actionable recommendations.")
-            answer_text = synthesis_resp.text or "I analyzed your financial data, but no specific response was generated."
+            synthesis_resp = chat.send_message(
+                "Based on the data and query results above, provide your comprehensive financial analysis and actionable recommendations."
+            )
+            answer_text = (
+                synthesis_resp.text or "I analyzed your financial data, but no specific response was generated."
+            )
 
         # Extract any SQL queries executed during tool calls across conversation history
         executed_sqls = []
@@ -402,8 +400,7 @@ def ask_gemini_brain(
         return ask_conversational_analytics(question, history)
 
 
-
-def format_advisory_reply(answer: str, sql: Optional[str] = None, suggestions: Optional[list] = None) -> str:
+def format_advisory_reply(answer: str, sql: str | None = None, suggestions: list | None = None) -> str:
     """Formats the financial advisor response with optional SQL block and follow-up suggestions."""
     reply_lines = [f"💡 *Financial Advisory Response*:\n{answer}"]
     if sql:
@@ -415,10 +412,10 @@ def format_advisory_reply(answer: str, sql: Optional[str] = None, suggestions: O
 
 def format_chat_response(
     text: str,
-    thread_name: Optional[str] = None,
-    space_name: Optional[str] = None,
+    thread_name: str | None = None,
+    space_name: str | None = None,
     is_addon: bool = True,
-    cards_v2: Optional[list] = None,
+    cards_v2: list | None = None,
 ) -> dict:
     """
     Returns a clean, robust message response that strictly conforms to Google Workspace Add-ons
@@ -437,15 +434,7 @@ def format_chat_response(
 
     if is_addon:
         # Strictly google.apps.card.v1.DataActions
-        return {
-            "hostAppDataAction": {
-                "chatDataAction": {
-                    "createMessageAction": {
-                        "message": msg_dict
-                    }
-                }
-            }
-        }
+        return {"hostAppDataAction": {"chatDataAction": {"createMessageAction": {"message": msg_dict}}}}
     else:
         # Direct Google Chat API endpoint response
         return msg_dict
@@ -453,9 +442,9 @@ def format_chat_response(
 
 def post_to_chat_thread(
     text: str,
-    thread_name: Optional[str] = None,
-    space_name: Optional[str] = None,
-    cards_v2: Optional[list] = None,
+    thread_name: str | None = None,
+    space_name: str | None = None,
+    cards_v2: list | None = None,
 ) -> bool:
     """
     Posts a follow-up message into a specific Google Chat thread or space.
@@ -483,7 +472,9 @@ def post_to_chat_thread(
             if cards_v2:
                 payload["cardsV2"] = cards_v2
             resp = requests.post(url, headers=headers, json=payload, timeout=10)
-            logger.info(f"Google Chat API async reply to {space_name} (thread={thread_name}): status={resp.status_code}")
+            logger.info(
+                f"Google Chat API async reply to {space_name} (thread={thread_name}): status={resp.status_code}"
+            )
             if resp.status_code == 200:
                 return True
         except Exception as e:
@@ -515,7 +506,7 @@ def post_to_chat_thread(
         return False
 
 
-def download_chat_attachment(attachment: dict) -> Optional[tuple[bytes, str]]:
+def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
     """Download an uploaded media attachment from Google Chat using bot credentials."""
     try:
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/chat.bot"])
@@ -546,7 +537,9 @@ def download_chat_attachment(attachment: dict) -> Optional[tuple[bytes, str]]:
                 resp = requests.get(url, headers=headers, timeout=20)
                 if resp.status_code == 200 and resp.content:
                     content_type = attachment.get("contentType") or "image/png"
-                    logger.info(f"Successfully downloaded attachment {attachment.get('contentName', 'image')} ({len(resp.content)} bytes, type={content_type})")
+                    logger.info(
+                        f"Successfully downloaded attachment {attachment.get('contentName', 'image')} ({len(resp.content)} bytes, type={content_type})"
+                    )
                     return resp.content, content_type
                 else:
                     logger.debug(f"Media download from {url} returned {resp.status_code}")
@@ -561,8 +554,8 @@ def download_chat_attachment(attachment: dict) -> Optional[tuple[bytes, str]]:
 
 
 def verify_chat_origin(
-    authorization: Optional[str] = Header(None),
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
 ):
     """
     Verifies that incoming /chat/event requests originate from Google Chat or an authorized caller.
@@ -622,12 +615,11 @@ def verify_chat_origin(
             raise
         except Exception as e:
             logger.error(f"Google Chat Bearer verification failed: {e}")
-            raise HTTPException(status_code=401, detail=f"Invalid Google Chat authentication token: {e}")
+            raise HTTPException(status_code=401, detail=f"Invalid Google Chat authentication token: {e}") from e
 
     # 5. Block all unauthenticated requests
     raise HTTPException(
-        status_code=401,
-        detail="Unauthorized: Missing valid Google Chat Bearer token, verification secret, or API key."
+        status_code=401, detail="Unauthorized: Missing valid Google Chat Bearer token, verification secret, or API key."
     )
 
 
@@ -670,19 +662,18 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     )
     event_type = (
         raw_payload.get("type")
-        or ("CARD_CLICKED" if raw_payload.get("action") or (raw_payload.get("commonEventObject", {}).get("invokedFunction")) else None)
+        or (
+            "CARD_CLICKED"
+            if raw_payload.get("action") or (raw_payload.get("commonEventObject", {}).get("invokedFunction"))
+            else None
+        )
         or ("SLASH_COMMAND" if app_command_payload else None)
         or ("ADDED_TO_SPACE" if "addedToSpacePayload" in chat_obj else None)
         or ("MESSAGE" if message else "UNKNOWN")
     )
 
     # Extract user info
-    user_info = (
-        chat_obj.get("user")
-        or raw_payload.get("user")
-        or message.get("sender")
-        or {}
-    )
+    user_info = chat_obj.get("user") or raw_payload.get("user") or message.get("sender") or {}
     user_email = user_info.get("email") or user_info.get("displayName") or "unknown"
     sender_name = user_info.get("displayName", "there")
     CURRENT_USER_EMAIL.set(user_email)
@@ -698,7 +689,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         or raw_payload.get("space")
         or {}
     )
-    space_name = space_obj.get("name") if isinstance(space_obj, dict) else (space_obj if isinstance(space_obj, str) else None)
+    space_name = (
+        space_obj.get("name") if isinstance(space_obj, dict) else (space_obj if isinstance(space_obj, str) else None)
+    )
 
     # Parse thread.name robustly across all Google Chat event shapes
     thread_obj = (
@@ -709,7 +702,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         or raw_payload.get("thread")
         or {}
     )
-    thread_name = thread_obj.get("name") if isinstance(thread_obj, dict) else (thread_obj if isinstance(thread_obj, str) else None)
+    thread_name = (
+        thread_obj.get("name")
+        if isinstance(thread_obj, dict)
+        else (thread_obj if isinstance(thread_obj, str) else None)
+    )
 
     # If thread_name was omitted, derive from message.name if possible
     msg_name = message.get("name", "")
@@ -721,11 +718,13 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
     logger.info(f"Interaction Session Anchors: space={space_name}, thread={thread_name}")
 
-    def respond(text: str, cards_v2: Optional[list] = None) -> dict:
+    def respond(text: str, cards_v2: list | None = None) -> dict:
         if is_pubsub:
             post_to_chat_thread(text, thread_name=thread_name, space_name=space_name, cards_v2=cards_v2)
             return {"status": "ok"}
-        resp = format_chat_response(text, thread_name=thread_name, space_name=space_name, is_addon=is_addon, cards_v2=cards_v2)
+        resp = format_chat_response(
+            text, thread_name=thread_name, space_name=space_name, is_addon=is_addon, cards_v2=cards_v2
+        )
         logger.info(f"Outgoing Chat Response: {json.dumps(resp)}")
         return resp
 
@@ -773,7 +772,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                     transaction_id=txn_id,
                     category_name=cat_name,
                 )
-                success_msg = f"✅ Transaction #{txn_id} was successfully reclassified to *{cat_name}* in Monarch Money."
+                success_msg = (
+                    f"✅ Transaction #{txn_id} was successfully reclassified to *{cat_name}* in Monarch Money."
+                )
                 return respond(success_msg, cards_v2=[success_card])
             else:
                 err = mutation_result.get("error", "Unknown error")
@@ -792,7 +793,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             except ValueError:
                 days = 7
 
-            logger.info(f"Snoozing alert from Card v2: key={alert_key}, type={alert_type}, days={days}, user={user_email}")
+            logger.info(
+                f"Snoozing alert from Card v2: key={alert_key}, type={alert_type}, days={days}, user={user_email}"
+            )
             target_project = BQ_PROJECT_ID
             target_dataset = BQ_DATASET_ID
 
@@ -813,7 +816,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
             if suppressed:
                 snooze_card = build_snooze_success_card(alert_key, alert_type, days)
-                success_text = f"💤 Alert *{alert_type.replace('_', ' ').title()}* (`{alert_key}`) snoozed for {days} days."
+                success_text = (
+                    f"💤 Alert *{alert_type.replace('_', ' ').title()}* (`{alert_key}`) snoozed for {days} days."
+                )
                 return respond(success_text, cards_v2=[snooze_card])
             else:
                 return respond(f"⚠️ Failed to snooze alert '{alert_key}'.")
@@ -823,7 +828,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     # 1. Bot added to space or 1:1 DM
     if event_type == "ADDED_TO_SPACE":
         welcome_text = (
-            "👋 I'm *Sage*, your personal family finance advisor!\n\n"
+            "👋 I'm *FinSage*, your personal family finance advisor!\n\n"
             "I am connected directly to *Monarch Money* and *BigQuery* to help optimize family spend and accelerate debt freedom.\n\n"
             "*Try asking me:*\n"
             "• _What is our current daily HELOC interest cost?_\n"
@@ -853,7 +858,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
     # 3. Extract text and strip @mention anywhere (beginning, middle, or end)
     raw_text = message.get("argumentText") or message.get("text") or ""
-    clean_text = re.sub(r"@(Sage|Family\s*Finance\s*Copilot)", "", raw_text, flags=re.IGNORECASE)
+    clean_text = re.sub(r"@(FinSage|Sage|Family\s*Finance\s*Copilot)", "", raw_text, flags=re.IGNORECASE)
     clean_text = re.sub(r"@\S+", "", clean_text).strip()
 
     if not clean_text and downloaded_images:
@@ -877,22 +882,34 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     if clean_text.lower().rstrip("?!. ") in greeting_patterns:
         greet_text = (
             f"👋 Yes {sender_name}, I'm here! I'm connected to your Monarch Money and BigQuery financial database.\n\n"
-            "Ask me any question about your spending, subscriptions, or HELOC debt paydown (e.g. *\"What is our daily HELOC interest cost?\"*)."
+            'Ask me any question about your spending, subscriptions, or HELOC debt paydown (e.g. *"What is our daily HELOC interest cost?"*).'
         )
         return respond(greet_text)
 
     # Command: /sync or natural sync intent
     lower_text = clean_text.lower()
-    is_sync_intent = (
-        lower_text.startswith(("/sync", "sync", "/refresh", "refresh", "/backfill", "backfill"))
-        or any(phrase in lower_text for phrase in ["please sync", "can you sync", "trigger sync", "run sync", "sync now", "sync data", "sync monarch", "refresh data", "pull history", "sync history", "backfill history"])
+    is_sync_intent = lower_text.startswith(("/sync", "sync", "/refresh", "refresh", "/backfill", "backfill")) or any(
+        phrase in lower_text
+        for phrase in [
+            "please sync",
+            "can you sync",
+            "trigger sync",
+            "run sync",
+            "sync now",
+            "sync data",
+            "sync monarch",
+            "refresh data",
+            "pull history",
+            "sync history",
+            "backfill history",
+        ]
     )
     if is_sync_intent:
         if any(term in lower_text for term in ["all", "everything", "history", "full", "backfill"]):
             days = None
             history_desc = "all available history"
         else:
-            days_match = re.search(r'\b(\d+)\b', lower_text)
+            days_match = re.search(r"\b(\d+)\b", lower_text)
             days = int(days_match.group(1)) if days_match else 30
             history_desc = f"last {days} days"
         try:
@@ -914,8 +931,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 return respond("✅ No active financial anomalies or spending leaks detected right now!")
             card_payload = build_chat_card_v2(active_alerts)
             return respond(
-                card_payload.get("text", "🔔 *Sage*: Alerts Scan completed."),
-                cards_v2=card_payload.get("cardsV2")
+                card_payload.get("text", "🔔 *FinSage*: Alerts Scan completed."), cards_v2=card_payload.get("cardsV2")
             )
         except Exception as e:
             return respond(f"⚠️ Alert scan failed: {e}")
@@ -924,13 +940,17 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     # If the response completes within 20s, return synchronously.
     # If it takes longer (deep multi-table BigQuery scans), acknowledge synchronously and post the full result into the thread via background task.
     session_history = get_session_history(thread_name, space_name)
-    logger.info(f"Querying Gemini Brain with {len(session_history)} prior turns and {len(downloaded_images)} images (thread={thread_name}, space={space_name})")
+    logger.info(
+        f"Querying Gemini Brain with {len(session_history)} prior turns and {len(downloaded_images)} images (thread={thread_name}, space={space_name})"
+    )
 
     CURRENT_USER_EMAIL.set(user_email)
     CURRENT_PROPOSED_CARD.set(None)
 
     loop = asyncio.get_event_loop()
-    analysis_future = loop.run_in_executor(None, ask_gemini_brain, clean_text, session_history, downloaded_images, user_email)
+    analysis_future = loop.run_in_executor(
+        None, ask_gemini_brain, clean_text, session_history, downloaded_images, user_email
+    )
 
     try:
         result = await asyncio.wait_for(asyncio.shield(analysis_future), timeout=12.0)
@@ -944,8 +964,10 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             save_session_history(thread_name, space_name, user_email, clean_text, answer)
 
         return respond(format_advisory_reply(answer, sql, suggestions), cards_v2=cards_list)
-    except asyncio.TimeoutError:
-        logger.info(f"Query '{clean_text}' exceeded 12s budget; continuing in background to post to {space_name} (thread={thread_name})")
+    except TimeoutError:
+        logger.info(
+            f"Query '{clean_text}' exceeded 12s budget; continuing in background to post to {space_name} (thread={thread_name})"
+        )
 
         async def complete_and_post():
             try:
@@ -959,12 +981,14 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 if "no specific response was generated" not in ans.lower():
                     save_session_history(thread_name, space_name, user_email, clean_text, ans)
 
-                post_to_chat_thread(format_advisory_reply(ans, s, suggs), thread_name, space_name, cards_v2=p_cards_list)
+                post_to_chat_thread(
+                    format_advisory_reply(ans, s, suggs), thread_name, space_name, cards_v2=p_cards_list
+                )
             except Exception as ex:
                 logger.error(f"Background query post failed: {ex}")
                 post_to_chat_thread(f"⚠️ Query processing failed: {ex}", thread_name, space_name)
 
         asyncio.create_task(complete_and_post())
-        return respond("⏳ *Analyzing...* Deep scan in progress across your BigQuery models. Posting full recommendation to this thread in just a few moments!")
-
-
+        return respond(
+            "⏳ *Analyzing...* Deep scan in progress across your BigQuery models. Posting full recommendation to this thread in just a few moments!"
+        )

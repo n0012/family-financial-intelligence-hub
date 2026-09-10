@@ -4,10 +4,12 @@ Evaluates BigQuery analytical views (food efficiency, price creep, HELOC daily c
 subscription overlap, micro-transaction leakage, memory bank budget caps)
 and formats/posts Google Chat Card V2 notifications with smart suppression.
 """
+
 import asyncio
 import logging
 import re
-from typing import Optional, List, Dict, Any, Set
+from typing import Any
+
 try:
     import requests
 except ImportError:
@@ -18,12 +20,12 @@ try:
 except ImportError:
     bigquery = None
 
-from config import BQ_PROJECT_ID, BQ_DATASET_ID, resolve_secret
+from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, resolve_secret
 
 logger = logging.getLogger("monarch-gemini.alerts")
 
 
-def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) -> List[Dict[str, Any]]:
+def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks for subscriptions where price has increased."""
     alerts = []
     price_creep_sql = f"""
@@ -38,21 +40,23 @@ def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) ->
         for r in rows:
             merch = r.merchant or "Unknown"
             key = f"price_creep:{merch.lower().strip().replace(' ', '_')}"
-            alerts.append({
-                "type": "PRICE_CREEP",
-                "severity": "WARNING",
-                "alert_key": key,
-                "title": f"Subscription Price Hike: {merch}",
-                "detail": f"Charge increased from ${r.min_charge:.2f} to ${r.max_charge:.2f} (Annual cost: ${r.estimated_annual_cost:.2f}).",
-                "suggested_fix": f"Audit usage for {merch} or cancel/rotate to save up to ${r.estimated_annual_cost:.2f}/year.",
-            })
+            alerts.append(
+                {
+                    "type": "PRICE_CREEP",
+                    "severity": "WARNING",
+                    "alert_key": key,
+                    "title": f"Subscription Price Hike: {merch}",
+                    "detail": f"Charge increased from ${r.min_charge:.2f} to ${r.max_charge:.2f} (Annual cost: ${r.estimated_annual_cost:.2f}).",
+                    "suggested_fix": f"Audit usage for {merch} or cancel/rotate to save up to ${r.estimated_annual_cost:.2f}/year.",
+                }
+            )
     except Exception as e:
         logger.warning(f"Subscription price creep check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"Subscription check failed: {e}"})
     return alerts
 
 
-def check_food_efficiency(bq: Any, project_id: str, dataset_id: str) -> List[Dict[str, Any]]:
+def check_food_efficiency(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks dining & delivery percentage of food budget."""
     alerts = []
     food_sql = f"""
@@ -65,26 +69,30 @@ def check_food_efficiency(bq: Any, project_id: str, dataset_id: str) -> List[Dic
         rows = list(bq.query(food_sql).result())
         if rows:
             r = rows[0]
-            dining_pct = float(r.dining_percentage_of_food_budget) if r.dining_percentage_of_food_budget is not None else 0.0
+            dining_pct = (
+                float(r.dining_percentage_of_food_budget) if r.dining_percentage_of_food_budget is not None else 0.0
+            )
             dining_spend = float(r.dining_delivery_spend) if r.dining_delivery_spend is not None else 0.0
             total_spend = float(r.total_food_spend) if r.total_food_spend is not None else 0.0
             if dining_pct > 35.0:
                 potential_savings = round(dining_spend * 0.30, 2)
-                alerts.append({
-                    "type": "FOOD_LEAKAGE",
-                    "severity": "WARNING",
-                    "alert_key": f"food_leakage:{r.month}",
-                    "title": f"High Dining/Delivery Ratio ({dining_pct:.1f}% of food budget)",
-                    "detail": f"In {r.month}, dining & delivery accounted for ${dining_spend:.2f} out of ${total_spend:.2f} total food spend.",
-                    "suggested_fix": f"Shifting 2 delivery meals/month to home cooking could liberate ~${potential_savings:.2f}/month.",
-                })
+                alerts.append(
+                    {
+                        "type": "FOOD_LEAKAGE",
+                        "severity": "WARNING",
+                        "alert_key": f"food_leakage:{r.month}",
+                        "title": f"High Dining/Delivery Ratio ({dining_pct:.1f}% of food budget)",
+                        "detail": f"In {r.month}, dining & delivery accounted for ${dining_spend:.2f} out of ${total_spend:.2f} total food spend.",
+                        "suggested_fix": f"Shifting 2 delivery meals/month to home cooking could liberate ~${potential_savings:.2f}/month.",
+                    }
+                )
     except Exception as e:
         logger.warning(f"Food efficiency check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"Food check failed: {e}"})
     return alerts
 
 
-def check_heloc_daily_cost(bq: Any, project_id: str, dataset_id: str) -> List[Dict[str, Any]]:
+def check_heloc_daily_cost(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks HELOC current balance and daily interest burden."""
     alerts = []
     heloc_sql = f"""
@@ -101,21 +109,23 @@ def check_heloc_daily_cost(bq: Any, project_id: str, dataset_id: str) -> List[Di
             daily = float(h.daily_interest_cost or 0)
             monthly = float(h.monthly_interest_cost or 0)
             annual_per_100 = round(apr * 100, 2)
-            alerts.append({
-                "type": "HELOC_OPPORTUNITY",
-                "severity": "INFO",
-                "alert_key": "heloc_daily_cost",
-                "title": f"HELOC Cost: ${daily:.2f}/day (${monthly:.2f}/mo)",
-                "detail": f"Current balance is ${bal:,.2f} at {apr*100:.2f}% APR.",
-                "suggested_fix": f"Every $100 trimmed from discretionary spend and swept into this debt eliminates ${annual_per_100:.2f} in compounding annual interest.",
-            })
+            alerts.append(
+                {
+                    "type": "HELOC_OPPORTUNITY",
+                    "severity": "INFO",
+                    "alert_key": "heloc_daily_cost",
+                    "title": f"HELOC Cost: ${daily:.2f}/day (${monthly:.2f}/mo)",
+                    "detail": f"Current balance is ${bal:,.2f} at {apr * 100:.2f}% APR.",
+                    "suggested_fix": f"Every $100 trimmed from discretionary spend and swept into this debt eliminates ${annual_per_100:.2f} in compounding annual interest.",
+                }
+            )
     except Exception as e:
         logger.warning(f"HELOC cost check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"HELOC check failed: {e}"})
     return alerts
 
 
-def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> List[Dict[str, Any]]:
+def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks for redundant concurrent subscriptions in the same category."""
     alerts = []
     sql = f"""
@@ -129,21 +139,23 @@ def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> Lis
         for r in rows:
             cat = r.category_name or "Subscription"
             key = f"overlap:{cat.lower().strip().replace(' ', '_')}"
-            alerts.append({
-                "type": "SUBSCRIPTION_OVERLAP",
-                "severity": "WARNING",
-                "alert_key": key,
-                "title": f"Subscription Overlap: {cat} ({r.active_subscriptions_count} active)",
-                "detail": f"Services: {r.active_services}. Combined cost: ${r.combined_monthly_cost:.2f}/mo (${r.category_annual_run_rate:.2f}/yr).",
-                "suggested_fix": f"Audit and rotate duplicate services in {cat} to liberate up to ${r.combined_monthly_cost:.2f}/month.",
-            })
+            alerts.append(
+                {
+                    "type": "SUBSCRIPTION_OVERLAP",
+                    "severity": "WARNING",
+                    "alert_key": key,
+                    "title": f"Subscription Overlap: {cat} ({r.active_subscriptions_count} active)",
+                    "detail": f"Services: {r.active_services}. Combined cost: ${r.combined_monthly_cost:.2f}/mo (${r.category_annual_run_rate:.2f}/yr).",
+                    "suggested_fix": f"Audit and rotate duplicate services in {cat} to liberate up to ${r.combined_monthly_cost:.2f}/month.",
+                }
+            )
     except Exception as e:
         logger.warning(f"Subscription overlap check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"Subscription overlap check failed: {e}"})
     return alerts
 
 
-def check_micro_transaction_leakage(bq: Any, project_id: str, dataset_id: str) -> List[Dict[str, Any]]:
+def check_micro_transaction_leakage(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks for high-cadence sub-$35 habit leaks draining cashflow."""
     alerts = []
     sql = f"""
@@ -157,23 +169,25 @@ def check_micro_transaction_leakage(bq: Any, project_id: str, dataset_id: str) -
         for r in rows:
             merch = r.merchant or "Unknown Merchant"
             key = f"micro:{merch.lower().strip().replace(' ', '_')}"
-            alerts.append({
-                "type": "MICRO_TRANSACTION_LEAKAGE",
-                "severity": "WARNING",
-                "alert_key": key,
-                "title": f"Micro-Spend Leakage: {merch}",
-                "detail": f"{r.frequency_90d} transactions averaging ${r.avg_ticket:.2f} in last 90 days (${r.total_spend_90d:.2f} total).",
-                "suggested_fix": f"Annual run-rate is ${r.annualized_run_rate:,.2f}/year. Setting a weekly cash allowance or batching visits curbs impulse leakage.",
-            })
+            alerts.append(
+                {
+                    "type": "MICRO_TRANSACTION_LEAKAGE",
+                    "severity": "WARNING",
+                    "alert_key": key,
+                    "title": f"Micro-Spend Leakage: {merch}",
+                    "detail": f"{r.frequency_90d} transactions averaging ${r.avg_ticket:.2f} in last 90 days (${r.total_spend_90d:.2f} total).",
+                    "suggested_fix": f"Annual run-rate is ${r.annualized_run_rate:,.2f}/year. Setting a weekly cash allowance or batching visits curbs impulse leakage.",
+                }
+            )
     except Exception as e:
         logger.warning(f"Micro-transaction leakage check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"Micro-transaction check failed: {e}"})
     return alerts
 
 
-def extract_budget_caps(memories: List[str]) -> Dict[str, float]:
+def extract_budget_caps(memories: list[str]) -> dict[str, float]:
     """Extracts category spend ceilings (dining, groceries) from memory bank facts."""
-    caps: Dict[str, float] = {}
+    caps: dict[str, float] = {}
     for mem in memories:
         # Dining / Restaurants / Delivery
         if "dining" not in caps:
@@ -199,13 +213,14 @@ def check_memory_budget_limits(
     bq: Any,
     project_id: str,
     dataset_id: str,
-    user_email: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    user_email: str | None = None,
+) -> list[dict[str, Any]]:
     """Compares current month-to-date spending against spending caps stored in the Vertex AI Memory Bank."""
     alerts = []
     try:
-        from memory_service import retrieve_user_memories
-        memories = retrieve_user_memories(user_email or "nick@sagelycreations.com")
+        from app.memory_service import retrieve_user_memories
+
+        memories = retrieve_user_memories(user_email)
     except Exception as e:
         logger.debug(f"Could not retrieve user memories for budget limit checks: {e}")
         return alerts
@@ -240,32 +255,92 @@ def check_memory_budget_limits(
                 month = r.current_month
                 if spent > cap:
                     overage = round(spent - cap, 2)
-                    alerts.append({
-                        "type": "BUDGET_CAP_EXCEEDED",
-                        "severity": "WARNING",
-                        "alert_key": f"budget_cap:dining:{month}",
-                        "title": f"Dining Cap Exceeded: ${spent:.2f} vs ${cap:.2f}/mo limit",
-                        "detail": f"In {month}, dining & delivery spend (${spent:.2f}) has exceeded your personal target of ${cap:.2f} by ${overage:.2f}.",
-                        "suggested_fix": f"Pause restaurant and delivery orders for the remainder of {month} to redirect cashflow back to debt paydown.",
-                    })
+                    alerts.append(
+                        {
+                            "type": "BUDGET_CAP_EXCEEDED",
+                            "severity": "WARNING",
+                            "alert_key": f"budget_cap:dining:{month}",
+                            "title": f"Dining Cap Exceeded: ${spent:.2f} vs ${cap:.2f}/mo limit",
+                            "detail": f"In {month}, dining & delivery spend (${spent:.2f}) has exceeded your personal target of ${cap:.2f} by ${overage:.2f}.",
+                            "suggested_fix": f"Pause restaurant and delivery orders for the remainder of {month} to redirect cashflow back to debt paydown.",
+                        }
+                    )
                 elif spent >= cap * 0.85:
                     pct = (spent / cap) * 100
-                    alerts.append({
-                        "type": "BUDGET_CAP_PACING",
-                        "severity": "INFO",
-                        "alert_key": f"budget_pacing:dining:{month}",
-                        "title": f"Dining Cap Pacing Alert: ${spent:.2f} of ${cap:.2f} ({pct:.0f}%)",
-                        "detail": f"In {month}, dining & delivery spend has reached ${spent:.2f} ({pct:.0f}% of your ${cap:.2f} monthly budget).",
-                        "suggested_fix": f"Keep an eye on restaurant outings to stay under your ${cap:.2f} target.",
-                    })
+                    alerts.append(
+                        {
+                            "type": "BUDGET_CAP_PACING",
+                            "severity": "INFO",
+                            "alert_key": f"budget_pacing:dining:{month}",
+                            "title": f"Dining Cap Pacing Alert: ${spent:.2f} of ${cap:.2f} ({pct:.0f}%)",
+                            "detail": f"In {month}, dining & delivery spend has reached ${spent:.2f} ({pct:.0f}% of your ${cap:.2f} monthly budget).",
+                            "suggested_fix": f"Keep an eye on restaurant outings to stay under your ${cap:.2f} target.",
+                        }
+                    )
         except Exception as e:
             logger.warning(f"Memory budget check failed for dining: {e}")
-            alerts.append({"type": "QUERY_ERROR", "detail": f"Memory budget check failed: {e}"})
+            alerts.append({"type": "QUERY_ERROR", "detail": f"Memory budget check failed for dining: {e}"})
+
+    # Check groceries cap if present
+    if "groceries" in caps:
+        cap = caps["groceries"]
+        groceries_sql = f"""
+        SELECT
+            FORMAT_DATE('%Y-%m', CURRENT_DATE()) AS current_month,
+            COALESCE(ROUND(SUM(ABS(amount)), 2), 0.0) AS current_month_groceries
+        FROM `{project_id}.{dataset_id}.raw_transactions`
+        WHERE (
+            LOWER(category_name) IN ('groceries', 'supermarkets', 'grocery')
+            OR LOWER(merchant_name) LIKE '%whole foods%'
+            OR LOWER(merchant_name) LIKE '%trader joe%'
+            OR LOWER(merchant_name) LIKE '%kroger%'
+            OR LOWER(merchant_name) LIKE '%safeway%'
+            OR LOWER(merchant_name) LIKE '%king soopers%'
+            OR LOWER(merchant_name) LIKE '%costco%'
+            OR LOWER(merchant_name) LIKE '%sprouts%'
+        )
+        AND amount < 0
+        AND pending = FALSE
+        AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE());
+        """
+        try:
+            rows = list(bq.query(groceries_sql).result())
+            if rows:
+                r = rows[0]
+                spent = float(r.current_month_groceries)
+                month = r.current_month
+                if spent > cap:
+                    overage = round(spent - cap, 2)
+                    alerts.append(
+                        {
+                            "type": "BUDGET_CAP_EXCEEDED",
+                            "severity": "WARNING",
+                            "alert_key": f"budget_cap:groceries:{month}",
+                            "title": f"Groceries Cap Exceeded: ${spent:.2f} vs ${cap:.2f}/mo limit",
+                            "detail": f"In {month}, grocery spend (${spent:.2f}) has exceeded your personal target of ${cap:.2f} by ${overage:.2f}.",
+                            "suggested_fix": f"Review grocery receipts and pantry meal-plan for {month} to keep overhead lean.",
+                        }
+                    )
+                elif spent >= cap * 0.85:
+                    pct = (spent / cap) * 100
+                    alerts.append(
+                        {
+                            "type": "BUDGET_CAP_PACING",
+                            "severity": "INFO",
+                            "alert_key": f"budget_pacing:groceries:{month}",
+                            "title": f"Groceries Cap Pacing Alert: ${spent:.2f} of ${cap:.2f} ({pct:.0f}%)",
+                            "detail": f"In {month}, grocery spend has reached ${spent:.2f} ({pct:.0f}% of your ${cap:.2f} monthly budget).",
+                            "suggested_fix": f"Track grocery spending for the rest of {month} to stay under your ${cap:.2f} limit.",
+                        }
+                    )
+        except Exception as e:
+            logger.warning(f"Memory budget check failed for groceries: {e}")
+            alerts.append({"type": "QUERY_ERROR", "detail": f"Memory budget check failed for groceries: {e}"})
 
     return alerts
 
 
-def get_active_suppressions(bq: Any, project_id: str, dataset_id: str) -> Set[str]:
+def get_active_suppressions(bq: Any, project_id: str, dataset_id: str) -> set[str]:
     """Retrieves all currently active alert suppression keys."""
     sql = f"""
     SELECT alert_key
@@ -280,7 +355,7 @@ def get_active_suppressions(bq: Any, project_id: str, dataset_id: str) -> Set[st
         return set()
 
 
-def filter_suppressed_alerts(alerts: List[Dict[str, Any]], suppressed_keys: Set[str]) -> List[Dict[str, Any]]:
+def filter_suppressed_alerts(alerts: list[dict[str, Any]], suppressed_keys: set[str]) -> list[dict[str, Any]]:
     """Filters out alerts whose alert_key is currently in suppressed_keys."""
     if not suppressed_keys:
         return alerts
@@ -341,57 +416,63 @@ def suppress_alert(
         return False
 
 
-def build_chat_card_v2(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_chat_card_v2(alerts: list[dict[str, Any]]) -> dict[str, Any]:
     """Constructs Google Chat Card V2 representation of alerts with interactive snooze actions."""
-    widgets: List[Dict[str, Any]] = []
+    widgets: list[dict[str, Any]] = []
     for a in alerts:
         if not a.get("title"):
             continue
-        widgets.append({
-            "decoratedText": {
-                "topLabel": a.get("type", "FINANCIAL ADVISORY").replace("_", " "),
-                "text": f"<b>{a['title']}</b><br><font color=\"#5f6368\">{a['detail']}</font><br>👉 <b>Action:</b> {a['suggested_fix']}",
-                "wrapText": True,
-            }
-        })
-        if a.get("alert_key"):
-            widgets.append({
-                "buttonList": {
-                    "buttons": [
-                        {
-                            "text": "💤 Snooze 7 Days",
-                            "onClick": {
-                                "action": {
-                                    "function": "snooze_alert",
-                                    "parameters": [
-                                        {"key": "action", "value": "snooze_alert"},
-                                        {"key": "alert_key", "value": str(a["alert_key"])},
-                                        {"key": "alert_type", "value": str(a.get("type", "GENERAL"))},
-                                        {"key": "days", "value": "7"},
-                                    ],
-                                }
-                            },
-                        }
-                    ]
+        widgets.append(
+            {
+                "decoratedText": {
+                    "topLabel": a.get("type", "FINANCIAL ADVISORY").replace("_", " "),
+                    "text": f'<b>{a["title"]}</b><br><font color="#5f6368">{a["detail"]}</font><br>👉 <b>Action:</b> {a["suggested_fix"]}',
+                    "wrapText": True,
                 }
-            })
+            }
+        )
+        if a.get("alert_key"):
+            widgets.append(
+                {
+                    "buttonList": {
+                        "buttons": [
+                            {
+                                "text": "💤 Snooze 7 Days",
+                                "onClick": {
+                                    "action": {
+                                        "function": "snooze_alert",
+                                        "parameters": [
+                                            {"key": "action", "value": "snooze_alert"},
+                                            {"key": "alert_key", "value": str(a["alert_key"])},
+                                            {"key": "alert_type", "value": str(a.get("type", "GENERAL"))},
+                                            {"key": "days", "value": "7"},
+                                        ],
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                }
+            )
 
     if not widgets:
-        widgets.append({
-            "decoratedText": {
-                "text": "✅ No active financial anomalies or spending leaks detected.",
-                "startIcon": {"knownIcon": "MEMBERSHIP"},
+        widgets.append(
+            {
+                "decoratedText": {
+                    "text": "✅ No active financial anomalies or spending leaks detected.",
+                    "startIcon": {"knownIcon": "MEMBERSHIP"},
+                }
             }
-        })
+        )
 
     return {
-        "text": "🔔 *Sage*: Proactive Advisory Scan completed with new recommendations.",
+        "text": "🔔 *FinSage*: Proactive Advisory Scan completed with new recommendations.",
         "cardsV2": [
             {
                 "cardId": "financialAdvisorDailyAlert",
                 "card": {
                     "header": {
-                        "title": "Sage",
+                        "title": "FinSage",
                         "subtitle": "Daily Spend Optimization & Debt Advisory",
                         "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                         "imageType": "CIRCLE",
@@ -408,14 +489,14 @@ def build_chat_card_v2(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_snooze_success_card(alert_key: str, alert_type: str, days: int) -> Dict[str, Any]:
+def build_snooze_success_card(alert_key: str, alert_type: str, days: int) -> dict[str, Any]:
     """Constructs a Google Chat Card v2 confirmation card for a snoozed alert."""
     clean_type = alert_type.replace("_", " ").title()
     return {
         "cardId": f"snoozeSuccess_{alert_key}",
         "card": {
             "header": {
-                "title": "Sage",
+                "title": "FinSage",
                 "subtitle": "Alert Snoozed",
                 "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                 "imageType": "CIRCLE",
@@ -426,7 +507,7 @@ def build_snooze_success_card(alert_key: str, alert_type: str, days: int) -> Dic
                         {
                             "decoratedText": {
                                 "topLabel": "Suppression Active",
-                                "text": f"💤 <b>{clean_type}</b> (<code>{alert_key}</code>) has been snoozed for <b>{days} days</b>.<br><font color=\"#5f6368\">It will not appear in daily proactive scans until the snooze period ends.</font>",
+                                "text": f'💤 <b>{clean_type}</b> (<code>{alert_key}</code>) has been snoozed for <b>{days} days</b>.<br><font color="#5f6368">It will not appear in daily proactive scans until the snooze period ends.</font>',
                                 "startIcon": {"knownIcon": "CLOCK"},
                                 "wrapText": True,
                             }
@@ -438,7 +519,7 @@ def build_snooze_success_card(alert_key: str, alert_type: str, days: int) -> Dic
     }
 
 
-def build_markdown_fallback(alerts: List[Dict[str, Any]]) -> str:
+def build_markdown_fallback(alerts: list[dict[str, Any]]) -> str:
     """Constructs plain text / Markdown fallback for Slack or Discord."""
     lines = ["**🔔 Sage: Proactive Advisory Scan**\n"]
     for a in alerts:
@@ -451,10 +532,10 @@ def collect_all_alerts(
     bq: Any,
     target_project: str,
     target_dataset: str,
-    user_email: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    user_email: str | None = None,
+) -> list[dict[str, Any]]:
     """Runs all spend optimization checks synchronously and filters out suppressed alerts."""
-    raw_alerts: List[Dict[str, Any]] = []
+    raw_alerts: list[dict[str, Any]] = []
     raw_alerts.extend(check_subscription_price_creep(bq, target_project, target_dataset))
     raw_alerts.extend(check_food_efficiency(bq, target_project, target_dataset))
     raw_alerts.extend(check_heloc_daily_cost(bq, target_project, target_dataset))
@@ -467,11 +548,11 @@ def collect_all_alerts(
 
 
 async def execute_alert_scan(
-    bq_client: Optional[Any] = None,
-    project_id: Optional[str] = None,
-    dataset_id: Optional[str] = None,
-    webhook_url: Optional[str] = None,
-    user_email: Optional[str] = None,
+    bq_client: Any | None = None,
+    project_id: str | None = None,
+    dataset_id: str | None = None,
+    webhook_url: str | None = None,
+    user_email: str | None = None,
 ) -> dict:
     """
     Scans BigQuery financial optimization views and generates proactive alerts
@@ -555,4 +636,3 @@ def snooze_spend_alert(alert_key_or_name: str, days: int = 7) -> str:
         return f"Successfully snoozed alert '{clean_key}' for {days} days."
     else:
         return f"Failed to snooze alert '{clean_key}'. Please check logs."
-

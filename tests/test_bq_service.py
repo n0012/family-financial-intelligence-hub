@@ -8,7 +8,7 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-import bq_service
+from app import bq_service
 
 
 class TestRunReadonlySql(unittest.TestCase):
@@ -70,8 +70,8 @@ class TestRunReadonlySql(unittest.TestCase):
 
 
 class TestConversationalAnalytics(unittest.TestCase):
-    @patch("bq_service.google.auth.default")
-    @patch("bq_service.requests.post")
+    @patch("app.bq_service.google.auth.default")
+    @patch("app.bq_service.requests.post")
     def test_ask_conversational_analytics_success(self, mock_post, mock_auth):
         mock_creds = MagicMock()
         mock_creds.valid = True
@@ -92,12 +92,12 @@ class TestConversationalAnalytics(unittest.TestCase):
         }
         mock_post.return_value = mock_resp
 
-        res = bq_service.ask_conversational_analytics("What can I cut?", project_id="sagely-family-finance")
+        res = bq_service.ask_conversational_analytics("What can I cut?", project_id="test-project")
         self.assertEqual(res["answer"], "Based on your subscriptions, you can save $45/mo.")
         self.assertEqual(res["sql"], "SELECT * FROM v_active_subscriptions")
 
-    @patch("bq_service.google.auth.default")
-    @patch("bq_service.requests.post")
+    @patch("app.bq_service.google.auth.default")
+    @patch("app.bq_service.requests.post")
     def test_ask_conversational_analytics_http_error(self, mock_post, mock_auth):
         mock_creds = MagicMock()
         mock_creds.valid = True
@@ -109,7 +109,7 @@ class TestConversationalAnalytics(unittest.TestCase):
         mock_resp.text = "Internal Server Error"
         mock_post.return_value = mock_resp
 
-        res = bq_service.ask_conversational_analytics("Help", project_id="sagely-family-finance")
+        res = bq_service.ask_conversational_analytics("Help", project_id="test-project")
         self.assertTrue(res["answer"].startswith("I ran into an issue analyzing that:"))
         self.assertIsNone(res["sql"])
 
@@ -149,7 +149,7 @@ class TestSessionHistory(unittest.TestCase):
         success = bq_service.save_session_history(
             thread_name="spaces/SPACE_1/threads/THREAD_3",
             space_name="spaces/SPACE_1",
-            user_email="nick@sagelycreations.com",
+            user_email="user@example.com",
             user_text="Can we afford dinner out tonight?",
             model_text="Yes, you have $180 remaining in dining for this week.",
             client=self.mock_client,
@@ -172,7 +172,6 @@ class TestSessionHistory(unittest.TestCase):
         self.assertEqual(cached[0]["userMessage"]["text"], "Can we afford dinner out tonight?")
 
 
-
 class TestApplyBigQuerySchema(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock()
@@ -183,6 +182,7 @@ class TestApplyBigQuerySchema(unittest.TestCase):
 
     def test_schema_file_success(self):
         import tempfile
+
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".sql") as tmp:
             tmp.write("CREATE TABLE IF NOT EXISTS `family_finance.test` (id STRING);")
             tmp_path = tmp.name

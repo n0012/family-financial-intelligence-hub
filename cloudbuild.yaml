@@ -68,7 +68,7 @@ steps:
           --set-env-vars="PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}" \
           --set-secrets="MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest" \
           --command="python" \
-          --args="job.py,sync" \
+          --args="-m,app.job,sync" \
           --max-retries=1 \
           --task-timeout=600s
 
@@ -79,7 +79,7 @@ steps:
           --set-env-vars="PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}" \
           --set-secrets="MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest" \
           --command="python" \
-          --args="job.py,alerts" \
+          --args="-m,app.job,alerts" \
           --max-retries=1 \
           --task-timeout=300s
     id: 'deploy-cloud-run-jobs'

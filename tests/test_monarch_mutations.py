@@ -1,23 +1,18 @@
 """
 Unit tests for PR 4 Monarch Money mutation guards, HMAC signing, and confirmation cards.
 """
+
 import asyncio
-from datetime import datetime, timezone
-import json
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import main
-import monarch_service
-from monarch_service import (
+from app import main, monarch_service
+from app.monarch_service import (
     HMAC_EXPIRATION_SECONDS,
-    build_recategorization_card,
-    build_recategorization_success_card,
     execute_guarded_recategorization,
     extract_card_action_parameters,
     generate_mutation_signature,
-    get_mutation_hmac_secret,
-    propose_transaction_recategorization,
     propose_transaction_recategorization_async,
     resolve_category,
     verify_mutation_signature,
@@ -25,12 +20,11 @@ from monarch_service import (
 
 
 class TestMonarchMutations(unittest.TestCase):
-
     def test_hmac_signature_generation_and_verification(self):
         txn_id = "txn_12345"
         cat_id = "cat_999"
-        user_email = "nick@sagelycreations.com"
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        user_email = "user@example.com"
+        now_ts = int(datetime.now(UTC).timestamp())
 
         sig = generate_mutation_signature(txn_id, cat_id, user_email, now_ts)
         self.assertIsInstance(sig, str)
@@ -44,8 +38,8 @@ class TestMonarchMutations(unittest.TestCase):
     def test_hmac_signature_tamper_detection(self):
         txn_id = "txn_12345"
         cat_id = "cat_999"
-        user_email = "nick@sagelycreations.com"
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        user_email = "user@example.com"
+        now_ts = int(datetime.now(UTC).timestamp())
 
         sig = generate_mutation_signature(txn_id, cat_id, user_email, now_ts)
 
@@ -67,8 +61,8 @@ class TestMonarchMutations(unittest.TestCase):
     def test_hmac_signature_expiration(self):
         txn_id = "txn_12345"
         cat_id = "cat_999"
-        user_email = "nick@sagelycreations.com"
-        old_ts = int(datetime.now(timezone.utc).timestamp()) - (HMAC_EXPIRATION_SECONDS + 60)
+        user_email = "user@example.com"
+        old_ts = int(datetime.now(UTC).timestamp()) - (HMAC_EXPIRATION_SECONDS + 60)
 
         sig = generate_mutation_signature(txn_id, cat_id, user_email, old_ts)
         is_valid, msg = verify_mutation_signature(txn_id, cat_id, user_email, old_ts, sig)
@@ -86,7 +80,7 @@ class TestMonarchMutations(unittest.TestCase):
                 "restaurants & dining": {"id": "cat_2", "name": "Restaurants & Dining", "group": "Food"},
                 "restaurantsdining": {"id": "cat_2", "name": "Restaurants & Dining", "group": "Food"},
             },
-            "last_fetched": datetime.now(timezone.utc).timestamp(),
+            "last_fetched": datetime.now(UTC).timestamp(),
         }
 
         # Exact ID match
@@ -118,7 +112,7 @@ class TestMonarchMutations(unittest.TestCase):
         self.assertIn("bulk", res_space["message"].lower())
 
     def test_propose_recategorization_pending_guard(self):
-        with patch("monarch_service.get_live_transaction_async") as mock_get_txn:
+        with patch("app.monarch_service.get_live_transaction_async") as mock_get_txn:
             mock_get_txn.return_value = {
                 "found": True,
                 "transaction_id": "txn_pending_1",
@@ -137,11 +131,13 @@ class TestMonarchMutations(unittest.TestCase):
         monarch_service._CATEGORY_CACHE = {
             "by_id": {"cat_1": {"id": "cat_1", "name": "Groceries", "group": "Food"}},
             "by_name": {"groceries": {"id": "cat_1", "name": "Groceries", "group": "Food"}},
-            "last_fetched": datetime.now(timezone.utc).timestamp(),
+            "last_fetched": datetime.now(UTC).timestamp(),
         }
 
-        with patch("monarch_service.get_live_transaction_async") as mock_get_txn, \
-             patch("monarch_service.get_monarch_client") as mock_get_client:
+        with (
+            patch("app.monarch_service.get_live_transaction_async") as mock_get_txn,
+            patch("app.monarch_service.get_monarch_client") as mock_get_client,
+        ):
             mock_get_txn.return_value = {
                 "found": True,
                 "transaction_id": "txn_posted_1",
@@ -176,8 +172,10 @@ class TestMonarchMutations(unittest.TestCase):
         mock_bq_query_job.result = MagicMock()
         mock_bq.query.return_value = mock_bq_query_job
 
-        with patch("monarch_service.get_monarch_client", AsyncMock(return_value=mock_client)), \
-             patch("monarch_service.get_bq_client", return_value=mock_bq):
+        with (
+            patch("app.monarch_service.get_monarch_client", AsyncMock(return_value=mock_client)),
+            patch("app.monarch_service.get_bq_client", return_value=mock_bq),
+        ):
             result = asyncio.run(execute_guarded_recategorization("txn_100", "cat_1", "Groceries"))
             self.assertTrue(result["success"])
             self.assertEqual(result["transaction_id"], "txn_100")
@@ -216,13 +214,11 @@ class TestMonarchMutations(unittest.TestCase):
         self.assertEqual(params2["transaction_id"], "txn_555")
 
     def test_webhook_card_clicked_confirm_success(self):
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        sig = generate_mutation_signature("txn_777", "cat_888", "nick@sagelycreations.com", now_ts)
+        now_ts = int(datetime.now(UTC).timestamp())
+        sig = generate_mutation_signature("txn_777", "cat_888", "user@example.com", now_ts)
         payload = {
             "type": "CARD_CLICKED",
-            "chat": {
-                "user": {"email": "nick@sagelycreations.com", "displayName": "Nick"}
-            },
+            "chat": {"user": {"email": "user@example.com", "displayName": "User"}},
             "commonEventObject": {
                 "invokedFunction": "confirm_recategorize",
                 "parameters": {
@@ -230,12 +226,15 @@ class TestMonarchMutations(unittest.TestCase):
                     "category_id": "cat_888",
                     "category_name": "Groceries",
                     "timestamp": str(now_ts),
-                    "user_email": "nick@sagelycreations.com",
+                    "user_email": "user@example.com",
                     "signature": sig,
                 },
             },
         }
-        with patch("main.execute_guarded_recategorization", AsyncMock(return_value={"success": True, "transaction_id": "txn_777"})):
+        with patch(
+            "app.main.execute_guarded_recategorization",
+            AsyncMock(return_value={"success": True, "transaction_id": "txn_777"}),
+        ):
             resp = asyncio.run(main.google_chat_webhook(payload))
             msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
             self.assertIn("successfully reclassified", msg["text"])
@@ -243,12 +242,10 @@ class TestMonarchMutations(unittest.TestCase):
             self.assertEqual(msg["cardsV2"][0]["cardId"], "recat_success_txn_777")
 
     def test_webhook_card_clicked_tampered_signature_rejected(self):
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        now_ts = int(datetime.now(UTC).timestamp())
         payload = {
             "type": "CARD_CLICKED",
-            "chat": {
-                "user": {"email": "nick@sagelycreations.com", "displayName": "Nick"}
-            },
+            "chat": {"user": {"email": "user@example.com", "displayName": "User"}},
             "commonEventObject": {
                 "invokedFunction": "confirm_recategorize",
                 "parameters": {
@@ -256,7 +253,7 @@ class TestMonarchMutations(unittest.TestCase):
                     "category_id": "cat_888",
                     "category_name": "Groceries",
                     "timestamp": str(now_ts),
-                    "user_email": "nick@sagelycreations.com",
+                    "user_email": "user@example.com",
                     "signature": "invalid_forged_signature_hex",
                 },
             },

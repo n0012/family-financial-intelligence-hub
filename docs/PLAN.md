@@ -167,7 +167,7 @@ terraform apply
 
 | Phase | Description | Command / Action | Status |
 | :--- | :--- | :--- | :--- |
-| **Phase 1: Bootstrap Project** | Provisioned project `sagely-family-finance` & Terraform infrastructure | `terraform apply` | **COMPLETED** ✅ |
+| **Phase 1: Bootstrap Project** | Provisioned project `family-finance-hub` & Terraform infrastructure | `terraform apply` | **COMPLETED** ✅ |
 | **Phase 2: Deploy Ingestion & Views** | Built container, deployed Cloud Run, and synchronized BigQuery schema | Cloud Build pipeline (`cloudbuild.yaml`) | **COMPLETED** ✅ |
 | **Phase 3: Deploy Advisor Agent** | Registered Gemini 3.8 Flash & Conversational Analytics Agent | `main.py` + AFC tool calls | **COMPLETED** ✅ |
 | **Phase 4: Daily Automation** | Configured daily sync (04:00 AM) & proactive alert scans (08:00 AM) | Cloud Scheduler (`monarch-daily-sync`, `monarch-daily-alerts`) | **COMPLETED** ✅ |
@@ -192,7 +192,7 @@ terraform apply
 
 ### **PR 1.5: Zero-Ingress Perimeter Security & Google Workspace Add-on Authentication**
 * **Zero-Ingress Pull Worker ([`chat_worker.py`](chat_worker.py))**: Hardened Cloud Run with `--ingress internal` and embedded an asynchronous Pub/Sub streaming pull worker that connects outbound to `monarch-chat-sub`, eliminating all public listening HTTP ports.
-* **IAM & Service Agent Hardening**: Configured Pub/Sub IAM publisher bindings for both `chat-api-push@system.gserviceaccount.com` (direct Chat API) and `service-475933066321@gcp-sa-gsuiteaddons.iam.gserviceaccount.com` (Google Workspace Add-on runtime).
+* **IAM & Service Agent Hardening**: Configured Pub/Sub IAM publisher bindings for both `chat-api-push@system.gserviceaccount.com` (direct Chat API) and `service-PROJECT_NUMBER@gcp-sa-gsuiteaddons.iam.gserviceaccount.com` (Google Workspace Add-on runtime).
 * **Cryptographic Token Verification**: Added Google OAuth Bearer token signature and audience validation, strictly verifying Google-issued service account tokens.
 * **Persona & Branding Rebrand**: Rebranded the assistant persona to **Sage** across all greetings, Card v2 headers, slash command help text, mention stripper regexes, and public CDN avatar hosting.
 
@@ -233,7 +233,7 @@ terraform apply
 ### **PR 5: Vertex AI Agent Platform Memory Bank & BigQuery `chat_history` Retirement**
 * **Extracted [`memory_service.py`](memory_service.py)**: Built client integration with Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank** (`Sage Memory Bank` on `us-central1`).
 * **Semantic Fact Extraction & Automatic Consolidation**: Uses foundation model embeddings (`text-embedding-005`) to automatically update, consolidate, and resolve conflicting facts in-place without manual deduplication.
-* **User-Scoped Memory Bank**: Memory retrieval and updates are dynamically anchored to the authenticated user's email (`nick@sagelycreations.com`) via thread-safe `ContextVar`.
+* **User-Scoped Memory Bank**: Memory retrieval and updates are dynamically anchored to the authenticated user's email (e.g. `user@example.com`) via thread-safe `ContextVar`.
 * **Gemini AFC Tool (`store_user_preference`)**: Equips Gemini 3.8 Flash to autonomously persist explicit goals, discretionary spending limits, debt payoff milestones, and alerts on the fly during natural conversation.
 * **Retired BigQuery `chat_history`**: Completely eliminated writes and queries to BigQuery `family_finance.chat_history` table in favor of native Memory Bank facts, while retaining ultra-low-latency in-memory LRU caching strictly for intra-turn multi-turn pronoun tracking.
 * **Full Unit Test Coverage ([`tests/test_memory_service.py`](tests/test_memory_service.py))**: Added 11 new unit tests covering client authentication, email resolution, prompt block formatting, fact generation, and error fallback, bringing the repository suite to **62 passing unit tests**.
@@ -251,7 +251,18 @@ terraform apply
   * Every alert card includes an interactive **"💤 Snooze 7 Days"** button sending `action=snooze_alert`.
   * Chat webhook handles `CARD_CLICKED` snooze actions and returns a formatted confirmation card widget (`build_snooze_success_card`).
 * **Gemini AFC Tool (`snooze_spend_alert`)**: Equips conversational agent to snooze alerts conversationally (e.g., *"Snooze Netflix alerts for 30 days"*).
-* **Full Unit Test Coverage ([`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py))**: Added 12 new unit tests covering overlap detection, micro-leakage, budget caps, active suppression queries, Card v2 snooze clicks, and AFC tool calls, expanding the test suite to **74 passing unit tests**.
+* **Full Unit Test Coverage ([`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py))**: Added 13 new unit tests covering overlap detection, micro-leakage, dining and grocery budget caps, active suppression queries, Card v2 snooze clicks, and AFC tool calls, expanding the test suite to **75 passing unit tests**.
 
+### **App Rebranding: FinSage**
+* Rebranded assistant persona from "Sage" to **FinSage** across all conversational prompts, Google Chat Card v2 headers, notification strings, and system instructions.
+* Added support for both `@FinSage` and legacy `@Sage` mention triggers.
+* Added groceries budget cap enforcement to `check_memory_budget_limits` in `alerts.py` (identified during Claude Code strategy collaboration).
 
-
+### **PR 7 Roadmap: Claude Code Collaborative Anomaly Alerting & Debt Acceleration**
+* Comprehensive strategy documented in [`docs/ALERTS_STRATEGY.md`](docs/ALERTS_STRATEGY.md).
+* **Alert 1: `v_duplicate_charges` (`DUPLICATE_CHARGE`)**: Self-join detecting double charges within 72h for immediate merchant refunds.
+* **Alert 2: `v_new_subscriptions` (`NEW_SUBSCRIPTION_DETECTED`)**: Flags first-time charges in past 35 days to intercept unwanted free trial conversions.
+* **Alert 3: `v_category_spend_baseline` (`CATEGORY_SPEND_SPIKE`)**: Adaptive z-score outlier detection vs 6-month trailing category medians.
+* **Alert 4: `v_paycheck_surplus_sweep` (`PAYCHECK_SURPLUS_SWEEP`)**: Calculates safe-to-sweep surplus on income deposits to immediately reduce high-interest variable debt and credit lines.
+* **Alert 5: `v_annual_bill_radar` (`ANNUAL_BILL_RADAR`)**: Pre-warns 30 days ahead of large annual/semi-annual lump-sum debits.
+* **Alert 6: `v_heloc_rate_history` (`INTEREST_RATE_SHIFT`)**: Tracks benchmark rate changes and recomputes exact daily carry impact on milestone payoff targets.

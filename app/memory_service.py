@@ -6,31 +6,29 @@ Agent Platform Memory Bank (Reasoning Engine memory service).
 Replaces fragile BigQuery chat_history OLAP logging with semantic memory consolidation.
 """
 
-import contextvars
 import logging
 import os
-from typing import List, Optional
 
 import google.auth
 from google.auth.transport.requests import Request
 
-from monarch_service import CURRENT_USER_EMAIL
+from app.monarch_service import CURRENT_USER_EMAIL
 
 logger = logging.getLogger("memory_service")
 
 DEFAULT_MEMORY_BANK_NAME = os.environ.get(
     "VERTEX_MEMORY_BANK_NAME",
-    "projects/475933066321/locations/us-central1/reasoningEngines/3539210831822585856",
+    "projects/PROJECT_ID/locations/us-central1/reasoningEngines/ENGINE_ID",
 )
-DEFAULT_USER_EMAIL = os.environ.get("DEFAULT_USER_EMAIL", "nick@sagelycreations.com")
+DEFAULT_USER_EMAIL = os.environ.get("DEFAULT_USER_EMAIL", "user@example.com")
 GCP_REGION = os.environ.get("GOOGLE_CLOUD_LOCATION", os.environ.get("GCP_REGION", "us-central1"))
-GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", os.environ.get("BQ_PROJECT_ID", "sagely-family-finance"))
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", os.environ.get("BQ_PROJECT_ID", "family-finance-hub"))
 
 
 _cached_client = None
 
 
-def _resolve_user_email(user_email: Optional[str] = None) -> str:
+def _resolve_user_email(user_email: str | None = None) -> str:
     """Resolves target user email with fallback to context variable and default."""
     if user_email and user_email.strip() and user_email.strip() != "unknown":
         return user_email.strip()
@@ -41,10 +39,9 @@ def _resolve_user_email(user_email: Optional[str] = None) -> str:
 
 
 def get_memory_client(
-    project_id: Optional[str] = None,
-    location: Optional[str] = None,
+    project_id: str | None = None,
+    location: str | None = None,
 ):
-
     """
     Returns an authenticated agentplatform.Client configured with Application Default
     Credentials (ADC) to prevent API key conflicts with Vertex AI IAM endpoints.
@@ -59,9 +56,7 @@ def get_memory_client(
     try:
         import agentplatform
 
-        creds, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         if not creds.valid:
             creds.refresh(Request())
 
@@ -76,7 +71,7 @@ def get_memory_client(
         return None
 
 
-def get_memory_bank_name(client=None) -> Optional[str]:
+def get_memory_bank_name(client=None) -> str | None:
     """
     Resolves the Memory Bank resource name from environment variable,
     or queries available memory banks in the project.
@@ -101,7 +96,7 @@ def get_memory_bank_name(client=None) -> Optional[str]:
     return None
 
 
-def retrieve_user_memories(user_email: Optional[str] = None, client=None) -> List[str]:
+def retrieve_user_memories(user_email: str | None = None, client=None) -> list[str]:
     """
     Retrieves consolidated long-term memories and preferences scoped to the user's email.
     Returns a list of extracted fact strings.
@@ -133,7 +128,7 @@ def retrieve_user_memories(user_email: Optional[str] = None, client=None) -> Lis
         return []
 
 
-def format_memories_for_prompt(memories: List[str]) -> str:
+def format_memories_for_prompt(memories: list[str]) -> str:
     """
     Formats a list of memory facts into a clean system instruction block for Gemini.
     """
@@ -155,7 +150,7 @@ def format_memories_for_prompt(memories: List[str]) -> str:
 
 def save_user_preference(
     preference_or_rule: str,
-    user_email: Optional[str] = None,
+    user_email: str | None = None,
     client=None,
 ) -> bool:
     """
@@ -197,7 +192,7 @@ def store_user_preference(preference_or_rule: str) -> str:
 
     Call this tool whenever the user instructs Sage to remember a goal, sets a budget cap,
     establishes a payoff deadline, or defines a spending rule (e.g. 'Remember that we want to cap
-    dining at $400/month', 'Our target is to pay off the HELOC by December 2026', 'Ignore coffee transactions <$10').
+    dining at $400/month', 'Our target is to pay off our loan early', 'Ignore coffee transactions <$10').
 
     Args:
         preference_or_rule: The concise rule, goal, or preference statement to store.
@@ -208,4 +203,3 @@ def store_user_preference(preference_or_rule: str) -> str:
         return f"Successfully saved to your long-term Memory Bank for {user_email}: '{preference_or_rule.strip()}'."
     else:
         return f"Could not record preference into Memory Bank due to a transient service error. The rule was: '{preference_or_rule.strip()}'."
-

@@ -8,44 +8,40 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
-from typing import Optional, Any, List, Dict
 
-from google.cloud import bigquery
 import google.auth
-from google.auth.transport.requests import Request as GoogleAuthRequest
 import requests
-
-from config import resolve_secret
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.cloud import bigquery
 
 logger = logging.getLogger("monarch-gemini.bq")
 
 FORBIDDEN_SQL_PATTERN = r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke)\b"
 
-_bq_client: Optional[bigquery.Client] = None
+_bq_client: bigquery.Client | None = None
 
 # In-memory caches for fast multi-turn responses within container lifetime
 THREAD_HISTORY: dict[str, list[dict]] = {}
 SPACE_HISTORY: dict[str, list[dict]] = {}
 
 
-def get_target_project(project_id: Optional[str] = None) -> str:
+def get_target_project(project_id: str | None = None) -> str:
     """Resolves active Google Cloud Project ID."""
     return (
         project_id
         or os.getenv("BQ_PROJECT_ID")
         or os.getenv("PROJECT_ID")
         or os.getenv("GOOGLE_CLOUD_PROJECT")
-        or "sagely-family-finance"
+        or "family-finance-hub"
     )
 
 
-def get_target_dataset(dataset_id: Optional[str] = None) -> str:
+def get_target_dataset(dataset_id: str | None = None) -> str:
     """Resolves active BigQuery dataset ID."""
     return dataset_id or os.getenv("BQ_DATASET_ID") or "family_finance"
 
 
-def get_bq_client(project_id: Optional[str] = None) -> bigquery.Client:
+def get_bq_client(project_id: str | None = None) -> bigquery.Client:
     """
     Returns a cached BigQuery client singleton for the target project.
     """
@@ -64,13 +60,11 @@ def clear_session_history() -> None:
 
 def run_readonly_sql(
     sql_query: str,
-    project_id: Optional[str] = None,
-    client: Optional[bigquery.Client] = None,
+    project_id: str | None = None,
+    client: bigquery.Client | None = None,
     max_bytes_billed: int = 100_000_000,
     max_results: int = 50,
 ) -> str:
-
-
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
     (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_overlap,
@@ -101,8 +95,8 @@ def run_readonly_sql(
 
 def ask_conversational_analytics(
     question: str,
-    history: Optional[list] = None,
-    project_id: Optional[str] = None,
+    history: list | None = None,
+    project_id: str | None = None,
 ) -> dict:
     """
     Sends natural language question to Gemini Conversational Analytics Agent
@@ -124,9 +118,7 @@ def ask_conversational_analytics(
         payload = {
             "parent": ca_parent,
             "messages": messages_list,
-            "data_agent_context": {
-                "data_agent": f"{ca_parent}/dataAgents/family-finance-advisor"
-            },
+            "data_agent_context": {"data_agent": f"{ca_parent}/dataAgents/family-finance-advisor"},
         }
 
         resp = requests.post(
@@ -185,11 +177,11 @@ def ask_conversational_analytics(
 
 
 def get_session_history(
-    thread_name: Optional[str],
-    space_name: Optional[str],
-    project_id: Optional[str] = None,
-    dataset_id: Optional[str] = None,
-    client: Optional[bigquery.Client] = None,
+    thread_name: str | None,
+    space_name: str | None,
+    project_id: str | None = None,
+    dataset_id: str | None = None,
+    client: bigquery.Client | None = None,
     limit: int = 5,
 ) -> list[dict]:
     """
@@ -208,14 +200,14 @@ def get_session_history(
 
 
 def save_session_history(
-    thread_name: Optional[str],
-    space_name: Optional[str],
+    thread_name: str | None,
+    space_name: str | None,
     user_email: str,
     user_text: str,
     model_text: str,
-    project_id: Optional[str] = None,
-    dataset_id: Optional[str] = None,
-    client: Optional[bigquery.Client] = None,
+    project_id: str | None = None,
+    dataset_id: str | None = None,
+    client: bigquery.Client | None = None,
 ) -> bool:
     """
     Saves conversation turn to in-memory caches for immediate multi-turn thread continuity.
@@ -240,9 +232,9 @@ def save_session_history(
 
 
 def apply_bigquery_schema(
-    schema_file_path: Optional[str] = None,
-    project_id: Optional[str] = None,
-    client: Optional[bigquery.Client] = None,
+    schema_file_path: str | None = None,
+    project_id: str | None = None,
+    client: bigquery.Client | None = None,
 ) -> dict:
     """
     Applies DDL statements and analytical views from schema.sql to the target project dataset.
@@ -252,7 +244,7 @@ def apply_bigquery_schema(
     if not os.path.exists(path):
         raise FileNotFoundError(f"Schema file not found at {path}")
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         sql_content = f.read()
 
     bq = client or get_bq_client(target_project)

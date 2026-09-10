@@ -1,11 +1,12 @@
 import asyncio
+import os
 import unittest
 from unittest.mock import MagicMock, patch
-import os
+
 from fastapi import HTTPException
-import config
-import alerts
-from main import verify_chat_origin
+
+from app import alerts, config
+from app.main import verify_chat_origin
 
 
 class TestConfig(unittest.TestCase):
@@ -35,11 +36,12 @@ class TestConfig(unittest.TestCase):
 
     def test_get_excluded_institutions_env(self):
         with patch.object(config, "secretmanager", None):
-            with patch.dict(os.environ, {"CONFIG_FILE": "/nonexistent/config.yaml", "EXCLUDED_INSTITUTIONS": "testbank, dummycorp"}):
+            with patch.dict(
+                os.environ, {"CONFIG_FILE": "/nonexistent/config.yaml", "EXCLUDED_INSTITUTIONS": "testbank, dummycorp"}
+            ):
                 excluded = config.get_excluded_institutions()
                 self.assertIn("testbank", excluded)
                 self.assertIn("dummycorp", excluded)
-
 
 
 class TestChatAuth(unittest.TestCase):
@@ -47,30 +49,30 @@ class TestChatAuth(unittest.TestCase):
         config.clear_secret_cache()
 
     def test_api_key_valid(self):
-        with patch("main.resolve_secret", return_value="valid-secret-key"):
+        with patch("app.main.resolve_secret", return_value="valid-secret-key"):
             res = verify_chat_origin(authorization=None, x_api_key="valid-secret-key")
             self.assertTrue(res)
 
     def test_api_key_invalid(self):
-        with patch("main.resolve_secret", return_value="valid-secret-key"):
+        with patch("app.main.resolve_secret", return_value="valid-secret-key"):
             with self.assertRaises(HTTPException) as ctx:
                 verify_chat_origin(authorization=None, x_api_key="wrong-key")
             self.assertEqual(ctx.exception.status_code, 401)
 
     def test_chat_auth_disabled_non_prod_allowed(self):
-        with patch("main.IS_PROD", False):
+        with patch("app.main.IS_PROD", False):
             with patch.dict(os.environ, {"CHAT_AUTH_DISABLED": "true"}):
                 res = verify_chat_origin(authorization=None, x_api_key=None)
                 self.assertTrue(res)
 
     def test_chat_auth_disabled_in_prod_rejected(self):
-        with patch("main.IS_PROD", True):
+        with patch("app.main.IS_PROD", True):
             with patch.dict(os.environ, {"CHAT_AUTH_DISABLED": "true"}):
                 with self.assertRaises(HTTPException) as ctx:
                     verify_chat_origin(authorization=None, x_api_key=None)
                 self.assertEqual(ctx.exception.status_code, 401)
 
-    @patch("main.id_token.verify_oauth2_token")
+    @patch("app.main.id_token.verify_oauth2_token")
     def test_valid_google_chat_bearer_token(self, mock_verify):
         mock_verify.return_value = {
             "email": "chat@system.gserviceaccount.com",
@@ -79,7 +81,7 @@ class TestChatAuth(unittest.TestCase):
         res = verify_chat_origin(authorization="Bearer valid-chat-token", x_api_key=None)
         self.assertTrue(res)
 
-    @patch("main.id_token.verify_oauth2_token")
+    @patch("app.main.id_token.verify_oauth2_token")
     def test_rejected_unauthorized_service_account(self, mock_verify):
         mock_verify.return_value = {
             "email": "attacker@evil-project.iam.gserviceaccount.com",
@@ -90,7 +92,7 @@ class TestChatAuth(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("Unauthorized caller service account", ctx.exception.detail)
 
-    @patch("main.id_token.verify_oauth2_token")
+    @patch("app.main.id_token.verify_oauth2_token")
     def test_rejected_invalid_issuer(self, mock_verify):
         mock_verify.return_value = {
             "email": "chat@system.gserviceaccount.com",
@@ -102,7 +104,7 @@ class TestChatAuth(unittest.TestCase):
         self.assertIn("Invalid Google Chat token issuer", ctx.exception.detail)
 
     def test_missing_credentials_rejected(self):
-        with patch("main.IS_PROD", True):
+        with patch("app.main.IS_PROD", True):
             with self.assertRaises(HTTPException) as ctx:
                 verify_chat_origin(authorization=None, x_api_key=None)
             self.assertEqual(ctx.exception.status_code, 401)
@@ -124,13 +126,13 @@ class TestAlerts(unittest.TestCase):
                 "title": "HELOC Cost: $12.50/day",
                 "detail": "Balance is $50,000",
                 "suggested_fix": "Accelerate paydown",
-            }
+            },
         ]
         payload = alerts.build_chat_card_v2(mock_alerts)
         self.assertIn("cardsV2", payload)
         self.assertEqual(len(payload["cardsV2"]), 1)
         card = payload["cardsV2"][0]["card"]
-        self.assertEqual(card["header"]["title"], "Sage")
+        self.assertEqual(card["header"]["title"], "FinSage")
         widgets = card["sections"][0]["widgets"]
         self.assertEqual(len(widgets), 2)
         self.assertIn("TestService", widgets[0]["decoratedText"]["text"])
@@ -150,12 +152,11 @@ class TestAlerts(unittest.TestCase):
     def test_execute_alert_scan_with_mock_bq(self):
         mock_bq = MagicMock()
         mock_bq.query.return_value.result.return_value = []
-        res = asyncio.run(alerts.execute_alert_scan(
-            bq_client=mock_bq,
-            project_id="test-project",
-            dataset_id="test_dataset",
-            webhook_url=None
-        ))
+        res = asyncio.run(
+            alerts.execute_alert_scan(
+                bq_client=mock_bq, project_id="test-project", dataset_id="test_dataset", webhook_url=None
+            )
+        )
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["alert_count"], 0)
         self.assertFalse(res["webhook_dispatched"])
@@ -214,8 +215,8 @@ class TestAlerts(unittest.TestCase):
         mock_row.current_month_dining = 512.40
         mock_bq.query.return_value.result.return_value = [mock_row]
 
-        with patch("memory_service.retrieve_user_memories", return_value=["Capped dining spend at $450/month"]):
-            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@sagely.com")
+        with patch("app.memory_service.retrieve_user_memories", return_value=["Capped dining spend at $450/month"]):
+            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@example.com")
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0]["type"], "BUDGET_CAP_EXCEEDED")
             self.assertEqual(found[0]["severity"], "WARNING")
@@ -229,12 +230,29 @@ class TestAlerts(unittest.TestCase):
         mock_row.current_month_dining = 400.00  # 88.8% of $450 cap
         mock_bq.query.return_value.result.return_value = [mock_row]
 
-        with patch("memory_service.retrieve_user_memories", return_value=["Capped dining spend at $450/month"]):
-            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@sagely.com")
+        with patch("app.memory_service.retrieve_user_memories", return_value=["Capped dining spend at $450/month"]):
+            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@example.com")
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0]["type"], "BUDGET_CAP_PACING")
             self.assertEqual(found[0]["severity"], "INFO")
             self.assertEqual(found[0]["alert_key"], "budget_pacing:dining:2026-09")
+
+    def test_check_memory_budget_limits_groceries(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.current_month = "2026-09"
+        mock_row.current_month_groceries = 850.00
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        with patch(
+            "app.memory_service.retrieve_user_memories", return_value=["Budget for groceries is $700 per month"]
+        ):
+            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@example.com")
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0]["type"], "BUDGET_CAP_EXCEEDED")
+            self.assertEqual(found[0]["severity"], "WARNING")
+            self.assertEqual(found[0]["alert_key"], "budget_cap:groceries:2026-09")
+            self.assertIn("$850.00", found[0]["detail"])
 
     def test_get_active_suppressions(self):
         mock_bq = MagicMock()
@@ -305,8 +323,8 @@ class TestAlerts(unittest.TestCase):
         self.assertIn("7 days", text)
 
     def test_snooze_spend_alert_tool(self):
-        with patch("alerts.suppress_alert", return_value=True) as mock_suppress:
-            with patch("alerts.bigquery.Client"):
+        with patch("app.alerts.suppress_alert", return_value=True) as mock_suppress:
+            with patch("app.alerts.bigquery.Client"):
                 res = alerts.snooze_spend_alert("Netflix Price Hike", days=14)
                 self.assertIn("Successfully snoozed", res)
                 mock_suppress.assert_called_once()
@@ -315,7 +333,8 @@ class TestAlerts(unittest.TestCase):
                 self.assertEqual(kwargs.get("days") or args[5], 14)
 
     def test_main_card_clicked_snooze_alert(self):
-        import main
+        from app import main
+
         card_event = {
             "type": "CARD_CLICKED",
             "action": {
@@ -326,9 +345,9 @@ class TestAlerts(unittest.TestCase):
                     {"key": "days", "value": "7"},
                 ],
             },
-            "user": {"email": "nick@sagelycreations.com"},
+            "user": {"email": "user@example.com"},
         }
-        with patch("main.suppress_alert", return_value=True) as mock_suppress:
+        with patch("app.main.suppress_alert", return_value=True) as mock_suppress:
             res = asyncio.run(main.google_chat_webhook(card_event))
             self.assertIn("cardsV2", res)
             self.assertIn("Price Creep", res.get("text", ""))
@@ -337,31 +356,37 @@ class TestAlerts(unittest.TestCase):
 
 class TestJobCLI(unittest.TestCase):
     def test_run_sync_delegation(self):
-        import job
-        with patch("monarch_service.execute_sync", return_value={"status": "success", "synced_counts": {}}) as mock_sync:
+        from app import job
+
+        with patch(
+            "app.monarch_service.execute_sync", return_value={"status": "success", "synced_counts": {}}
+        ) as mock_sync:
             res = asyncio.run(job.run_sync(days_back=45))
             mock_sync.assert_called_once_with(days_back=45)
             self.assertEqual(res["status"], "success")
 
     def test_run_alerts_delegation(self):
-        import job
-        with patch("alerts.execute_alert_scan", return_value={"status": "success", "alert_count": 0}) as mock_scan:
+        from app import job
+
+        with patch("app.alerts.execute_alert_scan", return_value={"status": "success", "alert_count": 0}) as mock_scan:
             res = asyncio.run(job.run_alerts())
             mock_scan.assert_called_once()
             self.assertEqual(res["status"], "success")
 
     def test_job_main_sync_cli(self):
-        import job
+        from app import job
+
         with patch("sys.argv", ["job", "sync", "--days-back", "15"]):
-            with patch("job.run_sync", return_value={"status": "success"}) as mock_run_sync:
+            with patch("app.job.run_sync", return_value={"status": "success"}) as mock_run_sync:
                 exit_code = job.main()
                 self.assertEqual(exit_code, 0)
                 mock_run_sync.assert_called_once_with(15)
 
     def test_job_main_alerts_cli(self):
-        import job
+        from app import job
+
         with patch("sys.argv", ["job", "alerts"]):
-            with patch("job.run_alerts", return_value={"status": "success"}) as mock_run_alerts:
+            with patch("app.job.run_alerts", return_value={"status": "success"}) as mock_run_alerts:
                 exit_code = job.main()
                 self.assertEqual(exit_code, 0)
                 mock_run_alerts.assert_called_once()
@@ -369,8 +394,9 @@ class TestJobCLI(unittest.TestCase):
 
 class TestChatWorker(unittest.TestCase):
     def test_process_message_dispatches_and_acks(self):
-        import chat_worker
         import json
+
+        from app import chat_worker
 
         sample_event = {
             "type": "MESSAGE",
@@ -383,11 +409,12 @@ class TestChatWorker(unittest.TestCase):
 
         loop = asyncio.new_event_loop()
         import threading
+
         t = threading.Thread(target=loop.run_forever, daemon=True)
         t.start()
 
         try:
-            with patch("main.google_chat_webhook", return_value={"status": "ok"}) as mock_handler:
+            with patch("app.main.google_chat_webhook", return_value={"status": "ok"}) as mock_handler:
                 chat_worker.process_message(mock_msg, loop)
                 mock_msg.ack.assert_called_once()
                 mock_handler.assert_called_once_with(sample_event, is_pubsub_override=True)
@@ -397,8 +424,9 @@ class TestChatWorker(unittest.TestCase):
             loop.close()
 
     def test_background_chat_worker_lifecycle(self):
-        import chat_worker
         from unittest.mock import MagicMock
+
+        from app import chat_worker
 
         mock_subscriber = MagicMock()
         mock_future = MagicMock()

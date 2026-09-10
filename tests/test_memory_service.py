@@ -1,23 +1,23 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-import memory_service
-from monarch_service import CURRENT_USER_EMAIL
+from app import memory_service
+from app.monarch_service import CURRENT_USER_EMAIL
 
 
 class TestMemoryService(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock()
-        CURRENT_USER_EMAIL.set("nick@sagelycreations.com")
+        CURRENT_USER_EMAIL.set("user@example.com")
 
     def test_resolve_user_email_explicit(self):
-        email = memory_service._resolve_user_email("alice@sagelycreations.com")
-        self.assertEqual(email, "alice@sagelycreations.com")
+        email = memory_service._resolve_user_email("alice@example.com")
+        self.assertEqual(email, "alice@example.com")
 
     def test_resolve_user_email_from_context(self):
-        CURRENT_USER_EMAIL.set("bob@sagelycreations.com")
+        CURRENT_USER_EMAIL.set("bob@example.com")
         email = memory_service._resolve_user_email(None)
-        self.assertEqual(email, "bob@sagelycreations.com")
+        self.assertEqual(email, "bob@example.com")
 
     def test_resolve_user_email_fallback_on_unknown(self):
         CURRENT_USER_EMAIL.set("unknown")
@@ -26,7 +26,7 @@ class TestMemoryService(unittest.TestCase):
 
     def test_retrieve_user_memories_success(self):
         mock_mem1 = MagicMock()
-        mock_mem1.memory.fact = "Nick's financial preferences: Capped dining spend at $400/month."
+        mock_mem1.memory.fact = "User's financial preferences: Capped dining spend at $400/month."
         mock_mem2 = MagicMock()
         mock_mem2.memory.fact = "Target HELOC payoff date: December 2026."
 
@@ -35,7 +35,7 @@ class TestMemoryService(unittest.TestCase):
         self.mock_client.memory_banks.memories.retrieve.return_value = mock_page
 
         memories = memory_service.retrieve_user_memories(
-            user_email="nick@sagelycreations.com",
+            user_email="user@example.com",
             client=self.mock_client,
         )
 
@@ -45,14 +45,14 @@ class TestMemoryService(unittest.TestCase):
 
         self.mock_client.memory_banks.memories.retrieve.assert_called_once_with(
             name=memory_service.DEFAULT_MEMORY_BANK_NAME,
-            scope={"user_id": "nick@sagelycreations.com"},
+            scope={"user_id": "user@example.com"},
         )
 
     def test_retrieve_user_memories_error_fallback(self):
         self.mock_client.memory_banks.memories.retrieve.side_effect = RuntimeError("API unavailable")
 
         memories = memory_service.retrieve_user_memories(
-            user_email="nick@sagelycreations.com",
+            user_email="user@example.com",
             client=self.mock_client,
         )
         self.assertEqual(memories, [])
@@ -78,7 +78,7 @@ class TestMemoryService(unittest.TestCase):
 
         success = memory_service.save_user_preference(
             preference_or_rule="Capped monthly dining spend at $450.",
-            user_email="nick@sagelycreations.com",
+            user_email="user@example.com",
             client=self.mock_client,
         )
 
@@ -86,7 +86,7 @@ class TestMemoryService(unittest.TestCase):
         self.mock_client.memory_banks.memories.generate.assert_called_once_with(
             name=memory_service.DEFAULT_MEMORY_BANK_NAME,
             direct_memories_source={"direct_memories": [{"fact": "Capped monthly dining spend at $450."}]},
-            scope={"user_id": "nick@sagelycreations.com"},
+            scope={"user_id": "user@example.com"},
         )
 
     def test_save_user_preference_empty_string(self):
@@ -101,25 +101,25 @@ class TestMemoryService(unittest.TestCase):
         self.mock_client.memory_banks.memories.generate.side_effect = Exception("Vertex error")
         success = memory_service.save_user_preference(
             "Some new rule",
-            user_email="nick@sagelycreations.com",
+            user_email="user@example.com",
             client=self.mock_client,
         )
         self.assertFalse(success)
 
-    @patch("memory_service.save_user_preference")
+    @patch("app.memory_service.save_user_preference")
     def test_store_user_preference_tool_success(self, mock_save):
         mock_save.return_value = True
-        CURRENT_USER_EMAIL.set("nick@sagelycreations.com")
+        CURRENT_USER_EMAIL.set("user@example.com")
 
         reply = memory_service.store_user_preference("Prioritize HELOC debt payoff with all bonus income.")
         self.assertIn("Successfully saved to your long-term Memory Bank", reply)
-        self.assertIn("nick@sagelycreations.com", reply)
+        self.assertIn("user@example.com", reply)
         self.assertIn("Prioritize HELOC debt payoff", reply)
 
-    @patch("memory_service.save_user_preference")
+    @patch("app.memory_service.save_user_preference")
     def test_store_user_preference_tool_failure(self, mock_save):
         mock_save.return_value = False
-        CURRENT_USER_EMAIL.set("nick@sagelycreations.com")
+        CURRENT_USER_EMAIL.set("user@example.com")
 
         reply = memory_service.store_user_preference("Some rule")
         self.assertIn("Could not record preference into Memory Bank", reply)

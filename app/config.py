@@ -3,11 +3,11 @@ Configuration and secrets management for Monarch Money, BigQuery, and Gemini.
 Resolves secrets from GCP Secret Manager with environment variable fallback,
 and parses local YAML/JSON configuration files.
 """
+
 import functools
 import json
 import logging
 import os
-from typing import Optional, Set, Dict, Any
 
 try:
     import yaml
@@ -21,7 +21,7 @@ except ImportError:
 
 logger = logging.getLogger("monarch-gemini.config")
 
-BQ_PROJECT_ID = os.getenv("PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "sagely-family-finance"))
+BQ_PROJECT_ID = os.getenv("PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "family-finance-hub"))
 BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "family_finance")
 
 IS_PROD = bool(os.getenv("K_SERVICE"))
@@ -32,7 +32,7 @@ DEFAULT_EXCLUDED_INSTITUTIONS: set[str] = set()
 
 
 @functools.lru_cache(maxsize=128)
-def resolve_secret(secret_name: str, env_var: str) -> Optional[str]:
+def resolve_secret(secret_name: str, env_var: str) -> str | None:
     """Resolves secret from Secret Manager latest version, falling back to environment variable.
     Cached via LRU cache to prevent repeated Secret Manager network calls per request.
     """
@@ -68,14 +68,14 @@ def load_local_config() -> dict:
             try:
                 if file_path.endswith((".yaml", ".yml")):
                     if yaml:
-                        with open(file_path, "r") as f:
+                        with open(file_path) as f:
                             data = yaml.safe_load(f)
                             if isinstance(data, dict):
                                 return data
                     else:
                         logger.warning("PyYAML not installed; unable to parse YAML config file.")
                 else:
-                    with open(file_path, "r") as f:
+                    with open(file_path) as f:
                         data = json.load(f)
                         if isinstance(data, dict):
                             return data
