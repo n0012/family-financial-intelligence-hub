@@ -167,9 +167,15 @@ terraform apply
 
 | Phase | Description | Command / Action | Status |
 | :--- | :--- | :--- | :--- |
-| **Phase 1: Bootstrap Project** | Provisioned project `your-gcp-project-id` & Terraform infrastructure | `terraform apply` (31 resources) | **COMPLETED** ✅ |
+| **Phase 1: Bootstrap Project** | Provisioned project `sagely-family-finance` & Terraform infrastructure | `terraform apply` | **COMPLETED** ✅ |
 | **Phase 2: Deploy Ingestion & Views** | Built container, deployed Cloud Run, and synchronized BigQuery schema | Cloud Build pipeline (`cloudbuild.yaml`) | **COMPLETED** ✅ |
-| **Phase 3: Deploy Advisor Agent** | Registered Conversational Analytics Agent `family-finance-advisor` | `python3 create_ca_agent.py` | **COMPLETED** ✅ |
-| **Phase 4: Daily Automation** | Configured daily sync (04:00 AM) & proactive alert scans (08:00 AM) | Cloud Scheduler (`monarch-daily-sync`, `monarch-daily-advisor-alerts`) | **COMPLETED** ✅ |
-| **Phase 5: Operational Runbook** | Documented credentials setup, operations, and zero-downtime updates | Updated [`README.md`](./README.md) | **COMPLETED** ✅ |
+| **Phase 3: Deploy Advisor Agent** | Registered Gemini 3.8 Flash & Conversational Analytics Agent | `main.py` + AFC tool calls | **COMPLETED** ✅ |
+| **Phase 4: Daily Automation** | Configured daily sync (04:00 AM) & proactive alert scans (08:00 AM) | Cloud Scheduler (`monarch-daily-sync`, `monarch-daily-alerts`) | **COMPLETED** ✅ |
+| **Phase 5: Rebranding & Security** | Renamed bot to **Sage**, locked down Cloud Run to Zero Ingress, configured Pub/Sub pull worker | `deploy.sh` + `chat_worker.py` | **COMPLETED** ✅ |
+| **PR 1: Config & Alerts** | Extracted `config.py`, `alerts.py`, and `job.py` CLI runner | Unit tests passing (21/21) | **COMPLETED** ✅ |
+| **PR 1.5: Security & Pub/Sub** | Embedded pull worker, OAuth token verification, GSuite Addons SA IAM | Live tested in Google Chat | **COMPLETED** ✅ |
+| **PR 2: Monarch Service** | Extracted `monarch_service.py`, added live balance/transaction/Plaid tools | Unit tests passing (28/28), deployed `monarch-gemini-wrapper-00052-lfw` | **COMPLETED** ✅ |
+| **PR 3: BQ Service** | Modularize BigQuery schema, view management, and chat history persistence | `bq_service.py` | **NEXT** ⏳ |
+| **PR 4: Guarded Mutations** | HMAC-guarded transaction category updates & confirmation cards | Rate-limited mutations | **PLANNED** ⏳ |
+| **PR 5: Memory Bank** | User-scoped financial profile, goals, payoff targets, and multi-thread context | Persistent memory bank | **PLANNED** ⏳ |
 
