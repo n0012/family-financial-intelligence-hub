@@ -133,9 +133,8 @@ monarch-gemini/
 ├── config.example.json         # JSON configuration template
 ├── sync_secrets_to_gcp.sh      # Automated secret synchronization from .env.local to Secret Manager
 ├── create_ca_agent.py          # Google Cloud Conversational Analytics Agent deployment script
-├── app_streamlit.py            # Optional Streamlit visual dashboard
 ├── requirements.txt            # Python dependencies
-├── requirements-dev.txt        # Optional dev & Streamlit dependencies
+├── requirements-dev.txt        # Optional test & development dependencies
 ├── .env.example                # Template for environment configuration
 └── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
     ├── main.tf                 # Cloud Run, BigQuery, Artifact Registry, Cloud Scheduler, IAM

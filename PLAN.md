@@ -59,7 +59,6 @@ Monarch Money is the single source of truth and data aggregation hub (connecting
 │   • Accessible via:                                                    │
 │       - BigQuery Studio Agents Hub (Google Cloud Console)              │
 │       - Custom Python CLI / create_ca_agent.py                         │
-│       - Streamlit Web Chat Interface (app_streamlit.py)                │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 

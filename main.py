@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from datetime import date, datetime, timedelta
 import json
 import logging
@@ -29,10 +30,15 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monarch-gemini")
 
+is_prod = bool(os.getenv("K_SERVICE"))
+
 app = FastAPI(
     title="Monarch Money Gemini & BigQuery API",
     version="2.0.0",
     description="Secure wrapper exposing Monarch Money data to Gemini models and syncing to BigQuery.",
+    docs_url=None if is_prod else "/docs",
+    redoc_url=None if is_prod else "/redoc",
+    openapi_url=None if is_prod else "/openapi.json",
 )
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -156,18 +162,6 @@ def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)):
 async def health(api_key: str = Security(verify_api_key)):
     """Health check endpoint to verify wrapper availability and key validity."""
     return {"status": "ok", "service": "monarch-gemini-bigquery-wrapper"}
-
-
-@app.get("/avatar.png", tags=["System"])
-@app.get("/static/avatar.png", tags=["System"])
-async def avatar():
-    """Serves the Family Finance Copilot avatar icon."""
-    avatar_path = os.path.join(os.path.dirname(__file__), "static", "avatar.png")
-    if os.path.exists(avatar_path):
-        with open(avatar_path, "rb") as f:
-            return Response(content=f.read(), media_type="image/png")
-    return Response(status_code=404)
-
 
 @app.post("/auth/mfa", tags=["Auth"])
 async def authenticate_with_mfa(
@@ -698,7 +692,7 @@ async def execute_alert_scan() -> dict:
                                 "header": {
                                     "title": "Family Financial Copilot",
                                     "subtitle": "Daily Spend Optimization & Debt Advisory",
-                                    "imageUrl": f"{os.getenv('SERVICE_URL', '').rstrip('/')}/avatar.png" if os.getenv("SERVICE_URL") else "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                                    "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                                     "imageType": "CIRCLE",
                                 },
                                 "sections": [
@@ -1234,14 +1228,19 @@ def verify_chat_origin(
     if os.getenv("CHAT_AUTH_DISABLED", "false").lower() == "true":
         return True
 
-    # 3. Google Chat OIDC Bearer token verification
+    # 3. Google Chat OIDC Bearer token verification (including Pub/Sub push service accounts)
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ", 1)[1].strip()
         try:
             claims = id_token.verify_oauth2_token(token, google_requests.Request())
             email = claims.get("email")
             iss = claims.get("iss", "")
-            if email == "chat@system.gserviceaccount.com" or "accounts.google.com" in iss:
+            if (
+                email == "chat@system.gserviceaccount.com"
+                or (email and "pubsub" in email)
+                or (email and email.endswith(".iam.gserviceaccount.com"))
+                or "accounts.google.com" in iss
+            ):
                 return True
             logger.warning(f"Google Chat Bearer token has unverified issuer/email: email={email}, iss={iss}")
         except Exception as e:
@@ -1261,28 +1260,44 @@ def verify_chat_origin(
 
 
 @app.post("/chat/event", dependencies=[Depends(verify_chat_origin)])
+@app.post("/chat/pubsub", dependencies=[Depends(verify_chat_origin)])
 async def google_chat_webhook(request: dict):
     """
     Handles interactive events from Google Chat (mentions, direct messages, slash commands).
-    Transforms Google Chat into a conversational interface for family finances.
+    Supports direct HTTP webhooks and private Google Cloud Pub/Sub push delivery.
     """
-    logger.info(f"Incoming Raw Chat Payload: {json.dumps(request)}")
+    is_pubsub = False
+    raw_payload = request
 
-    is_addon = bool(request.get("commonEventObject") or request.get("chat"))
+    # Unpack Pub/Sub Push wrapper if present
+    if "message" in request and isinstance(request["message"], dict) and "data" in request["message"]:
+        try:
+            b64_data = request["message"]["data"]
+            decoded_str = base64.b64decode(b64_data).decode("utf-8")
+            raw_payload = json.loads(decoded_str)
+            is_pubsub = True
+            logger.info("Successfully unpacked Google Chat event from Pub/Sub push message.")
+        except Exception as e:
+            logger.error(f"Failed to decode Pub/Sub message data: {e}")
+            return {"status": "error", "message": str(e)}
+
+    logger.info(f"Incoming Chat Payload (pubsub={is_pubsub}): {json.dumps(raw_payload)}")
+
+    is_addon = bool(raw_payload.get("commonEventObject") or raw_payload.get("chat"))
 
     # Extract chat and message objects across all Google Chat & Workspace Add-on variations
-    chat_obj = request.get("chat", {}) or {}
+    chat_obj = raw_payload.get("chat", {}) or {}
     message_payload = chat_obj.get("messagePayload", {}) or {}
     app_command_payload = chat_obj.get("appCommandPayload", {}) or {}
     message = (
         message_payload.get("message")
         or app_command_payload.get("message")
         or chat_obj.get("message")
-        or request.get("message")
+        or raw_payload.get("message")
         or {}
     )
     event_type = (
-        request.get("type")
+        raw_payload.get("type")
         or ("SLASH_COMMAND" if app_command_payload else None)
         or ("ADDED_TO_SPACE" if "addedToSpacePayload" in chat_obj else None)
         or ("MESSAGE" if message else "UNKNOWN")
@@ -1291,7 +1306,7 @@ async def google_chat_webhook(request: dict):
     # Extract user info
     user_info = (
         chat_obj.get("user")
-        or request.get("user")
+        or raw_payload.get("user")
         or message.get("sender")
         or {}
     )
@@ -1306,7 +1321,7 @@ async def google_chat_webhook(request: dict):
         or message_payload.get("space")
         or app_command_payload.get("space")
         or chat_obj.get("space")
-        or request.get("space")
+        or raw_payload.get("space")
         or {}
     )
     space_name = space_obj.get("name") if isinstance(space_obj, dict) else (space_obj if isinstance(space_obj, str) else None)
@@ -1317,7 +1332,7 @@ async def google_chat_webhook(request: dict):
         or message_payload.get("thread")
         or app_command_payload.get("thread")
         or chat_obj.get("thread")
-        or request.get("thread")
+        or raw_payload.get("thread")
         or {}
     )
     thread_name = thread_obj.get("name") if isinstance(thread_obj, dict) else (thread_obj if isinstance(thread_obj, str) else None)
@@ -1333,6 +1348,9 @@ async def google_chat_webhook(request: dict):
     logger.info(f"Interaction Session Anchors: space={space_name}, thread={thread_name}")
 
     def respond(text: str) -> dict:
+        if is_pubsub:
+            post_to_chat_thread(text, thread_name=thread_name, space_name=space_name)
+            return {"status": "ok"}
         resp = format_chat_response(text, thread_name=thread_name, space_name=space_name, is_addon=is_addon)
         logger.info(f"Outgoing Chat Response: {json.dumps(resp)}")
         return resp
