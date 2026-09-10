@@ -15,11 +15,16 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from datetime import date, datetime, timedelta, timezone
+import contextvars
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+import secrets
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from google.cloud import bigquery
 from bq_service import get_bq_client
@@ -44,6 +49,20 @@ _lock = asyncio.Lock()
 # In-memory cooldown tracking for upstream Plaid refreshes (institution_name_lower -> last_requested_utc)
 _PLAID_REFRESH_COOLDOWNS: Dict[str, datetime] = {}
 PLAID_REFRESH_COOLDOWN_MINUTES = 60
+
+# Context variables for thread-safe request contextualization
+CURRENT_USER_EMAIL: contextvars.ContextVar[str] = contextvars.ContextVar("CURRENT_USER_EMAIL", default="unknown")
+CURRENT_PROPOSED_CARD: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("CURRENT_PROPOSED_CARD", default=None)
+
+# HMAC signing configuration for human-in-the-loop mutation confirmation
+HMAC_EXPIRATION_SECONDS = 900  # 15 minutes
+
+# Cached category registry
+_CATEGORY_CACHE: Dict[str, Any] = {
+    "by_id": {},
+    "by_name": {},
+    "last_fetched": 0.0,
+}
 
 
 def _run_async(coro):
@@ -594,3 +613,456 @@ def request_plaid_refresh(institution_name: str) -> str:
     except Exception as e:
         logger.error(f"Error requesting Plaid refresh for '{institution_name}': {e}")
         return json.dumps({"error": f"Failed to request Plaid refresh: {str(e)}"})
+
+
+# -------------------------------------------------------------------------
+# PR 4: Carefully Guarded Mutations & Interactive Recategorization
+# -------------------------------------------------------------------------
+
+def get_mutation_hmac_secret() -> str:
+    """Retrieves or derives the secret key used to sign mutation confirmation cards."""
+    return (
+        resolve_secret("mutation-hmac-secret", "MUTATION_HMAC_SECRET")
+        or resolve_secret("chat-verification-token", "CHAT_VERIFICATION_TOKEN")
+        or resolve_secret("gemini-wrapper-key", "GEMINI_WRAPPER_KEY")
+        or "sage-guarded-mutation-signing-secret"
+    )
+
+
+def generate_mutation_signature(
+    transaction_id: str,
+    category_id: str,
+    user_email: str,
+    timestamp: int,
+) -> str:
+    """Generates a SHA-256 HMAC signature tying transaction, category, user, and timestamp."""
+    key = get_mutation_hmac_secret().encode("utf-8")
+    payload = f"{transaction_id}:{category_id}:{user_email.strip().lower()}:{timestamp}".encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def verify_mutation_signature(
+    transaction_id: str,
+    category_id: str,
+    user_email: str,
+    timestamp: int,
+    signature: str,
+    max_age_seconds: int = HMAC_EXPIRATION_SECONDS,
+) -> Tuple[bool, str]:
+    """Validates signature authenticity and timestamp freshness."""
+    if not signature:
+        return False, "Missing cryptographic signature."
+    now = int(datetime.now(timezone.utc).timestamp())
+    age = abs(now - timestamp)
+    if age > max_age_seconds:
+        return False, f"Confirmation expired (card age: {age}s > limit: {max_age_seconds}s). Please request a fresh confirmation."
+    expected = generate_mutation_signature(transaction_id, category_id, user_email, timestamp)
+    if not secrets.compare_digest(expected, signature):
+        return False, "Cryptographic signature mismatch. Action parameters may have been altered."
+    return True, "Valid"
+
+
+async def get_cached_categories(client: Optional[MonarchMoney] = None, force_refresh: bool = False) -> Dict[str, Any]:
+    """Fetches and caches categories indexed by ID and normalized name."""
+    global _CATEGORY_CACHE
+    now = time.time()
+    if not force_refresh and _CATEGORY_CACHE["by_id"] and (now - _CATEGORY_CACHE["last_fetched"] < 3600):
+        return _CATEGORY_CACHE
+
+    by_id = {}
+    by_name = {}
+
+    # Fast path: Try BigQuery raw_categories
+    try:
+        bq = get_bq_client(BQ_PROJECT_ID)
+        query = f"SELECT category_id, category_name, group_name FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_categories`"
+        rows = list(bq.query(query).result())
+        for r in rows:
+            cid = str(r.category_id)
+            cname = str(r.category_name)
+            grp = str(r.group_name) if r.group_name else ""
+            entry = {"id": cid, "name": cname, "group": grp}
+            by_id[cid] = entry
+            by_name[cname.lower().strip()] = entry
+            norm = re.sub(r"[^a-z0-9]", "", cname.lower())
+            if norm:
+                by_name[norm] = entry
+    except Exception as e:
+        logger.debug(f"Could not load categories from BigQuery: {e}")
+
+    # Fallback to Monarch API
+    if not by_id and client:
+        try:
+            raw_data = await client.get_transaction_categories()
+            for c in raw_data.get("categories", []):
+                cid = str(c.get("id"))
+                cname = str(c.get("name"))
+                grp = c.get("group") or {}
+                grp_name = grp.get("name") if isinstance(grp, dict) else str(grp)
+                entry = {"id": cid, "name": cname, "group": grp_name}
+                by_id[cid] = entry
+                by_name[cname.lower().strip()] = entry
+                norm = re.sub(r"[^a-z0-9]", "", cname.lower())
+                if norm:
+                    by_name[norm] = entry
+        except Exception as e:
+            logger.warning(f"Could not load categories from Monarch API: {e}")
+
+    if by_id:
+        _CATEGORY_CACHE["by_id"] = by_id
+        _CATEGORY_CACHE["by_name"] = by_name
+        _CATEGORY_CACHE["last_fetched"] = now
+
+    return _CATEGORY_CACHE
+
+
+async def resolve_category(category_query: str, client: Optional[MonarchMoney] = None) -> Optional[Dict[str, Any]]:
+    """Resolves category name or ID using exact, normalized, and fuzzy matching."""
+    cats = await get_cached_categories(client=client)
+    by_id = cats.get("by_id", {})
+    by_name = cats.get("by_name", {})
+
+    q = str(category_query).strip()
+    if not q:
+        return None
+
+    # 1. Exact ID
+    if q in by_id:
+        return by_id[q]
+
+    # 2. Exact name (case-insensitive)
+    q_lower = q.lower()
+    if q_lower in by_name:
+        return by_name[q_lower]
+
+    # 3. Normalized alphanumeric
+    norm_q = re.sub(r"[^a-z0-9]", "", q_lower)
+    if norm_q and norm_q in by_name:
+        return by_name[norm_q]
+
+    # 4. Partial substring matching
+    for name_key, entry in by_name.items():
+        if norm_q and (norm_q in name_key or name_key in norm_q):
+            return entry
+
+    return None
+
+
+def build_recategorization_card(
+    transaction_id: str,
+    merchant_name: str,
+    amount: float,
+    txn_date: str,
+    current_category: str,
+    new_category: str,
+    category_id: str,
+    user_email: str,
+    timestamp: int,
+    signature: str,
+) -> dict:
+    """Builds an interactive Google Chat Card v2 with HMAC-signed confirmation buttons."""
+    return {
+        "cardId": f"recat_{transaction_id}_{timestamp}",
+        "card": {
+            "header": {
+                "title": "Sage Transaction Recategorization",
+                "subtitle": "Interactive Confirmation Required",
+                "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                "imageType": "CIRCLE",
+            },
+            "sections": [
+                {
+                    "header": "Transaction Details",
+                    "widgets": [
+                        {
+                            "decoratedText": {
+                                "topLabel": "Merchant & Amount",
+                                "text": f"<b>{merchant_name}</b> &nbsp;•&nbsp; <b>${amount:,.2f}</b>",
+                                "startIcon": {"knownIcon": "STORE"},
+                            }
+                        },
+                        {
+                            "decoratedText": {
+                                "topLabel": "Date & Transaction ID",
+                                "text": f"{txn_date} (ID: <code>{transaction_id}</code>)",
+                                "startIcon": {"knownIcon": "CLOCK"},
+                            }
+                        },
+                        {
+                            "decoratedText": {
+                                "topLabel": "Category Reclassification",
+                                "text": f"Current: <i>{current_category}</i> ➔ Proposed: <b>{new_category}</b>",
+                                "startIcon": {"knownIcon": "CONFIRMATION_NUMBER_ICON"},
+                            }
+                        },
+                        {
+                            "buttonList": {
+                                "buttons": [
+                                    {
+                                        "text": "Confirm Update",
+                                        "color": {"red": 0.12, "green": 0.53, "blue": 0.90, "alpha": 1.0},
+                                        "onClick": {
+                                            "action": {
+                                                "function": "confirm_recategorize",
+                                                "parameters": [
+                                                    {"key": "action", "value": "confirm_recategorize"},
+                                                    {"key": "transaction_id", "value": str(transaction_id)},
+                                                    {"key": "category_id", "value": str(category_id)},
+                                                    {"key": "category_name", "value": str(new_category)},
+                                                    {"key": "user_email", "value": str(user_email)},
+                                                    {"key": "timestamp", "value": str(timestamp)},
+                                                    {"key": "signature", "value": str(signature)},
+                                                ],
+                                            }
+                                        },
+                                    },
+                                    {
+                                        "text": "Cancel",
+                                        "onClick": {
+                                            "action": {
+                                                "function": "cancel_recategorize",
+                                                "parameters": [
+                                                    {"key": "action", "value": "cancel_recategorize"},
+                                                    {"key": "transaction_id", "value": str(transaction_id)},
+                                                ],
+                                            }
+                                        },
+                                    },
+                                ]
+                            }
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def build_recategorization_success_card(
+    transaction_id: str,
+    category_name: str,
+    merchant_name: Optional[str] = None,
+    amount: Optional[float] = None,
+) -> dict:
+    """Builds a confirmation Card v2 acknowledging successful recategorization in Monarch."""
+    details = f"Transaction <code>#{transaction_id}</code>"
+    if merchant_name:
+        amt_str = f" (${amount:,.2f})" if amount is not None else ""
+        details = f"<b>{merchant_name}</b>{amt_str} (ID: <code>{transaction_id}</code>)"
+
+    return {
+        "cardId": f"recat_success_{transaction_id}",
+        "card": {
+            "header": {
+                "title": "Category Successfully Updated",
+                "subtitle": f"Reclassified to {category_name}",
+                "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                "imageType": "CIRCLE",
+            },
+            "sections": [
+                {
+                    "widgets": [
+                        {
+                            "decoratedText": {
+                                "topLabel": "Monarch Money Status",
+                                "text": f"✅ {details} was successfully reclassified to <b>{category_name}</b>.",
+                                "startIcon": {"knownIcon": "BOOKMARK"},
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+
+
+async def propose_transaction_recategorization_async(
+    transaction_id: str,
+    new_category: str,
+) -> dict:
+    """
+    Validates single transaction limits, pending state, and category existence.
+    Generates an HMAC signature and constructs the interactive Google Chat Card v2.
+    """
+    cleaned_id = str(transaction_id).strip()
+    # 1. Single transaction guard
+    if any(sep in cleaned_id for sep in [",", ";", " ", "\n", "\t"]):
+        return {
+            "status": "error",
+            "message": "Strict Guardrail: Bulk mutations are blocked. Only 1 transaction may be recategorized at a time.",
+        }
+
+    # 2. Inspect live transaction
+    txn = await get_live_transaction_async(cleaned_id)
+    if not txn or not txn.get("found"):
+        return {
+            "status": "error",
+            "message": f"Transaction #{cleaned_id} was not found in Monarch Money.",
+        }
+
+    # 3. Block pending transactions
+    if txn.get("pending"):
+        return {
+            "status": "error",
+            "message": f"Refused: Transaction #{cleaned_id} ({txn.get('merchant_name')}, ${txn.get('amount', 0.0):.2f}) is currently PENDING. Monarch Money rules prohibit recategorizing transactions before they post.",
+        }
+
+    # 4. Resolve proposed category
+    client = await get_monarch_client()
+    cat_match = await resolve_category(new_category, client=client)
+    if not cat_match:
+        cats = await get_cached_categories(client=client)
+        sample_cats = sorted(list(set(c["name"] for c in cats.get("by_id", {}).values())))[:10]
+        return {
+            "status": "error",
+            "message": f"Category '{new_category}' is not recognized in Monarch Money. Available categories include: {', '.join(sample_cats)}.",
+        }
+
+    new_cat_id = cat_match["id"]
+    new_cat_name = cat_match["name"]
+    current_cat_name = txn.get("category_name") or "Uncategorized"
+
+    if current_cat_name.lower().strip() == new_cat_name.lower().strip():
+        return {
+            "status": "noop",
+            "message": f"Transaction #{cleaned_id} is already categorized as '{new_cat_name}'. No changes needed.",
+        }
+
+    # 5. Sign proposal with HMAC
+    user_email = CURRENT_USER_EMAIL.get()
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    sig = generate_mutation_signature(cleaned_id, new_cat_id, user_email, timestamp)
+
+    # 6. Build Card v2
+    card = build_recategorization_card(
+        transaction_id=cleaned_id,
+        merchant_name=txn.get("merchant_name") or "Merchant",
+        amount=float(txn.get("amount") or 0.0),
+        txn_date=str(txn.get("date") or ""),
+        current_category=current_cat_name,
+        new_category=new_cat_name,
+        category_id=new_cat_id,
+        user_email=user_email,
+        timestamp=timestamp,
+        signature=sig,
+    )
+
+    CURRENT_PROPOSED_CARD.set(card)
+
+    return {
+        "status": "confirmation_required",
+        "transaction_id": cleaned_id,
+        "merchant": txn.get("merchant_name"),
+        "amount": txn.get("amount"),
+        "date": txn.get("date"),
+        "current_category": current_cat_name,
+        "proposed_category": new_cat_name,
+        "card": card,
+        "message": f"Confirmation card generated. Awaiting user click to confirm recategorizing #{cleaned_id} to '{new_cat_name}'.",
+    }
+
+
+def propose_transaction_recategorization(transaction_id: str, new_category: str) -> str:
+    """
+    Tool: Proposes updating a single transaction's category in Monarch Money.
+    Strictly generates a Google Chat confirmation card requiring interactive user approval.
+    Never executes mutations directly.
+    """
+    try:
+        res = _run_async(propose_transaction_recategorization_async(transaction_id, new_category))
+        if isinstance(res, dict) and res.get("card"):
+            CURRENT_PROPOSED_CARD.set(res["card"])
+        return json.dumps(res, default=str)
+    except Exception as e:
+        logger.error(f"Error proposing recategorization for #{transaction_id}: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+async def execute_guarded_recategorization(
+    transaction_id: str,
+    category_id: str,
+    category_name: Optional[str] = None,
+) -> dict:
+    """
+    Executes transaction recategorization in Monarch Money and updates BigQuery raw_transactions.
+    Assumes human authorization has already been verified via HMAC signature.
+    """
+    client = await get_monarch_client()
+    try:
+        update_res = await client.update_transaction(
+            transaction_id=str(transaction_id),
+            category_id=str(category_id),
+        )
+        logger.info(f"Monarch Money transaction #{transaction_id} recategorized to category #{category_id}: {update_res}")
+
+        # Synchronize BigQuery raw_transactions in background
+        try:
+            bq = get_bq_client(BQ_PROJECT_ID)
+            update_sql = f"""
+                UPDATE `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions`
+                SET category_id = @cat_id,
+                    category_name = @cat_name,
+                    updated_at = CURRENT_TIMESTAMP()
+                WHERE transaction_id = @txn_id
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("cat_id", "STRING", str(category_id)),
+                    bigquery.ScalarQueryParameter("cat_name", "STRING", str(category_name or "")),
+                    bigquery.ScalarQueryParameter("txn_id", "STRING", str(transaction_id)),
+                ]
+            )
+            await asyncio.to_thread(lambda: bq.query(update_sql, job_config=job_config).result())
+            logger.info(f"BigQuery raw_transactions updated for txn #{transaction_id}")
+        except Exception as bq_err:
+            logger.warning(f"BigQuery update for txn #{transaction_id} encountered non-fatal error: {bq_err}")
+
+        return {
+            "success": True,
+            "transaction_id": transaction_id,
+            "category_id": category_id,
+            "category_name": category_name,
+        }
+    except Exception as e:
+        logger.error(f"Failed to recategorize transaction #{transaction_id} in Monarch: {e}")
+        return {
+            "success": False,
+            "transaction_id": transaction_id,
+            "error": str(e),
+        }
+
+
+def extract_card_action_parameters(payload: dict) -> Tuple[Optional[str], Dict[str, str]]:
+    """
+    Extracts action name and string key-value parameters from Google Chat or
+    Google Workspace Add-on CARD_CLICKED interaction payloads.
+    """
+    # 1. Google Workspace Add-on commonEventObject
+    common_obj = payload.get("commonEventObject") or {}
+    if common_obj:
+        action_name = common_obj.get("invokedFunction") or common_obj.get("action")
+        params = common_obj.get("parameters") or {}
+        if isinstance(params, dict):
+            if not action_name and "action" in params:
+                action_name = params["action"]
+            return action_name, {str(k): str(v) for k, v in params.items()}
+
+    # 2. Google Chat direct action object
+    action_obj = payload.get("action") or {}
+    if action_obj:
+        action_name = action_obj.get("actionMethodName") or action_obj.get("function")
+        raw_params = action_obj.get("parameters") or []
+        params_dict = {}
+        if isinstance(raw_params, list):
+            for item in raw_params:
+                if isinstance(item, dict) and "key" in item:
+                    params_dict[str(item["key"])] = str(item.get("value", ""))
+        elif isinstance(raw_params, dict):
+            params_dict = {str(k): str(v) for k, v in raw_params.items()}
+
+        if not action_name and "action" in params_dict:
+            action_name = params_dict["action"]
+
+        return action_name, params_dict
+
+    return None, {}

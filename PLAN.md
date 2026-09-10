@@ -176,6 +176,7 @@ terraform apply
 | **PR 1.5: Security & Pub/Sub** | Embedded pull worker, OAuth token verification, GSuite Addons SA IAM | Live tested in Google Chat | **COMPLETED** ✅ |
 | **PR 2: Monarch Service** | Extracted `monarch_service.py`, added live balance/transaction/Plaid tools | Unit tests passing (28/28), deployed `monarch-gemini-wrapper-00052-lfw` | **COMPLETED** ✅ |
 | **PR 3: BQ Service** | Modularize BigQuery schema, view management, query safety, and chat history persistence | `bq_service.py` (39/39 unit tests passing) | **COMPLETED** ✅ |
-| **PR 4: Guarded Mutations** | HMAC-guarded transaction category updates & confirmation cards | Rate-limited mutations | **NEXT** ⏳ |
-| **PR 5: Memory Bank** | User-scoped financial profile, goals, payoff targets, and multi-thread context | Persistent memory bank | **PLANNED** ⏳ |
+| **PR 4: Guarded Mutations** | HMAC-guarded transaction category updates & confirmation cards | `monarch_service.py` & `main.py` (51/51 unit tests passing) | **COMPLETED** ✅ |
+| **PR 5: Memory Bank** | User-scoped financial profile, goals, payoff targets, and multi-thread context | Persistent memory bank | **NEXT** ⏳ |
+| **PR 6: Anomaly Alerts** | Multi-table anomaly scan alerting with exact-match suppression table in BigQuery | Proactive alert engine | **PLANNED** ⏳ |
 

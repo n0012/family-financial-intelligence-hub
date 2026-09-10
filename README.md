@@ -152,10 +152,11 @@ family-financial-intelligence-hub/
 ├── requirements.txt            # Python dependencies (includes google-cloud-pubsub)
 ├── requirements-dev.txt        # Optional test & development dependencies
 ├── .env.example                # Template for environment configuration
-├── tests/                      # Pytest automated test suite (39 passing unit tests)
+├── tests/                      # Pytest automated test suite (51 passing unit tests)
 │   ├── test_alerts_and_config.py # Config caching, token auth, Card v2 builders, job CLI
 │   ├── test_bq_service.py        # Read-only SQL safety guards, CA fallback, session history
-│   └── test_monarch_service.py   # Monarch auth, sync pipelines, live read tools, rate limits
+│   ├── test_monarch_service.py   # Monarch auth, sync pipelines, live read tools, rate limits
+│   └── test_monarch_mutations.py # HMAC signatures, guarded mutations, Card v2 interactive actions
 └── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
     ├── main.tf                 # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
     ├── variables.tf            # Configurable deployment variables
@@ -201,9 +202,25 @@ To ensure modularity, maintainability, and test coverage, the system is refactor
 * **BigQuery Schema Migration (`apply_bigquery_schema`)**: Added programmatic application helper for `schema.sql` tables and analytical views.
 * **Full Unit Test Coverage ([`tests/test_bq_service.py`](tests/test_bq_service.py))**: Added 11 new tests, raising total suite to 39 passing tests.
 
-### **Upcoming Roadmap (PR 4 – PR 5)**
-* **PR 4: Carefully Guarded Monarch Mutations**: Enable category reclassifications and transaction cleanups via HMAC-signed Google Chat confirmation cards with strict 1-transaction-per-call limits.
+### **PR 4: Carefully Guarded Monarch Mutations & Interactive Card v2 Confirmation**
+* **HMAC-SHA256 Cryptographic Signing & Verification**:
+  * Implemented `generate_mutation_signature` and `verify_mutation_signature` using high-entropy secrets and constant-time comparison (`hmac.compare_digest`).
+  * Cryptographically binds `transaction_id`, `category_id`, `user_email`, and UNIX timestamp with a strict **15-minute expiration window** (`HMAC_EXPIRATION_SECONDS = 900`) to prevent replay or parameter tampering.
+* **Category Resolution & In-Memory Caching (`resolve_category`)**:
+  * High-performance dual-tier resolution: reads from BigQuery `family_finance.raw_categories` fast-path with fallback to MonarchMoney API.
+  * Multi-strategy matching: exact UUID match, case-insensitive name match, alphanumeric-normalized match, and substring search.
+* **Guarded Tool Definition (`propose_transaction_recategorization`)**:
+  * **Strict Single-Transaction Limit**: Blocks bulk IDs, commas, arrays, or whitespace-separated arguments to prevent accidental mass modifications.
+  * **Pending Transaction Refusal**: Checks real-time transaction state via `get_live_transaction_async` and refuses to recategorize pending/unsettled transactions.
+  * Thread-safe ContextVar (`CURRENT_PROPOSED_CARD`, `CURRENT_USER_EMAIL`) passes confirmation cards directly to Google Chat message assembly.
+* **Interactive Google Chat Card v2 Confirmation Pipeline**:
+  * Renders interactive **Card v2** widgets with formatted merchant, amount, date, current category, proposed category, and "Confirm Update" / "Cancel" action buttons.
+  * Webhook handles `CARD_CLICKED` events, validates signature freshness and authenticity, calls `execute_guarded_recategorization`, synchronizes BigQuery `raw_transactions` in-place, and returns a rich success card.
+* **Full Unit Test Coverage ([`tests/test_monarch_mutations.py`](tests/test_monarch_mutations.py))**: Added 12 new unit tests, bringing the total suite to **51 passing unit tests** across the codebase.
+
+### **Upcoming Roadmap (PR 5 – PR 6)**
 * **PR 5: Multi-Turn Memory Bank & User-Scoped Preferences**: Implement persistent cross-thread user preferences (e.g., target debt payoff dates, discretionary spending ceilings) grounded in BigQuery and Vertex AI Memory Bank.
+* **PR 6: Autonomous Spend Anomaly Alerts & Suppression Rules**: Dynamic multi-table anomaly scan alerting with exact-match suppression table in BigQuery.
 
 ---
 
