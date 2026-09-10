@@ -41,8 +41,8 @@ flowchart TD
     end
 
     subgraph BatchLayer ["Serverless Batch Jobs (Cloud Run Jobs - Zero HTTP Ingress)"]
-        JobSync["monarch-sync-job<br/>(job.py sync)"]
-        JobAlert["monarch-alerts-job<br/>(job.py alerts)"]
+        JobSync["monarch-sync-job<br/>(python -m app.job sync)"]
+        JobAlert["monarch-alerts-job<br/>(python -m app.job alerts)"]
         MMClient["MonarchMoney GraphQL Client<br/>+ Automated Base32 TOTP (pyotp)"]
         AdvisorEngine["Proactive Spend Alert Engine"]
     end
@@ -54,14 +54,14 @@ flowchart TD
 
     subgraph PrivateIngestion ["Private Messaging Integration (Cloud Pub/Sub)"]
         Topic["Pub/Sub Topic<br/>monarch-chat-incoming"]
-        Worker["Chat Pull Worker<br/>(chat_worker.py)<br/>Outbound Streaming Pull"]
+        Worker["Chat Pull Worker<br/>(python -m app.chat_worker)<br/>Outbound Streaming Pull"]
     end
 
     subgraph MemoryLayer ["Long-Term Memory Bank (Vertex AI Agent Platform)"]
-        MemoryBank["Reasoning Engine Memory Bank<br/>(Sage Memory Bank)<br/>• User-Scoped Preferences<br/>• Fact Consolidation & Conflict Resolution<br/>• Replaces Legacy BQ chat_history"]
+        MemoryBank["Reasoning Engine Memory Bank<br/>(FinSage Memory Bank)<br/>• User-Scoped Preferences<br/>• Fact Consolidation & Conflict Resolution<br/>• Replaces Legacy BQ chat_history"]
     end
 
-    subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface (Sage)"]
+    subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface (FinSage)"]
         GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool<br/>• Live Monarch Confirmation Tools<br/>• Persistent Memory Bank AFC Tool"]
         MultimodalVision["Multimodal Ingestion<br/>(Pasted PNG/JPG Screenshots & Plans)"]
         GoogleChat["Google Chat Space & 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Asynchronous REST Replies"]
@@ -142,40 +142,51 @@ When asking FinSage to recategorize a transaction, it verifies the transaction s
 ---
 
 ## Repository Structure
-
+ 
 ```
 family-financial-intelligence-hub/
-├── main.py                     # FastAPI application & Google Chat webhook router
-├── bq_service.py               # BigQuery SQL query tool, analytical views & schema migration
-├── monarch_service.py          # MonarchMoney client auth, sync pipelines & live confirmation tools
-├── memory_service.py           # Vertex AI Agent Platform Memory Bank client & user preference tools
-├── job.py                      # Cloud Run Job CLI entrypoint (sync & alerts batch runner)
-├── chat_worker.py              # Zero-ingress Google Chat Pub/Sub pull subscriber
-├── config.py                   # Centralized configuration, local overrides, & secret caching
-├── alerts.py                   # Proactive spend anomaly alert engine & Google Chat Card v2 builder
-├── schema.sql                  # BigQuery schema definitions & analytical optimization views
-├── Dockerfile                  # Production container definition (Python 3.11-slim)
-├── cloudbuild.yaml             # Google Cloud Build CI/CD pipeline definition
-├── deploy.sh                   # Hardened zero-ingress deployment script
-├── bootstrap_gcp_project.sh    # Initial GCP project bootstrapping & IAM automation
-├── config.example.yaml         # YAML configuration template (rates, account overrides, exclusions)
-├── config.example.json         # JSON configuration template
-├── sync_secrets_to_gcp.sh      # Automated secret synchronization from .env.local to Secret Manager
-├── create_ca_agent.py          # Google Cloud Conversational Analytics Agent deployment script
-├── requirements.txt            # Python dependencies (includes google-cloud-aiplatform)
-├── requirements-dev.txt        # Optional test & development dependencies
-├── .env.example                # Template for environment configuration
-├── tests/                      # Pytest automated test suite (62 passing unit tests)
-│   ├── test_alerts_and_config.py # Config caching, token auth, Card v2 builders, job CLI
-│   ├── test_bq_service.py        # Read-only SQL safety guards, CA fallback, in-memory session history
-│   ├── test_monarch_service.py   # Monarch auth, sync pipelines, live read tools, rate limits
-│   ├── test_monarch_mutations.py # HMAC signatures, guarded mutations, Card v2 interactive actions
-│   └── test_memory_service.py    # Vertex AI Memory Bank retrieval, prompt formatting, fact consolidation
-└── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
-    ├── main.tf                 # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
-    ├── variables.tf            # Configurable deployment variables
-    ├── outputs.tf              # Pub/Sub topics, subscriptions, and dataset outputs
-    └── terraform.tfvars.example # Example variable values
+├── app/
+│   ├── __init__.py
+│   ├── alerts.py                # Proactive spend anomaly alert engine & Google Chat Card v2 builder
+│   ├── bq_service.py            # BigQuery SQL query tool, analytical views & schema migration
+│   ├── chat_worker.py           # Zero-ingress Google Chat Pub/Sub pull subscriber
+│   ├── config.py                # Centralized configuration, local overrides, & secret caching
+│   ├── job.py                   # Cloud Run Job CLI entrypoint (sync & alerts batch runner)
+│   ├── main.py                  # FastAPI application & Google Chat webhook router
+│   ├── memory_service.py        # Vertex AI Agent Platform Memory Bank client & user preference tools
+│   └── monarch_service.py       # MonarchMoney client auth, sync pipelines & live confirmation tools
+├── docs/
+│   ├── ALERTS_STRATEGY.md       # Proactive anomaly alert & debt acceleration strategy
+│   └── PLAN.md                  # Project master plan, PR roadmap & execution history
+├── scripts/
+│   ├── bootstrap_gcp_project.sh # Initial GCP project bootstrapping & IAM automation
+│   ├── create_ca_agent.py       # Google Cloud Conversational Analytics Agent deployment script
+│   ├── deploy.sh                # Hardened zero-ingress deployment script
+│   └── sync_secrets_to_gcp.sh   # Automated secret synchronization from .env.local to Secret Manager
+├── static/
+│   ├── avatar.png               # Google Chat bot avatar image
+│   └── workflow.png             # Architecture and workflow diagram
+├── terraform/                   # Infrastructure as Code (Terraform / OpenTofu)
+│   ├── main.tf                  # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
+│   ├── variables.tf             # Configurable deployment variables
+│   ├── outputs.tf               # Pub/Sub topics, subscriptions, and dataset outputs
+│   └── terraform.tfvars.example # Example variable values
+├── tests/                       # Pytest automated test suite (75 passing unit tests)
+│   ├── test_alerts_and_config.py# Config caching, token auth, Card v2 builders, job CLI
+│   ├── test_bq_service.py       # Read-only SQL safety guards, CA fallback, in-memory session history
+│   ├── test_memory_service.py   # Vertex AI Memory Bank retrieval, prompt formatting, fact consolidation
+│   ├── test_monarch_mutations.py# HMAC signatures, guarded mutations, Card v2 interactive actions
+│   └── test_monarch_service.py  # Monarch auth, sync pipelines, live read tools, rate limits
+├── .env.example                 # Template for environment configuration
+├── Dockerfile                   # Production container definition (Python 3.11-slim)
+├── cloudbuild.yaml              # Google Cloud Build CI/CD pipeline definition
+├── config.example.json          # JSON configuration template
+├── config.example.yaml          # YAML configuration template (rates, account overrides, exclusions)
+├── pyproject.toml               # Python project configuration (Ruff, Pytest, packaging)
+├── requirements.txt             # Python dependencies (includes google-cloud-aiplatform)
+├── requirements-dev.txt         # Development & test dependencies
+├── schema.sql                   # BigQuery schema definitions & analytical optimization views
+└── LICENSE                      # MIT Open Source License
 ```
 
 ---
@@ -280,7 +291,7 @@ cp .env.example .env.local
 
 Synchronize the secrets to Google Cloud Secret Manager:
 ```bash
-./sync_secrets_to_gcp.sh
+./scripts/sync_secrets_to_gcp.sh
 ```
 
 ---
@@ -304,7 +315,7 @@ Cloud Build automatically:
 
 1. Go to the [Google Cloud Console → Google Chat API](https://console.cloud.google.com/apis/api/chat.googleapis.com).
 2. Click **Configuration** and fill in:
-   * **App name**: `Sage`
+   * **App name**: `FinSage`
    * **Avatar URL**: (Optional) URL to your bot avatar image.
    * **Description**: `Interactive family financial advisor powered by Monarch Money, BigQuery, and Gemini 3.8 Flash.`
    * **Functionality**:
@@ -318,16 +329,16 @@ Cloud Build automatically:
 3. Click **Save**.
 4. Run the zero-ingress Chat worker (connects outbound via gRPC pull with zero listening ports):
    ```bash
-   python chat_worker.py --project YOUR_PROJECT_ID --subscription monarch-chat-sub
+   python -m app.chat_worker --project YOUR_PROJECT_ID --subscription monarch-chat-sub
    ```
-5. In Google Chat, search for `Sage` and add it to your space or direct message thread.
+5. In Google Chat, search for `FinSage` and add it to your space or direct message thread.
 
 ---
 
 ## Security & Privacy Architecture
 
 * **Zero-Ingress Posture**: No public listening HTTP endpoints are exposed. Daily ingestion syncs and anomaly scans execute via ephemeral **Cloud Run Jobs** invoked by Cloud Scheduler over Google's internal APIs using short-lived OAuth 2.0 tokens (`monarch-scheduler-sa`).
-* **Private Pub/Sub Chat Integration**: Google Chat events are routed through Cloud Pub/Sub topic `monarch-chat-incoming` and pulled outbound by `chat_worker.py`. Unauthenticated public internet traffic is dropped at Google's edge.
+* **Private Pub/Sub Chat Integration**: Google Chat events are routed through Cloud Pub/Sub topic `monarch-chat-incoming` and pulled outbound by `app/chat_worker.py`. Unauthenticated public internet traffic is dropped at Google's edge.
 * **Local-First & Private**: Financial data is synced directly between Monarch Money and your private BigQuery dataset within your own GCP project boundary. No data is shared with third-party aggregators.
 * **Deterministic Guardrails**: Gemini operates with Automatic Function Calling over a single read-only SQL tool. Destructive operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`) are strictly forbidden by IAM and query syntax checks.
 * **Secret Isolation**: Passwords, MFA tokens, and webhook URLs are stored exclusively in **Google Cloud Secret Manager** and accessed dynamically at runtime using short-lived tokens.
