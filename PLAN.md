@@ -178,7 +178,7 @@ terraform apply
 | **PR 3: BQ Service** | Modularize BigQuery schema, view management, query safety, and chat history persistence | `bq_service.py` (39/39 unit tests passing) | **COMPLETED** ✅ |
 | **PR 4: Guarded Mutations** | HMAC-guarded transaction category updates & confirmation cards | `monarch_service.py` & `main.py` (51/51 unit tests passing) | **COMPLETED** ✅ |
 | **PR 5: Memory Bank** | User-scoped persistent preferences, budget ceilings, payoff deadlines via Vertex AI Agent Platform Memory Bank; retired legacy BigQuery `chat_history` writes | `memory_service.py` (62/62 unit tests passing) | **COMPLETED** ✅ |
-| **PR 6: Anomaly Alerts** | Multi-table anomaly scan alerting with exact-match suppression table in BigQuery | Proactive alert engine | **NEXT** ⏳ |
+| **PR 6: Anomaly Alerts** | Multi-table anomaly scan alerting with exact-match suppression table in BigQuery | `alerts.py` (74/74 unit tests passing) | **COMPLETED** ✅ |
 
 ---
 
@@ -237,5 +237,21 @@ terraform apply
 * **Gemini AFC Tool (`store_user_preference`)**: Equips Gemini 3.8 Flash to autonomously persist explicit goals, discretionary spending limits, debt payoff milestones, and alerts on the fly during natural conversation.
 * **Retired BigQuery `chat_history`**: Completely eliminated writes and queries to BigQuery `family_finance.chat_history` table in favor of native Memory Bank facts, while retaining ultra-low-latency in-memory LRU caching strictly for intra-turn multi-turn pronoun tracking.
 * **Full Unit Test Coverage ([`tests/test_memory_service.py`](tests/test_memory_service.py))**: Added 11 new unit tests covering client authentication, email resolution, prompt block formatting, fact generation, and error fallback, bringing the repository suite to **62 passing unit tests**.
+
+### **PR 6: Autonomous Spend Anomaly Alerts & BigQuery Suppression Engine**
+* **Multi-Table Anomaly Scans ([`alerts.py`](alerts.py))**:
+  * **Subscription Overlap Detection (`check_subscription_overlap`)**: Queries `v_subscription_overlap` to uncover redundant concurrent subscriptions in identical categories (e.g., overlapping streaming or cloud providers) and computes total annual savings potential.
+  * **Micro-Transaction Habit Leakage (`check_micro_transaction_leakage`)**: Queries `v_micro_transaction_leakage` to spot high-frequency, sub-$35 spend habits (e.g. coffee, fast food, rideshare) with annualized financial drains.
+  * **Budget Cap & Pacing Scans (`check_memory_budget_limits`)**: Dynamically parses dining and grocery caps stored in the Vertex AI Memory Bank and compares against month-to-date spending from `raw_transactions`, generating warning alerts on overages or fast-pacing.
+* **BigQuery Exact-Match Suppression Engine (`family_finance.alert_suppression`)**:
+  * Table schema: `alert_key`, `alert_type`, `suppressed_until`, `created_at`, `reason`.
+  * Parameterized `MERGE` query safely inserts or updates suppressions with expiration timestamps.
+  * Active suppression query (`get_active_suppressions`) checks `suppressed_until > CURRENT_TIMESTAMP()`, deduplicating daily scans and eliminating alert fatigue.
+* **Interactive Google Chat Card v2 Snooze**:
+  * Every alert card includes an interactive **"💤 Snooze 7 Days"** button sending `action=snooze_alert`.
+  * Chat webhook handles `CARD_CLICKED` snooze actions and returns a formatted confirmation card widget (`build_snooze_success_card`).
+* **Gemini AFC Tool (`snooze_spend_alert`)**: Equips conversational agent to snooze alerts conversationally (e.g., *"Snooze Netflix alerts for 30 days"*).
+* **Full Unit Test Coverage ([`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py))**: Added 12 new unit tests covering overlap detection, micro-leakage, budget caps, active suppression queries, Card v2 snooze clicks, and AFC tool calls, expanding the test suite to **74 passing unit tests**.
+
 
 

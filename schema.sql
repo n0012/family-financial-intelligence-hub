@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS `family_finance.raw_categories` (
     updated_at TIMESTAMP
 );
 
+-- 4. Alert Suppression & Snooze Table (PR 6)
+CREATE TABLE IF NOT EXISTS `family_finance.alert_suppression` (
+    alert_key STRING NOT NULL,
+    alert_type STRING NOT NULL,
+    suppressed_until TIMESTAMP NOT NULL,
+    created_at TIMESTAMP,
+    reason STRING
+);
+
 -- ==============================================================================
 -- Analytical & Optimization Views for Conversational Analytics Agent
 -- ==============================================================================
@@ -84,6 +93,8 @@ WITH recurring_stats AS (
     FROM `family_finance.raw_transactions`
     WHERE amount < 0
       AND pending = FALSE
+      AND LOWER(category_name) NOT IN ('transfer', 'transfers', 'credit card payment', 'credit card payments', 'loan payment', 'balance transfers')
+      AND LOWER(COALESCE(clean_merchant_name, merchant_name)) NOT LIKE '%transfer%'
       AND (
           is_recurring = TRUE
           OR LOWER(category_name) IN ('subscriptions', 'phone', 'internet & cable', 'fitness', 'home security', 'utilities')
