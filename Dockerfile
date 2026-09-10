@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py config.py alerts.py job.py chat_worker.py monarch_service.py bq_service.py schema.sql ./
+COPY main.py config.py alerts.py job.py chat_worker.py monarch_service.py bq_service.py memory_service.py schema.sql ./
 COPY static ./static
 
 EXPOSE 8080

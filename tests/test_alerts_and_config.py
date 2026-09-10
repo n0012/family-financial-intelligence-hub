@@ -34,10 +34,12 @@ class TestConfig(unittest.TestCase):
             self.assertIsInstance(ids, set)
 
     def test_get_excluded_institutions_env(self):
-        with patch.dict(os.environ, {"CONFIG_FILE": "/nonexistent/config.yaml", "EXCLUDED_INSTITUTIONS": "testbank, dummycorp"}):
-            excluded = config.get_excluded_institutions()
-            self.assertIn("testbank", excluded)
-            self.assertIn("dummycorp", excluded)
+        with patch.object(config, "secretmanager", None):
+            with patch.dict(os.environ, {"CONFIG_FILE": "/nonexistent/config.yaml", "EXCLUDED_INSTITUTIONS": "testbank, dummycorp"}):
+                excluded = config.get_excluded_institutions()
+                self.assertIn("testbank", excluded)
+                self.assertIn("dummycorp", excluded)
+
 
 
 class TestChatAuth(unittest.TestCase):
