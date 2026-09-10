@@ -160,6 +160,180 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(res["alert_count"], 0)
         self.assertFalse(res["webhook_dispatched"])
 
+    def test_check_subscription_overlap(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.category_name = "Entertainment & Streaming"
+        mock_row.active_subscriptions_count = 3
+        mock_row.category_annual_run_rate = 540.0
+        mock_row.combined_monthly_cost = 45.0
+        mock_row.active_services = "Netflix, Hulu, HBO"
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        found = alerts.check_subscription_overlap(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "SUBSCRIPTION_OVERLAP")
+        self.assertEqual(a["severity"], "WARNING")
+        self.assertEqual(a["alert_key"], "overlap:entertainment_&_streaming")
+        self.assertIn("Netflix, Hulu, HBO", a["detail"])
+        self.assertIn("$45.00/mo", a["detail"])
+
+    def test_check_micro_transaction_leakage(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.merchant = "Starbucks"
+        mock_row.category_name = "Coffee Shops"
+        mock_row.frequency_90d = 42
+        mock_row.avg_ticket = 6.50
+        mock_row.total_spend_90d = 273.00
+        mock_row.annualized_run_rate = 1092.00
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        found = alerts.check_micro_transaction_leakage(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "MICRO_TRANSACTION_LEAKAGE")
+        self.assertEqual(a["alert_key"], "micro:starbucks")
+        self.assertIn("42 transactions", a["detail"])
+        self.assertIn("$1,092.00/year", a["suggested_fix"])
+
+    def test_extract_budget_caps(self):
+        mems = [
+            "Capped dining spend at $450/month with excess cash directed to HELOC payoff",
+            "$600 monthly limit on groceries",
+        ]
+        caps = alerts.extract_budget_caps(mems)
+        self.assertEqual(caps.get("dining"), 450.0)
+        self.assertEqual(caps.get("groceries"), 600.0)
+
+    def test_check_memory_budget_limits_exceeded(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.current_month = "2026-09"
+        mock_row.current_month_dining = 512.40
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        with patch("memory_service.retrieve_user_memories", return_value=["Capped dining spend at $450/month"]):
+            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@sagely.com")
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0]["type"], "BUDGET_CAP_EXCEEDED")
+            self.assertEqual(found[0]["severity"], "WARNING")
+            self.assertEqual(found[0]["alert_key"], "budget_cap:dining:2026-09")
+            self.assertIn("$512.40", found[0]["detail"])
+
+    def test_check_memory_budget_limits_pacing(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.current_month = "2026-09"
+        mock_row.current_month_dining = 400.00  # 88.8% of $450 cap
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        with patch("memory_service.retrieve_user_memories", return_value=["Capped dining spend at $450/month"]):
+            found = alerts.check_memory_budget_limits(mock_bq, "proj", "ds", "test@sagely.com")
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0]["type"], "BUDGET_CAP_PACING")
+            self.assertEqual(found[0]["severity"], "INFO")
+            self.assertEqual(found[0]["alert_key"], "budget_pacing:dining:2026-09")
+
+    def test_get_active_suppressions(self):
+        mock_bq = MagicMock()
+        r1 = MagicMock()
+        r1.alert_key = "overlap:streaming"
+        r2 = MagicMock()
+        r2.alert_key = "micro:starbucks"
+        mock_bq.query.return_value.result.return_value = [r1, r2]
+
+        suppressed = alerts.get_active_suppressions(mock_bq, "proj", "ds")
+        self.assertEqual(suppressed, {"overlap:streaming", "micro:starbucks"})
+
+    def test_filter_suppressed_alerts(self):
+        raw = [
+            {"type": "SUBSCRIPTION_OVERLAP", "alert_key": "overlap:streaming"},
+            {"type": "PRICE_CREEP", "alert_key": "price_creep:netflix"},
+        ]
+        suppressed = {"overlap:streaming"}
+        filtered = alerts.filter_suppressed_alerts(raw, suppressed)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["alert_key"], "price_creep:netflix")
+
+    def test_suppress_alert(self):
+        mock_bq = MagicMock()
+        success = alerts.suppress_alert(
+            bq=mock_bq,
+            project_id="proj",
+            dataset_id="ds",
+            alert_key="price_creep:netflix",
+            alert_type="PRICE_CREEP",
+            days=14,
+            reason="User snoozed",
+        )
+        self.assertTrue(success)
+        mock_bq.query.assert_called_once()
+
+    def test_build_chat_card_v2_with_snooze_buttons(self):
+        mock_alerts = [
+            {
+                "type": "PRICE_CREEP",
+                "severity": "WARNING",
+                "alert_key": "price_creep:netflix",
+                "title": "Subscription Price Hike: Netflix",
+                "detail": "Increased from $15.49 to $19.99",
+                "suggested_fix": "Audit usage",
+            }
+        ]
+        payload = alerts.build_chat_card_v2(mock_alerts)
+        card = payload["cardsV2"][0]["card"]
+        widgets = card["sections"][0]["widgets"]
+        self.assertEqual(len(widgets), 2)
+        button_widget = widgets[1]
+        self.assertIn("buttonList", button_widget)
+        btn = button_widget["buttonList"]["buttons"][0]
+        self.assertEqual(btn["text"], "💤 Snooze 7 Days")
+        action_params = btn["onClick"]["action"]["parameters"]
+        params_dict = {p["key"]: p["value"] for p in action_params}
+        self.assertEqual(params_dict["action"], "snooze_alert")
+        self.assertEqual(params_dict["alert_key"], "price_creep:netflix")
+
+    def test_build_snooze_success_card(self):
+        card_payload = alerts.build_snooze_success_card("overlap:streaming", "SUBSCRIPTION_OVERLAP", 7)
+        self.assertEqual(card_payload["cardId"], "snoozeSuccess_overlap:streaming")
+        card = card_payload["card"]
+        self.assertEqual(card["header"]["subtitle"], "Alert Snoozed")
+        text = card["sections"][0]["widgets"][0]["decoratedText"]["text"]
+        self.assertIn("Subscription Overlap", text)
+        self.assertIn("7 days", text)
+
+    def test_snooze_spend_alert_tool(self):
+        with patch("alerts.suppress_alert", return_value=True) as mock_suppress:
+            with patch("alerts.bigquery.Client"):
+                res = alerts.snooze_spend_alert("Netflix Price Hike", days=14)
+                self.assertIn("Successfully snoozed", res)
+                mock_suppress.assert_called_once()
+                args, kwargs = mock_suppress.call_args
+                self.assertEqual(kwargs.get("alert_key") or args[3], "netflix_price_hike")
+                self.assertEqual(kwargs.get("days") or args[5], 14)
+
+    def test_main_card_clicked_snooze_alert(self):
+        import main
+        card_event = {
+            "type": "CARD_CLICKED",
+            "action": {
+                "actionMethodName": "snooze_alert",
+                "parameters": [
+                    {"key": "alert_key", "value": "price_creep:hulu"},
+                    {"key": "alert_type", "value": "PRICE_CREEP"},
+                    {"key": "days", "value": "7"},
+                ],
+            },
+            "user": {"email": "nick@sagelycreations.com"},
+        }
+        with patch("main.suppress_alert", return_value=True) as mock_suppress:
+            res = asyncio.run(main.google_chat_webhook(card_event))
+            self.assertIn("cardsV2", res)
+            self.assertIn("Price Creep", res.get("text", ""))
+            mock_suppress.assert_called_once()
+
 
 class TestJobCLI(unittest.TestCase):
     def test_run_sync_delegation(self):

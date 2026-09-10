@@ -61,7 +61,13 @@ from config import (
     load_local_config,
 )
 from contextlib import asynccontextmanager
-from alerts import execute_alert_scan
+from alerts import (
+    execute_alert_scan,
+    build_chat_card_v2,
+    build_snooze_success_card,
+    suppress_alert,
+    snooze_spend_alert,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monarch-gemini")
@@ -318,6 +324,7 @@ def ask_gemini_brain(
             "11. Live Monarch Confirmation & Plaid Tools: BigQuery is your primary historical analytical engine. If the user asks for up-to-the-minute balance checks (e.g. 'what is my balance right now?', 'did that payment post?'), call `get_live_account_balance(account_identifier)` to confirm live figures directly from Monarch. To inspect a specific transaction's pending status, call `get_live_transaction(transaction_id)`. If an institution's data appears stale, call `request_plaid_refresh(institution_name)`.\n"
             "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions.\n"
             "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
+            "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
             f"{memory_block}"
         )
 
@@ -342,6 +349,7 @@ def ask_gemini_brain(
                     request_plaid_refresh,
                     propose_transaction_recategorization,
                     store_user_preference,
+                    snooze_spend_alert,
                 ],
 
             ),
@@ -775,6 +783,41 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             txn_id = action_params.get("transaction_id", "")
             return respond(f"🚫 Recategorization for transaction #{txn_id} was cancelled. No changes were made.")
 
+        elif action_name == "snooze_alert":
+            alert_key = action_params.get("alert_key", "")
+            alert_type = action_params.get("alert_type", "GENERAL")
+            days_str = action_params.get("days", "7")
+            try:
+                days = int(days_str)
+            except ValueError:
+                days = 7
+
+            logger.info(f"Snoozing alert from Card v2: key={alert_key}, type={alert_type}, days={days}, user={user_email}")
+            target_project = BQ_PROJECT_ID
+            target_dataset = BQ_DATASET_ID
+
+            bq_client = get_bq_client(target_project) if "get_bq_client" in globals() else None
+            if not bq_client and bigquery:
+                bq_client = bigquery.Client(project=target_project)
+
+            suppressed = await asyncio.to_thread(
+                suppress_alert,
+                bq_client,
+                target_project,
+                target_dataset,
+                alert_key,
+                alert_type,
+                days,
+                f"Snoozed by user {user_email} via Google Chat Card v2",
+            )
+
+            if suppressed:
+                snooze_card = build_snooze_success_card(alert_key, alert_type, days)
+                success_text = f"💤 Alert *{alert_type.replace('_', ' ').title()}* (`{alert_key}`) snoozed for {days} days."
+                return respond(success_text, cards_v2=[snooze_card])
+            else:
+                return respond(f"⚠️ Failed to snooze alert '{alert_key}'.")
+
         return respond("ℹ️ Action received.")
 
     # 1. Bot added to space or 1:1 DM
@@ -864,15 +907,16 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     # Command: /alerts
     if clean_text.lower().startswith(("/alerts", "alerts")):
         try:
-            scan_res = await execute_alert_scan()
-            alerts = scan_res.get("alerts", [])
-            if not alerts:
-                return respond("✅ No alerts or price creeps detected right now!")
-            lines = ["🔔 *Current Optimization Alerts:*\n"]
-            for a in alerts:
-                if a.get("title"):
-                    lines.append(f"• *{a['title']}*\n  {a['detail']}\n  👉 {a['suggested_fix']}\n")
-            return respond("\n".join(lines))
+            scan_res = await execute_alert_scan(user_email=user_email)
+            alerts_list = scan_res.get("alerts", [])
+            active_alerts = [a for a in alerts_list if a.get("type") != "QUERY_ERROR"]
+            if not active_alerts:
+                return respond("✅ No active financial anomalies or spending leaks detected right now!")
+            card_payload = build_chat_card_v2(active_alerts)
+            return respond(
+                card_payload.get("text", "🔔 *Sage*: Alerts Scan completed."),
+                cards_v2=card_payload.get("cardsV2")
+            )
         except Exception as e:
             return respond(f"⚠️ Alert scan failed: {e}")
 
