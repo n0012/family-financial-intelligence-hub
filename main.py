@@ -36,6 +36,13 @@ from monarch_service import (
     request_plaid_refresh,
     verify_mutation_signature,
 )
+from memory_service import (
+    format_memories_for_prompt,
+    retrieve_user_memories,
+    save_user_preference,
+    store_user_preference,
+)
+
 import requests
 import yaml
 
@@ -214,13 +221,28 @@ async def scan_alerts():
     return await execute_alert_scan()
 
 
+def run_readonly_sql_tool(sql_query: str) -> str:
+    """
+    Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
+    (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_overlap,
+    v_food_efficiency, v_micro_transaction_leakage, raw_accounts, raw_transactions).
+
+    Args:
+        sql_query: The GoogleSQL SELECT query to execute.
+    """
+    return run_readonly_sql(sql_query)
+
+
 def ask_gemini_brain(
+
     question: str,
     history: Optional[list] = None,
     images: Optional[list[tuple[bytes, str]]] = None,
+    user_email: Optional[str] = None,
 ) -> dict:
     """
-    Primary AI Brain: Queries Google Gemini 3.8 Flash with MEDIUM thinking and live BigQuery tools.
+    Primary AI Brain: Queries Google Gemini 3.8 Flash with MEDIUM thinking, live BigQuery analytical views,
+    Vertex AI Agent Platform Memory Bank long-term preferences, and Monarch tools.
     Falls back seamlessly to BigQuery Conversational Analytics if Gemini API Key is unconfigured.
     """
     gemini_key = resolve_secret("gemini-api-key", "GEMINI_API_KEY")
@@ -248,6 +270,10 @@ def ask_gemini_brain(
                     s_text = " ".join(parts).strip()
                     if s_text:
                         gemini_history.append(types.Content(role="model", parts=[types.Part.from_text(text=s_text)]))
+
+        target_user = user_email or CURRENT_USER_EMAIL.get() or "nick@sagelycreations.com"
+        user_memories = retrieve_user_memories(target_user)
+        memory_block = format_memories_for_prompt(user_memories)
 
         system_instruction = (
             "You are an expert personal financial advisor and spend optimization strategist for a family. "
@@ -290,7 +316,9 @@ def ask_gemini_brain(
             "9. Format all currency as $X,XXX.XX.\n"
             "10. Multimodal Understanding: When the user provides images, screenshots, paystubs, statements, or compensation/outlook plans, thoroughly examine the visual data, parse every figure and projection, and integrate them directly into your financial analysis and debt paydown calculations.\n"
             "11. Live Monarch Confirmation & Plaid Tools: BigQuery is your primary historical analytical engine. If the user asks for up-to-the-minute balance checks (e.g. 'what is my balance right now?', 'did that payment post?'), call `get_live_account_balance(account_identifier)` to confirm live figures directly from Monarch. To inspect a specific transaction's pending status, call `get_live_transaction(transaction_id)`. If an institution's data appears stale, call `request_plaid_refresh(institution_name)`.\n"
-            "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions."
+            "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions.\n"
+            "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
+            f"{memory_block}"
         )
 
         try:
@@ -308,12 +336,14 @@ def ask_gemini_brain(
                 system_instruction=system_instruction,
                 thinking_config=thinking_config,
                 tools=[
-                    run_readonly_sql,
+                    run_readonly_sql_tool,
                     get_live_account_balance,
                     get_live_transaction,
                     request_plaid_refresh,
                     propose_transaction_recategorization,
+                    store_user_preference,
                 ],
+
             ),
         )
 
@@ -856,7 +886,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     CURRENT_PROPOSED_CARD.set(None)
 
     loop = asyncio.get_event_loop()
-    analysis_future = loop.run_in_executor(None, ask_gemini_brain, clean_text, session_history, downloaded_images)
+    analysis_future = loop.run_in_executor(None, ask_gemini_brain, clean_text, session_history, downloaded_images, user_email)
 
     try:
         result = await asyncio.wait_for(asyncio.shield(analysis_future), timeout=12.0)

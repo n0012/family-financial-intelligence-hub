@@ -57,8 +57,12 @@ flowchart TD
         Worker["Chat Pull Worker<br/>(chat_worker.py)<br/>Outbound Streaming Pull"]
     end
 
+    subgraph MemoryLayer ["Long-Term Memory Bank (Vertex AI Agent Platform)"]
+        MemoryBank["Reasoning Engine Memory Bank<br/>(Sage Memory Bank)<br/>• User-Scoped Preferences<br/>• Fact Consolidation & Conflict Resolution<br/>• Replaces Legacy BQ chat_history"]
+    end
+
     subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface (Sage)"]
-        GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool<br/>• Live Monarch Confirmation Tools"]
+        GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool<br/>• Live Monarch Confirmation Tools<br/>• Persistent Memory Bank AFC Tool"]
         MultimodalVision["Multimodal Ingestion<br/>(Pasted PNG/JPG Screenshots & Plans)"]
         GoogleChat["Google Chat Space & 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Asynchronous REST Replies"]
     end
@@ -77,7 +81,9 @@ flowchart TD
     Topic -->|"Outbound Streaming Pull (No Inbound Port)"| Worker
     Worker --> MultimodalVision
     MultimodalVision --> GeminiFlash
-    GeminiFlash -->|"Analytical SQL: run_readonly_sql"| Views
+    MemoryBank -->|"Active Preferences & Targets"| GeminiFlash
+    GeminiFlash -->|"Consolidate: store_user_preference"| MemoryBank
+    GeminiFlash -->|"Analytical SQL: run_readonly_sql_tool"| Views
     Views -->|"Query Results"| GeminiFlash
     GeminiFlash -->|"Live Read: get_live_account_balance / txn"| MMClient
     MMClient -->|"Live Data Confirmation"| GeminiFlash
@@ -134,8 +140,9 @@ Paste images directly into Google Chat:
 ```
 family-financial-intelligence-hub/
 ├── main.py                     # FastAPI application & Google Chat webhook router
-├── bq_service.py               # BigQuery SQL query tool, session history & schema migration
+├── bq_service.py               # BigQuery SQL query tool, analytical views & schema migration
 ├── monarch_service.py          # MonarchMoney client auth, sync pipelines & live confirmation tools
+├── memory_service.py           # Vertex AI Agent Platform Memory Bank client & user preference tools
 ├── job.py                      # Cloud Run Job CLI entrypoint (sync & alerts batch runner)
 ├── chat_worker.py              # Zero-ingress Google Chat Pub/Sub pull subscriber
 ├── config.py                   # Centralized configuration, local overrides, & secret caching
@@ -149,14 +156,15 @@ family-financial-intelligence-hub/
 ├── config.example.json         # JSON configuration template
 ├── sync_secrets_to_gcp.sh      # Automated secret synchronization from .env.local to Secret Manager
 ├── create_ca_agent.py          # Google Cloud Conversational Analytics Agent deployment script
-├── requirements.txt            # Python dependencies (includes google-cloud-pubsub)
+├── requirements.txt            # Python dependencies (includes google-cloud-aiplatform)
 ├── requirements-dev.txt        # Optional test & development dependencies
 ├── .env.example                # Template for environment configuration
-├── tests/                      # Pytest automated test suite (51 passing unit tests)
+├── tests/                      # Pytest automated test suite (62 passing unit tests)
 │   ├── test_alerts_and_config.py # Config caching, token auth, Card v2 builders, job CLI
-│   ├── test_bq_service.py        # Read-only SQL safety guards, CA fallback, session history
+│   ├── test_bq_service.py        # Read-only SQL safety guards, CA fallback, in-memory session history
 │   ├── test_monarch_service.py   # Monarch auth, sync pipelines, live read tools, rate limits
-│   └── test_monarch_mutations.py # HMAC signatures, guarded mutations, Card v2 interactive actions
+│   ├── test_monarch_mutations.py # HMAC signatures, guarded mutations, Card v2 interactive actions
+│   └── test_memory_service.py    # Vertex AI Memory Bank retrieval, prompt formatting, fact consolidation
 └── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
     ├── main.tf                 # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
     ├── variables.tf            # Configurable deployment variables
@@ -197,8 +205,6 @@ To ensure modularity, maintainability, and test coverage, the system is refactor
 * **Conversational Analytics Integration (`ask_conversational_analytics`)**: Isolated fallback agent dispatching to Gemini Conversational Analytics with project resolution.
 * **Chat History Persistence & Hydration**:
   * Dual-layer caching: in-memory LRU/dict thread and space histories for lightning-fast multi-turn replies within active containers.
-  * Cold-start / post-deployment hydration: dynamically restores conversation turns from `family_finance.chat_history` when in-memory cache is empty.
-  * Automated background persistence: records each conversation turn (`session_id`, `user_email`, `user_text`, `model_response`, `created_at`).
 * **BigQuery Schema Migration (`apply_bigquery_schema`)**: Added programmatic application helper for `schema.sql` tables and analytical views.
 * **Full Unit Test Coverage ([`tests/test_bq_service.py`](tests/test_bq_service.py))**: Added 11 new tests, raising total suite to 39 passing tests.
 
@@ -218,9 +224,17 @@ To ensure modularity, maintainability, and test coverage, the system is refactor
   * Webhook handles `CARD_CLICKED` events, validates signature freshness and authenticity, calls `execute_guarded_recategorization`, synchronizes BigQuery `raw_transactions` in-place, and returns a rich success card.
 * **Full Unit Test Coverage ([`tests/test_monarch_mutations.py`](tests/test_monarch_mutations.py))**: Added 12 new unit tests, bringing the total suite to **51 passing unit tests** across the codebase.
 
-### **Upcoming Roadmap (PR 5 – PR 6)**
-* **PR 5: Multi-Turn Memory Bank & User-Scoped Preferences**: Implement persistent cross-thread user preferences (e.g., target debt payoff dates, discretionary spending ceilings) grounded in BigQuery and Vertex AI Memory Bank.
+### **PR 5: Vertex AI Agent Platform Memory Bank & BigQuery `chat_history` Retirement**
+* **Extracted [`memory_service.py`](memory_service.py)**: Built client integration with Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank** (`Sage Memory Bank` on `us-central1`).
+* **Semantic Fact Extraction & Automatic Consolidation**: Uses foundation model embeddings (`text-embedding-005`) to automatically update, consolidate, and resolve conflicting facts in-place without manual deduplication.
+* **User-Scoped Memory Bank**: Memory retrieval and updates are dynamically anchored to the authenticated user's email (`nick@sagelycreations.com`) via thread-safe `ContextVar`.
+* **Gemini AFC Tool (`store_user_preference`)**: Equips Gemini 3.8 Flash to autonomously persist explicit goals, discretionary spending limits, debt payoff milestones, and alerts on the fly during natural conversation.
+* **Retired BigQuery `chat_history`**: Completely eliminated writes and queries to BigQuery `family_finance.chat_history` table in favor of native Memory Bank facts, while retaining ultra-low-latency in-memory LRU caching strictly for intra-turn multi-turn pronoun tracking.
+* **Full Unit Test Coverage ([`tests/test_memory_service.py`](tests/test_memory_service.py))**: Added 11 new unit tests covering client authentication, email resolution, prompt block formatting, fact generation, and error fallback, bringing the repository suite to **62 passing unit tests**.
+
+### **Upcoming Roadmap (PR 6)**
 * **PR 6: Autonomous Spend Anomaly Alerts & Suppression Rules**: Dynamic multi-table anomaly scan alerting with exact-match suppression table in BigQuery.
+
 
 ---
 

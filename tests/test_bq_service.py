@@ -135,30 +135,17 @@ class TestSessionHistory(unittest.TestCase):
         self.assertEqual(history[0]["userMessage"]["text"], "hello")
         self.mock_client.query.assert_not_called()
 
-    def test_hydration_from_bigquery(self):
-        row1 = MagicMock()
-        row1.user_text = "What is my HELOC balance?"
-        row1.model_response = "Your HELOC balance is $45,000."
-
-        mock_job = MagicMock()
-        mock_job.result.return_value = [row1]
-        self.mock_client.query.return_value = mock_job
-
+    def test_in_memory_session_history(self):
+        # Empty when not cached
         history = bq_service.get_session_history(
-            thread_name="spaces/SPACE_1/threads/THREAD_2",
+            thread_name="spaces/SPACE_1/threads/THREAD_EMPTY",
             space_name="spaces/SPACE_1",
             client=self.mock_client,
         )
+        self.assertEqual(len(history), 0)
+        self.mock_client.query.assert_not_called()
 
-        self.assertEqual(len(history), 2)
-        self.assertEqual(history[0]["userMessage"]["text"], "What is my HELOC balance?")
-        self.assertEqual(history[1]["systemMessage"]["text"]["parts"][0], "Your HELOC balance is $45,000.")
-        # Verify it was cached in-memory
-        self.assertIn("spaces/SPACE_1/threads/THREAD_2", bq_service.THREAD_HISTORY)
-
-    def test_save_session_history(self):
-        self.mock_client.insert_rows_json.return_value = []
-
+    def test_save_session_history_in_memory(self):
         success = bq_service.save_session_history(
             thread_name="spaces/SPACE_1/threads/THREAD_3",
             space_name="spaces/SPACE_1",
@@ -169,17 +156,21 @@ class TestSessionHistory(unittest.TestCase):
         )
 
         self.assertTrue(success)
-        self.mock_client.insert_rows_json.assert_called_once()
-        args = self.mock_client.insert_rows_json.call_args[0]
-        self.assertEqual(args[0], "sagely-family-finance.family_finance.chat_history")
-        row = args[1][0]
-        self.assertEqual(row["session_id"], "spaces/SPACE_1/threads/THREAD_3")
-        self.assertEqual(row["user_email"], "nick@sagelycreations.com")
-        self.assertEqual(row["user_text"], "Can we afford dinner out tonight?")
+        # BigQuery chat_history insert is retired; no insert_rows_json call should be made
+        self.mock_client.insert_rows_json.assert_not_called()
 
-        # Check that it's also present in in-memory caches
+        # Check that it's present in in-memory caches
         self.assertIn("spaces/SPACE_1/threads/THREAD_3", bq_service.THREAD_HISTORY)
         self.assertIn("spaces/SPACE_1", bq_service.SPACE_HISTORY)
+
+        # Retrieve it back
+        cached = bq_service.get_session_history(
+            thread_name="spaces/SPACE_1/threads/THREAD_3",
+            space_name="spaces/SPACE_1",
+        )
+        self.assertEqual(len(cached), 2)
+        self.assertEqual(cached[0]["userMessage"]["text"], "Can we afford dinner out tonight?")
+
 
 
 class TestApplyBigQuerySchema(unittest.TestCase):

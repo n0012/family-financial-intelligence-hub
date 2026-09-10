@@ -21,8 +21,9 @@ except ImportError:
 
 logger = logging.getLogger("monarch-gemini.config")
 
-BQ_PROJECT_ID = os.getenv("PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "your-gcp-project-id"))
+BQ_PROJECT_ID = os.getenv("PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "sagely-family-finance"))
 BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "family_finance")
+
 IS_PROD = bool(os.getenv("K_SERVICE"))
 
 DEFAULT_DECOMMISSIONED_ACCOUNT_IDS: set[str] = set()

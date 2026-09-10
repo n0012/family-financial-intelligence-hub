@@ -69,6 +69,8 @@ def run_readonly_sql(
     max_bytes_billed: int = 100_000_000,
     max_results: int = 50,
 ) -> str:
+
+
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
     (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_overlap,
@@ -191,8 +193,10 @@ def get_session_history(
     limit: int = 5,
 ) -> list[dict]:
     """
-    Retrieves conversational turns prioritizing the specific thread, falling back to the space session,
-    and hydrated from BigQuery if in-memory cache is empty (e.g. post-deployment/cold start).
+    Retrieves short-term conversational turns from in-memory cache prioritizing
+    the specific thread, falling back to the space session.
+    Note: Persistent long-term memory is managed via Vertex AI Agent Platform Memory Bank,
+    retiring legacy BigQuery chat_history table queries.
     """
     if thread_name and THREAD_HISTORY.get(thread_name):
         return list(THREAD_HISTORY[thread_name])
@@ -200,42 +204,7 @@ def get_session_history(
     if space_name and SPACE_HISTORY.get(space_name):
         return list(SPACE_HISTORY[space_name])
 
-    sessions = [s for s in [thread_name, space_name] if s]
-    if not sessions:
-        return []
-
-    target_project = get_target_project(project_id)
-    target_dataset = get_target_dataset(dataset_id)
-
-    try:
-        bq = client or get_bq_client(target_project)
-        query = f"""
-            SELECT user_text, model_response 
-            FROM `{target_project}.{target_dataset}.chat_history`
-            WHERE session_id IN UNNEST(@sessions)
-            ORDER BY created_at DESC 
-            LIMIT {limit}
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("sessions", "STRING", sessions)
-            ]
-        )
-        rows = list(bq.query(query, job_config=job_config).result())
-        history = []
-        for r in reversed(rows):
-            history.append({"userMessage": {"text": r.user_text}})
-            history.append({"systemMessage": {"text": {"parts": [r.model_response]}}})
-
-        if space_name and history:
-            SPACE_HISTORY[space_name] = list(history)
-        if thread_name and history:
-            THREAD_HISTORY[thread_name] = list(history)
-
-        return history
-    except Exception as e:
-        logger.warning(f"Could not hydrate chat history from BigQuery: {e}")
-        return []
+    return []
 
 
 def save_session_history(
@@ -249,7 +218,8 @@ def save_session_history(
     client: Optional[bigquery.Client] = None,
 ) -> bool:
     """
-    Saves conversation turn to in-memory caches and persists to BigQuery chat_history.
+    Saves conversation turn to in-memory caches for immediate multi-turn thread continuity.
+    Note: BigQuery chat_history table writes are retired in favor of Vertex AI Memory Bank.
     """
     turn_user = {"userMessage": {"text": user_text}}
     turn_model = {"systemMessage": {"text": {"parts": [model_text]}}}
@@ -266,33 +236,7 @@ def save_session_history(
         SPACE_HISTORY[space_name].extend([turn_user, turn_model])
         SPACE_HISTORY[space_name] = SPACE_HISTORY[space_name][-10:]
 
-    session_id = thread_name or space_name
-    if not session_id:
-        return False
-
-    target_project = get_target_project(project_id)
-    target_dataset = get_target_dataset(dataset_id)
-
-    try:
-        bq = client or get_bq_client(target_project)
-        table_ref = f"{target_project}.{target_dataset}.chat_history"
-        errors = bq.insert_rows_json(
-            table_ref,
-            [{
-                "session_id": session_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "user_email": user_email,
-                "user_text": user_text,
-                "model_response": model_text,
-            }]
-        )
-        if errors:
-            logger.warning(f"BigQuery chat history insert errors: {errors}")
-            return False
-        return True
-    except Exception as e:
-        logger.warning(f"Failed to persist chat history to BigQuery: {e}")
-        return False
+    return True
 
 
 def apply_bigquery_schema(
