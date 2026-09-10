@@ -20,3 +20,4 @@ __pycache__/
 *$py.class
 .venv/
 venv/
+.cm_project

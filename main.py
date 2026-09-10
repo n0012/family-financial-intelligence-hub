@@ -15,8 +15,13 @@ from google.auth.transport import requests as google_requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import bigquery, secretmanager
 from google.oauth2 import id_token
-from monarchmoney import MonarchMoney
-import pyotp
+from monarch_service import (
+    execute_sync,
+    get_live_account_balance,
+    get_live_transaction,
+    get_monarch_client,
+    request_plaid_refresh,
+)
 import requests
 import yaml
 
@@ -27,10 +32,44 @@ except ImportError:
     genai = None
     types = None
 
+from config import (
+    BQ_PROJECT_ID,
+    BQ_DATASET_ID,
+    IS_PROD,
+    resolve_secret,
+    load_local_config,
+)
+from contextlib import asynccontextmanager
+from alerts import execute_alert_scan
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monarch-gemini")
 
-is_prod = bool(os.getenv("K_SERVICE"))
+is_prod = IS_PROD
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker = None
+    should_run_worker = (
+        os.getenv("ENABLE_CHAT_PULL_WORKER", "false").lower() in ("true", "1", "yes")
+        or (os.getenv("K_SERVICE") and os.getenv("DISABLE_CHAT_PULL_WORKER", "false").lower() not in ("true", "1", "yes"))
+    )
+    if should_run_worker:
+        try:
+            from chat_worker import start_chat_worker_background
+            project = BQ_PROJECT_ID
+            sub = os.getenv("CHAT_SUBSCRIPTION", "monarch-chat-sub")
+            logger.info(f"Starting embedded Pub/Sub chat pull worker for {project}/{sub} (Zero Ingress Mode)...")
+            worker = start_chat_worker_background(project_id=project, subscription_name=sub)
+        except Exception as e:
+            logger.warning(f"Could not start embedded Pub/Sub chat worker: {e}")
+
+    yield
+
+    if worker:
+        worker.stop()
+
 
 app = FastAPI(
     title="Monarch Money Gemini & BigQuery API",
@@ -39,107 +78,13 @@ app = FastAPI(
     docs_url=None if is_prod else "/docs",
     redoc_url=None if is_prod else "/redoc",
     openapi_url=None if is_prod else "/openapi.json",
+    lifespan=lifespan,
 )
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-BQ_PROJECT_ID = os.getenv("PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "your-gcp-project-id"))
-BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "family_finance")
 
-
-def resolve_secret(secret_name: str, env_var: str) -> Optional[str]:
-    """Resolves secret from Secret Manager latest version, falling back to environment variable."""
-    # Try fetching latest version from Secret Manager first
-    try:
-        sm_client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{BQ_PROJECT_ID}/secrets/{secret_name}/versions/latest"
-        resp = sm_client.access_secret_version(name=name)
-        val = resp.payload.data.decode("utf-8").strip()
-        if val and val != "NONE" and val != "placeholder":
-            return val
-    except Exception as err:
-        logger.debug(f"Direct Secret Manager fetch for {secret_name} failed: {err}")
-
-    # Fallback to env var
-    val = os.getenv(env_var)
-    if val and val != "NONE" and val != "placeholder":
-        return val.strip()
-    return None
-
-
-_monarch_client: Optional[MonarchMoney] = None
-_lock = asyncio.Lock()
-
-
-async def get_monarch_client(mfa_code: Optional[str] = None) -> MonarchMoney:
-    """
-    Initializes and authenticates the MonarchMoney client.
-    Reuses existing authenticated session where possible.
-    """
-    global _monarch_client
-    async with _lock:
-        if _monarch_client is not None and not mfa_code:
-            return _monarch_client
-
-        email = resolve_secret("monarch-email", "MONARCH_EMAIL")
-        password = resolve_secret("monarch-password", "MONARCH_PASSWORD")
-        mfa_secret = resolve_secret("monarch-mfa-secret", "MONARCH_MFA_SECRET")
-
-        if not email or not password:
-            raise HTTPException(
-                status_code=500,
-                detail="MONARCH_EMAIL or MONARCH_PASSWORD not configured.",
-            )
-
-        client = MonarchMoney()
-        try:
-            if mfa_code:
-                logger.info(f"Authenticating {email} with explicit MFA code")
-                try:
-                    await client.login(email=email, password=password)
-                except Exception as login_err:
-                    if "mfa" in type(login_err).__name__.lower() or "mfa" in str(login_err).lower():
-                        await client.multi_factor_authenticate(
-                            email=email,
-                            password=password,
-                            multi_factor_code=mfa_code.strip(),
-                        )
-                    else:
-                        raise login_err
-            else:
-                clean_secret = mfa_secret.replace(" ", "").replace("-", "").strip() if (mfa_secret and mfa_secret != "NONE") else None
-                try:
-                    if clean_secret:
-                        logger.info(f"Authenticating {email} using mfa_secret_key")
-                        await client.login(
-                            email=email,
-                            password=password,
-                            mfa_secret_key=clean_secret,
-                        )
-                    else:
-                        await client.login(email=email, password=password)
-                except Exception as login_err:
-                    is_mfa_error = "mfa" in type(login_err).__name__.lower() or "mfa" in str(login_err).lower()
-                    if is_mfa_error and clean_secret:
-                        totp_code = pyotp.TOTP(clean_secret).now()
-                        logger.info(f"Submitting generated TOTP code for {email}")
-                        await client.multi_factor_authenticate(
-                            email=email,
-                            password=password,
-                            multi_factor_code=totp_code,
-                        )
-                    else:
-                        raise login_err
-
-            _monarch_client = client
-            return client
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Monarch authentication failed: {str(e)}",
-            )
+# MonarchMoney client management and API calls are handled in monarch_service.py
 
 
 def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)):
@@ -225,355 +170,9 @@ async def get_cashflow(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Monarch call get_cashflow failed: {str(e)}")
 
-
-# Default configurations (fully configurable via Secret Manager, config.json, or environment variables)
-DEFAULT_DECOMMISSIONED_ACCOUNT_IDS: set[str] = set()
-DEFAULT_ACCOUNT_OVERRIDES: dict[str, dict] = {}
-DEFAULT_EXCLUDED_INSTITUTIONS: set[str] = set()
+# execute_sync is imported from monarch_service.py
 
 
-def load_local_config() -> dict:
-    """Loads optional local configuration from config.yaml, config.yml, or config.json."""
-    config_file = os.getenv("CONFIG_FILE")
-    candidate_files = [config_file] if config_file else ["config.yaml", "config.yml", "config.json"]
-
-    for file_path in candidate_files:
-        if file_path and os.path.exists(file_path):
-            try:
-                if file_path.endswith((".yaml", ".yml")):
-                    with open(file_path, "r") as f:
-                        data = yaml.safe_load(f)
-                        if isinstance(data, dict):
-                            return data
-                else:
-                    with open(file_path, "r") as f:
-                        data = json.load(f)
-                        if isinstance(data, dict):
-                            return data
-            except Exception as e:
-                logger.warning(f"Failed to load config from {file_path}: {e}")
-    return {}
-
-
-def get_rates_config() -> dict:
-    """Retrieves default interest rates from local config (YAML/JSON), Secret Manager, or ENV."""
-    cfg = load_local_config().get("rates")
-    if cfg and isinstance(cfg, dict):
-        return dict(cfg)
-
-    raw = resolve_secret("rates-config", "RATES_CONFIG_JSON")
-    if raw:
-        try:
-            return json.loads(raw)
-        except Exception as e:
-            logger.warning(f"Failed to parse RATES_CONFIG_JSON: {e}")
-    return {}
-
-
-def get_decommissioned_account_ids() -> set[str]:
-    """Retrieves set of account IDs to ignore from local config, Secret Manager, or ENV."""
-    cfg = load_local_config().get("decommissioned_account_ids")
-    if cfg:
-        return set(cfg)
-
-    raw = resolve_secret("decommissioned-account-ids", "DECOMMISSIONED_ACCOUNT_IDS")
-    if raw:
-        try:
-            if raw.startswith("["):
-                return set(json.loads(raw))
-            return {x.strip() for x in raw.split(",") if x.strip()}
-        except Exception as e:
-            logger.warning(f"Failed to parse DECOMMISSIONED_ACCOUNT_IDS: {e}")
-    return set(DEFAULT_DECOMMISSIONED_ACCOUNT_IDS)
-
-
-def get_account_overrides() -> dict:
-    """Retrieves account attribute overrides (e.g. custom APRs) from local config, Secret Manager, or ENV."""
-    cfg = load_local_config().get("account_overrides")
-    if cfg:
-        return dict(cfg)
-
-    raw = resolve_secret("account-overrides", "ACCOUNT_OVERRIDES_JSON")
-    if raw:
-        try:
-            return json.loads(raw)
-        except Exception as e:
-            logger.warning(f"Failed to parse ACCOUNT_OVERRIDES_JSON: {e}")
-    return dict(DEFAULT_ACCOUNT_OVERRIDES)
-
-
-def get_excluded_institutions() -> set[str]:
-    """Retrieves list of institution name keywords to exclude from local config, Secret Manager, or ENV."""
-    cfg = load_local_config().get("excluded_institutions")
-    if cfg:
-        return {str(x).strip().lower() for x in cfg if str(x).strip()}
-
-    raw = resolve_secret("excluded-institutions", "EXCLUDED_INSTITUTIONS")
-    if raw:
-        return {x.strip().lower() for x in raw.split(",") if x.strip()}
-    return set(DEFAULT_EXCLUDED_INSTITUTIONS)
-
-
-async def execute_sync(days_back: Optional[int] = 90, mfa_code: Optional[str] = None) -> dict:
-    """Internal sync logic from Monarch Money to BigQuery with pagination."""
-    client = await get_monarch_client(mfa_code=mfa_code)
-    bq = bigquery.Client(project=BQ_PROJECT_ID)
-    now_ts = datetime.utcnow().isoformat()
-
-    decommissioned_ids = get_decommissioned_account_ids()
-    account_overrides = get_account_overrides()
-    excluded_institutions = get_excluded_institutions()
-    rates_cfg = get_rates_config()
-    default_heloc_apr = rates_cfg.get("default_heloc_apr") or rates_cfg.get("heloc_apr")
-    default_mortgage_apr = rates_cfg.get("default_mortgage_apr") or rates_cfg.get("mortgage_apr")
-    default_debt_apr = rates_cfg.get("default_debt_apr")
-
-    synced_counts = {"accounts": 0, "categories": 0, "transactions": 0}
-
-    try:
-        # 1. Sync Accounts
-        raw_accounts_data = await client.get_accounts()
-        accounts_list = raw_accounts_data.get("accounts", []) if isinstance(raw_accounts_data, dict) else []
-        account_rows = []
-        for acc in accounts_list:
-            acc_id = str(acc.get("id"))
-            if acc_id in decommissioned_ids:
-                continue
-
-            inst = acc.get("institution") or {}
-            inst_raw_name = inst.get("name") if isinstance(inst, dict) else str(inst or "")
-            inst_name = inst_raw_name or ""
-            # Skip excluded institutions (e.g. acquired / duplicate banks)
-            if any(exc in inst_name.lower() for exc in excluded_institutions):
-                continue
-
-            acc_type = acc.get("type") or {}
-            acc_subtype = acc.get("subtype") or {}
-            
-            # Resolve account interest rate (APR) hierarchically:
-            # 1. Explicit account-level override in config (account_overrides[acc_id].interest_rate)
-            # 2. Aggregator reported rate from Monarch API (acc.interestRate)
-            # 3. Class-specific default rate from config file (e.g. default_heloc_apr, default_mortgage_apr)
-            # 4. Fallback general debt rate (default_debt_apr)
-            raw_apr = acc.get("interestRate")
-            override_apr = account_overrides.get(acc_id, {}).get("interest_rate")
-
-            subtype_str = (acc_subtype.get("name") if isinstance(acc_subtype, dict) else str(acc_subtype or "")).lower()
-            type_str = (acc_type.get("name") if isinstance(acc_type, dict) else str(acc_type or "")).lower()
-            disp_name_str = str(acc.get("displayName") or "").lower()
-
-            if override_apr is not None:
-                try:
-                    int_rate = float(override_apr)
-                except (ValueError, TypeError):
-                    int_rate = None
-            elif raw_apr is not None:
-                try:
-                    int_rate = float(raw_apr)
-                except (ValueError, TypeError):
-                    int_rate = None
-            elif "home_equity" in subtype_str or "heloc" in subtype_str or "heloc" in disp_name_str:
-                int_rate = float(default_heloc_apr) if default_heloc_apr is not None else None
-            elif "mortgage" in subtype_str or "mortgage" in type_str:
-                int_rate = float(default_mortgage_apr) if default_mortgage_apr is not None else None
-            elif type_str in ("loan", "credit") and not acc.get("isAsset", False):
-                int_rate = float(default_debt_apr) if default_debt_apr is not None else None
-            else:
-                int_rate = None
-
-            account_rows.append({
-                "account_id": str(acc.get("id")),
-                "account_name": acc.get("displayName") or acc.get("id"),
-                "display_name": acc.get("displayName"),
-                "type_name": acc_type.get("name") if isinstance(acc_type, dict) else str(acc_type),
-                "subtype_name": acc_subtype.get("name") if isinstance(acc_subtype, dict) else str(acc_subtype),
-                "current_balance": float(acc.get("currentBalance") or 0.0),
-                "available_balance": float(acc.get("availableBalance") or 0.0) if acc.get("availableBalance") is not None else None,
-                "credit_limit": float(acc.get("creditLimit") or 0.0) if acc.get("creditLimit") is not None else None,
-                "interest_rate": int_rate,
-                "institution_name": inst_name,
-                "is_asset": acc.get("isAsset", False),
-                "updated_at": now_ts,
-            })
-
-        if account_rows:
-            account_schema = [
-                bigquery.SchemaField("account_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("account_name", "STRING"),
-                bigquery.SchemaField("display_name", "STRING"),
-                bigquery.SchemaField("type_name", "STRING"),
-                bigquery.SchemaField("subtype_name", "STRING"),
-                bigquery.SchemaField("current_balance", "NUMERIC"),
-                bigquery.SchemaField("available_balance", "NUMERIC"),
-                bigquery.SchemaField("credit_limit", "NUMERIC"),
-                bigquery.SchemaField("interest_rate", "NUMERIC"),
-                bigquery.SchemaField("institution_name", "STRING"),
-                bigquery.SchemaField("is_asset", "BOOLEAN"),
-                bigquery.SchemaField("updated_at", "TIMESTAMP"),
-            ]
-            job_config = bigquery.LoadJobConfig(
-                schema=account_schema,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-            )
-            table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_accounts"
-            bq.load_table_from_json(account_rows, table_ref, job_config=job_config).result()
-            synced_counts["accounts"] = len(account_rows)
-
-        # 2. Sync Categories
-        raw_cat_data = await client.get_transaction_categories()
-        cats_list = raw_cat_data.get("categories", []) if isinstance(raw_cat_data, dict) else []
-        cat_rows = []
-        for cat in cats_list:
-            group = cat.get("group") or {}
-            cat_rows.append({
-                "category_id": str(cat.get("id")),
-                "category_name": cat.get("name"),
-                "group_name": group.get("name") if isinstance(group, dict) else str(group),
-                "is_income": cat.get("isIncome", False),
-                "monthly_budget": float(cat.get("budgetAmount") or 0.0) if cat.get("budgetAmount") else None,
-                "updated_at": now_ts,
-            })
-
-        if cat_rows:
-            cat_schema = [
-                bigquery.SchemaField("category_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("category_name", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("group_name", "STRING"),
-                bigquery.SchemaField("is_income", "BOOLEAN"),
-                bigquery.SchemaField("monthly_budget", "NUMERIC"),
-                bigquery.SchemaField("updated_at", "TIMESTAMP"),
-            ]
-            job_config = bigquery.LoadJobConfig(
-                schema=cat_schema,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-            )
-            table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_categories"
-            bq.load_table_from_json(cat_rows, table_ref, job_config=job_config).result()
-            synced_counts["categories"] = len(cat_rows)
-
-        # 3. Sync Transactions (with pagination across full history or custom date window)
-        if days_back is not None and days_back > 0:
-            start_date = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        else:
-            start_date = "2020-01-01"  # Earliest date to fetch all historical transactions
-        end_date = date.today().strftime("%Y-%m-%d")
-
-        txns_list = []
-        offset = 0
-        batch_limit = 1000
-
-        while True:
-            logger.info(f"Syncing transactions from Monarch: start_date={start_date}, end_date={end_date}, offset={offset}, limit={batch_limit}")
-            raw_txn_data = await client.get_transactions(
-                start_date=start_date,
-                end_date=end_date,
-                offset=offset,
-                limit=batch_limit,
-            )
-            batch = []
-            if isinstance(raw_txn_data, dict):
-                batch = raw_txn_data.get("allTransactions", {}).get("results", []) or raw_txn_data.get("transactions", [])
-
-            if not batch:
-                break
-
-            txns_list.extend(batch)
-            logger.info(f"Retrieved batch of {len(batch)} transactions (cumulative: {len(txns_list)})")
-
-            if len(batch) < batch_limit:
-                break
-            offset += batch_limit
-
-            if offset >= 50000:  # Safety guardrail
-                break
-
-        txn_rows = []
-        for txn in txns_list:
-            acc = txn.get("account") or {}
-            acc_id = str(acc.get("id") or txn.get("accountId") or "")
-            if acc_id in decommissioned_ids:
-                continue
-
-            inst_obj = acc.get("institution") or {}
-            inst_raw_name = inst_obj.get("name") if isinstance(inst_obj, dict) else str(inst_obj or "")
-            inst_name = (inst_raw_name or "").lower()
-            if any(exc in inst_name for exc in excluded_institutions):
-                continue
-
-            cat = txn.get("category") or {}
-            merchant = txn.get("merchant") or {}
-            txn_rows.append({
-                "transaction_id": str(txn.get("id")),
-                "account_id": str(acc.get("id") or txn.get("accountId") or ""),
-                "transaction_date": txn.get("date"),
-                "amount": float(txn.get("amount") or 0.0),
-                "merchant_name": merchant.get("name") if isinstance(merchant, dict) else (txn.get("plaidName") or txn.get("name")),
-                "clean_merchant_name": merchant.get("name") if isinstance(merchant, dict) else None,
-                "category_id": str(cat.get("id") or ""),
-                "category_name": cat.get("name") if isinstance(cat, dict) else str(cat),
-                "notes": txn.get("notes"),
-                "is_recurring": txn.get("isRecurring", False),
-                "pending": txn.get("pending", False),
-                "updated_at": now_ts,
-            })
-
-        if txn_rows:
-            staging_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.staging_transactions"
-            target_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions"
-            
-            txn_schema = [
-                bigquery.SchemaField("transaction_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("account_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("transaction_date", "DATE", mode="REQUIRED"),
-                bigquery.SchemaField("amount", "NUMERIC", mode="REQUIRED"),
-                bigquery.SchemaField("merchant_name", "STRING"),
-                bigquery.SchemaField("clean_merchant_name", "STRING"),
-                bigquery.SchemaField("category_id", "STRING"),
-                bigquery.SchemaField("category_name", "STRING"),
-                bigquery.SchemaField("notes", "STRING"),
-                bigquery.SchemaField("is_recurring", "BOOLEAN"),
-                bigquery.SchemaField("pending", "BOOLEAN"),
-                bigquery.SchemaField("updated_at", "TIMESTAMP"),
-            ]
-            job_config = bigquery.LoadJobConfig(
-                schema=txn_schema,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-            )
-            bq.load_table_from_json(txn_rows, staging_ref, job_config=job_config).result()
-            
-            # Merge staging into main table
-            merge_query = f"""
-            MERGE `{target_ref}` T
-            USING `{staging_ref}` S
-            ON T.transaction_id = S.transaction_id
-            WHEN MATCHED THEN
-              UPDATE SET
-                T.account_id = S.account_id,
-                T.transaction_date = S.transaction_date,
-                T.amount = S.amount,
-                T.merchant_name = S.merchant_name,
-                T.clean_merchant_name = S.clean_merchant_name,
-                T.category_id = S.category_id,
-                T.category_name = S.category_name,
-                T.notes = S.notes,
-                T.is_recurring = S.is_recurring,
-                T.pending = S.pending,
-                T.updated_at = S.updated_at
-            WHEN NOT MATCHED THEN
-              INSERT (transaction_id, account_id, transaction_date, amount, merchant_name, clean_merchant_name, category_id, category_name, notes, is_recurring, pending, updated_at)
-              VALUES (S.transaction_id, S.account_id, S.transaction_date, S.amount, S.merchant_name, S.clean_merchant_name, S.category_id, S.category_name, S.notes, S.is_recurring, S.pending, S.updated_at);
-            """
-            bq.query(merge_query).result()
-            synced_counts["transactions"] = len(txn_rows)
-
-        return {
-            "status": "success",
-            "synced_counts": synced_counts,
-            "timestamp": now_ts,
-        }
-    except Exception as e:
-        logger.error(f"BigQuery sync failed: {e}")
-        raise HTTPException(status_code=500, detail=f"BigQuery sync failed: {str(e)}")
 
 
 @app.post("/sync/bigquery", tags=["BigQuery Sync"])
@@ -589,142 +188,6 @@ async def sync_to_bigquery(
     effective_days = days_back if (days_back is not None and days_back > 0) else None
     return await execute_sync(days_back=effective_days, mfa_code=mfa_code)
 
-
-async def execute_alert_scan() -> dict:
-    """
-    Scans BigQuery financial optimization views and generates proactive alerts
-    with concrete suggestions to reduce spend and accelerate HELOC paydown.
-    Optionally posts the summary to ALERT_WEBHOOK_URL (Google Chat/Slack/Discord).
-    """
-    if not BQ_PROJECT_ID:
-        raise HTTPException(status_code=500, detail="PROJECT_ID not set.")
-
-    bq = bigquery.Client(project=BQ_PROJECT_ID)
-    alerts = []
-
-    # 1. Price Creep Check
-    price_creep_sql = f"""
-    SELECT merchant, min_charge, max_charge, estimated_annual_cost
-    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_active_subscriptions`
-    WHERE has_price_increased = TRUE
-    ORDER BY estimated_annual_cost DESC
-    LIMIT 3;
-    """
-    try:
-        rows = list(bq.query(price_creep_sql).result())
-        for r in rows:
-            alerts.append({
-                "type": "PRICE_CREEP",
-                "severity": "WARNING",
-                "title": f"Subscription Price Hike: {r.merchant}",
-                "detail": f"Charge increased from ${r.min_charge:.2f} to ${r.max_charge:.2f} (Annual cost: ${r.estimated_annual_cost:.2f}).",
-                "suggested_fix": f"Audit usage for {r.merchant} or cancel/rotate to save up to ${r.estimated_annual_cost:.2f}/year.",
-            })
-    except Exception as e:
-        alerts.append({"type": "QUERY_ERROR", "detail": f"Subscription check failed: {e}"})
-
-    # 2. Food Efficiency Ratio Check
-    food_sql = f"""
-    SELECT month, grocery_spend, dining_delivery_spend, total_food_spend, dining_percentage_of_food_budget
-    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_food_efficiency`
-    ORDER BY month DESC
-    LIMIT 1;
-    """
-    try:
-        rows = list(bq.query(food_sql).result())
-        if rows:
-            r = rows[0]
-            if r.dining_percentage_of_food_budget > 35.0:
-                potential_savings = round(r.dining_delivery_spend * 0.30, 2)
-                alerts.append({
-                    "type": "FOOD_LEAKAGE",
-                    "severity": "WARNING",
-                    "title": f"High Dining/Delivery Ratio ({r.dining_percentage_of_food_budget:.1f}% of food budget)",
-                    "detail": f"In {r.month}, dining & delivery accounted for ${r.dining_delivery_spend:.2f} out of ${r.total_food_spend:.2f} total food spend.",
-                    "suggested_fix": f"Shifting 2 delivery meals/month to home cooking could liberate ~${potential_savings:.2f}/month.",
-                })
-    except Exception as e:
-        alerts.append({"type": "QUERY_ERROR", "detail": f"Food check failed: {e}"})
-
-    # 3. HELOC Daily Cost & Opportunity Check
-    heloc_sql = f"""
-    SELECT display_name, current_balance, apr, daily_interest_cost, monthly_interest_cost
-    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_heloc_daily_cost`
-    LIMIT 1;
-    """
-    try:
-        rows = list(bq.query(heloc_sql).result())
-        if rows and rows[0].current_balance > 0:
-            h = rows[0]
-            alerts.append({
-                "type": "HELOC_OPPORTUNITY",
-                "severity": "INFO",
-                "title": f"HELOC Cost: ${h.daily_interest_cost:.2f}/day (${h.monthly_interest_cost:.2f}/mo)",
-                "detail": f"Current balance is ${h.current_balance:,.2f} at {h.apr*100:.2f}% APR.",
-                "suggested_fix": f"Every $100 trimmed from discretionary spend and swept into this debt eliminates ${h.apr*100:.1f}0 in compounding annual interest.",
-            })
-    except Exception as e:
-        alerts.append({"type": "QUERY_ERROR", "detail": f"HELOC check failed: {e}"})
-
-    # Post to Webhook if configured (Google Chat, Slack, Discord)
-    webhook_url = resolve_secret("alert-webhook-url", "ALERT_WEBHOOK_URL")
-    webhook_sent = False
-    if webhook_url and alerts:
-        try:
-            if "chat.googleapis.com" in webhook_url:
-                # Native Google Chat Card V2 format with high-fidelity widgets
-                widgets = []
-                for a in alerts:
-                    if a.get("title"):
-                        widgets.append({
-                            "decoratedText": {
-                                "topLabel": a.get("type", "FINANCIAL ADVISORY").replace("_", " "),
-                                "text": f"<b>{a['title']}</b><br><font color=\"#5f6368\">{a['detail']}</font><br>👉 <b>Action:</b> {a['suggested_fix']}",
-                                "wrapText": True,
-                            }
-                        })
-                payload = {
-                    "text": "🔔 *Family Financial Copilot*: Proactive Advisory Scan completed with new recommendations.",
-                    "cardsV2": [
-                        {
-                            "cardId": "financialAdvisorDailyAlert",
-                            "card": {
-                                "header": {
-                                    "title": "Family Financial Copilot",
-                                    "subtitle": "Daily Spend Optimization & Debt Advisory",
-                                    "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
-                                    "imageType": "CIRCLE",
-                                },
-                                "sections": [
-                                    {
-                                        "header": "Daily Optimization Opportunities",
-                                        "widgets": widgets,
-                                    }
-                                ],
-                            },
-                        }
-                    ],
-                }
-            else:
-                # Discord / Slack Markdown fallback
-                lines = ["**🔔 Family Financial Copilot: Proactive Advisory Scan**\n"]
-                for a in alerts:
-                    if a.get("title"):
-                        lines.append(f"• **{a['title']}**\n  _{a['detail']}_\n  👉 **Action**: {a['suggested_fix']}\n")
-                msg = "\n".join(lines)
-                payload = {"content": msg, "text": msg}
-
-            resp = requests.post(webhook_url, json=payload, timeout=10)
-            webhook_sent = resp.status_code in (200, 204)
-        except Exception as e:
-            print(f"Webhook post failed: {e}")
-
-    return {
-        "status": "success",
-        "alert_count": len([a for a in alerts if a.get("type") != "QUERY_ERROR"]),
-        "alerts": alerts,
-        "webhook_dispatched": webhook_sent,
-    }
 
 
 @app.post("/advisor/scan-alerts", dependencies=[Depends(verify_api_key)], tags=["Spend Optimization Advisor"])
@@ -916,7 +379,8 @@ def ask_gemini_brain(
             "7. For date-range or transaction volume inquiries (e.g. 'how much history do you have?'), run a single SQL aggregation query with MIN(transaction_date), MAX(transaction_date), and COUNT(*) from raw_transactions. Do NOT run multiple exploratory queries.\n"
             "8. Keep responses structured, concise, and formatted in clean markdown with bold metrics and bullet points.\n"
             "9. Format all currency as $X,XXX.XX.\n"
-            "10. Multimodal Understanding: When the user provides images, screenshots, paystubs, statements, or compensation/outlook plans, thoroughly examine the visual data, parse every figure and projection, and integrate them directly into your financial analysis and debt paydown calculations."
+            "10. Multimodal Understanding: When the user provides images, screenshots, paystubs, statements, or compensation/outlook plans, thoroughly examine the visual data, parse every figure and projection, and integrate them directly into your financial analysis and debt paydown calculations.\n"
+            "11. Live Monarch Confirmation & Plaid Tools: BigQuery is your primary historical analytical engine. If the user asks for up-to-the-minute balance checks (e.g. 'what is my balance right now?', 'did that payment post?'), call `get_live_account_balance(account_identifier)` to confirm live figures directly from Monarch. To inspect a specific transaction's pending status, call `get_live_transaction(transaction_id)`. If an institution's data appears stale, call `request_plaid_refresh(institution_name)`."
         )
 
         try:
@@ -931,7 +395,12 @@ def ask_gemini_brain(
                 temperature=0.0,
                 system_instruction=system_instruction,
                 thinking_config=thinking_config,
-                tools=[run_readonly_sql],
+                tools=[
+                    run_readonly_sql,
+                    get_live_account_balance,
+                    get_live_transaction,
+                    request_plaid_refresh,
+                ],
             ),
         )
 
@@ -1224,49 +693,71 @@ def verify_chat_origin(
         if expected and secrets.compare_digest(x_api_key, expected):
             return True
 
-    # 2. Local development skip
-    if os.getenv("CHAT_AUTH_DISABLED", "false").lower() == "true":
+    # 2. Local development skip (STRICTLY non-production only)
+    if not IS_PROD and os.getenv("CHAT_AUTH_DISABLED", "false").lower() == "true":
+        logger.warning("CHAT_AUTH_DISABLED is active in non-production environment.")
         return True
 
-    # 3. Google Chat OIDC Bearer token verification (including Pub/Sub push service accounts)
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split("Bearer ", 1)[1].strip()
-        try:
-            claims = id_token.verify_oauth2_token(token, google_requests.Request())
-            email = claims.get("email")
-            iss = claims.get("iss", "")
-            if (
-                email == "chat@system.gserviceaccount.com"
-                or (email and "pubsub" in email)
-                or (email and email.endswith(".iam.gserviceaccount.com"))
-                or "accounts.google.com" in iss
-            ):
-                return True
-            logger.warning(f"Google Chat Bearer token has unverified issuer/email: email={email}, iss={iss}")
-        except Exception as e:
-            logger.error(f"Google Chat Bearer verification failed: {e}")
-            raise HTTPException(status_code=401, detail=f"Invalid Google Chat authentication token: {e}")
-
-    # 4. Custom chat verification token fallback
+    # 3. Custom chat verification token fallback
     chat_secret = resolve_secret("chat-verification-token", "CHAT_VERIFICATION_TOKEN")
     if chat_secret and authorization and secrets.compare_digest(authorization, chat_secret):
         return True
 
-    # 5. On Cloud Run, block requests with no authentication credentials
-    if os.getenv("K_SERVICE"):
-        raise HTTPException(status_code=401, detail="Unauthorized: Missing valid Google Chat Bearer token or API key.")
+    # 4. Google Chat OIDC Bearer token verification
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ", 1)[1].strip()
+        try:
+            chat_audience = resolve_secret("chat-audience", "CHAT_AUDIENCE") or os.getenv("CLOUD_RUN_URL")
+            claims = id_token.verify_oauth2_token(
+                token,
+                google_requests.Request(),
+                audience=chat_audience if chat_audience else None,
+            )
+            email = claims.get("email")
+            iss = claims.get("iss", "")
 
-    return True
+            # Issuer must strictly be Google Accounts
+            if iss not in ("accounts.google.com", "https://accounts.google.com"):
+                logger.warning(f"Google Chat Bearer token has invalid issuer: iss={iss}")
+                raise HTTPException(status_code=401, detail=f"Invalid Google Chat token issuer: {iss}")
+
+            # Caller identity must be the official Google Chat service account
+            # or an explicitly allowed project service account
+            pubsub_sa = resolve_secret("pubsub-service-account", "PUBSUB_SERVICE_ACCOUNT")
+            allowed_service_accounts = {
+                "chat@system.gserviceaccount.com",
+                f"monarch-scheduler-sa@{BQ_PROJECT_ID}.iam.gserviceaccount.com",
+                f"monarch-gemini-run@{BQ_PROJECT_ID}.iam.gserviceaccount.com",
+            }
+            if pubsub_sa:
+                allowed_service_accounts.add(pubsub_sa.strip())
+
+            if email not in allowed_service_accounts:
+                logger.warning(f"Google Chat Bearer token caller not authorized: email={email}")
+                raise HTTPException(status_code=403, detail=f"Unauthorized caller service account: {email}")
+
+            return True
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Google Chat Bearer verification failed: {e}")
+            raise HTTPException(status_code=401, detail=f"Invalid Google Chat authentication token: {e}")
+
+    # 5. Block all unauthenticated requests
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized: Missing valid Google Chat Bearer token, verification secret, or API key."
+    )
 
 
 @app.post("/chat/event", dependencies=[Depends(verify_chat_origin)])
 @app.post("/chat/pubsub", dependencies=[Depends(verify_chat_origin)])
-async def google_chat_webhook(request: dict):
+async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     """
     Handles interactive events from Google Chat (mentions, direct messages, slash commands).
-    Supports direct HTTP webhooks and private Google Cloud Pub/Sub push delivery.
+    Supports direct HTTP webhooks and private Google Cloud Pub/Sub push/pull delivery.
     """
-    is_pubsub = False
+    is_pubsub = is_pubsub_override
     raw_payload = request
 
     # Unpack Pub/Sub Push wrapper if present
@@ -1366,8 +857,8 @@ async def google_chat_webhook(request: dict):
     # 1. Bot added to space or 1:1 DM
     if event_type == "ADDED_TO_SPACE":
         welcome_text = (
-            "👋 Welcome to your *Family Financial Hub*!\n\n"
-            "I am your personal finance advisor, connected directly to *Monarch Money* and *BigQuery*.\n\n"
+            "👋 I'm *Sage*, your personal family finance advisor!\n\n"
+            "I am connected directly to *Monarch Money* and *BigQuery* to help optimize family spend and accelerate debt freedom.\n\n"
             "*Try asking me:*\n"
             "• _What is our current daily HELOC interest cost?_\n"
             "• _What are our top 3 subscription expenses?_\n"
@@ -1388,16 +879,15 @@ async def google_chat_webhook(request: dict):
     downloaded_images = []
     if attachments and isinstance(attachments, list):
         for att in attachments:
-            c_type = str(att.get("contentType", "")).lower()
-            c_name = str(att.get("contentName", "")).lower()
-            if c_type.startswith("image/") or c_name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            content_name = att.get("contentName", "")
+            if content_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                 img_tuple = download_chat_attachment(att)
                 if img_tuple:
                     downloaded_images.append(img_tuple)
 
     # 3. Extract text and strip @mention anywhere (beginning, middle, or end)
     raw_text = message.get("argumentText") or message.get("text") or ""
-    clean_text = re.sub(r"@Family\s*Finance\s*Copilot", "", raw_text, flags=re.IGNORECASE)
+    clean_text = re.sub(r"@(Sage|Family\s*Finance\s*Copilot)", "", raw_text, flags=re.IGNORECASE)
     clean_text = re.sub(r"@\S+", "", clean_text).strip()
 
     if not clean_text and downloaded_images:

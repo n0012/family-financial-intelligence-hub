@@ -13,7 +13,7 @@
   <img src="static/workflow.png" alt="Automated Family Financial AI Workflow" width="100%">
 </p>
 
-An enterprise-grade, serverless family financial advisor and spend optimization hub deployed to **Google Cloud Platform**. It bridges **Monarch Money**'s GraphQL API directly into **Google BigQuery** data warehouse models, powered by a bidirectional **Google Chat Copilot** running **Gemini 3.8 Flash** with **Automatic Function Calling (AFC)** and **Multimodal Vision**.
+An enterprise-grade, serverless family financial advisor and spend optimization hub deployed to **Google Cloud Platform**. It bridges **Monarch Money**'s GraphQL API directly into **Google BigQuery** data warehouse models, powered by a bidirectional **Google Chat Advisor (Sage)** running **Gemini 3.8 Flash** with **Automatic Function Calling (AFC)** and **Multimodal Vision**.
 
 ---
 
@@ -31,7 +31,7 @@ This project transforms raw personal finance data into a continuous, intelligent
 
 ---
 
-## Architectural Workflow
+## Architectural Workflow (Zero-Ingress Posture)
 
 ```mermaid
 flowchart TD
@@ -40,11 +40,11 @@ flowchart TD
         CronAlert["Daily Proactive Scan (08:00 AM)<br/>monarch-daily-advisor-alerts"]
     end
 
-    subgraph IngestionLayer ["Serverless Microservice (Cloud Run: FastAPI)"]
-        FastAPI["FastAPI Orchestrator<br/>(Python 3.11)"]
+    subgraph BatchLayer ["Serverless Batch Jobs (Cloud Run Jobs - Zero HTTP Ingress)"]
+        JobSync["monarch-sync-job<br/>(job.py sync)"]
+        JobAlert["monarch-alerts-job<br/>(job.py alerts)"]
         MMClient["MonarchMoney GraphQL Client<br/>+ Automated Base32 TOTP (pyotp)"]
         AdvisorEngine["Proactive Spend Alert Engine"]
-        MediaDownloader["Google Chat Media Downloader<br/>(OAuth2 Bot Token)"]
     end
 
     subgraph DataWarehouse ["Google BigQuery Data Warehouse"]
@@ -52,28 +52,34 @@ flowchart TD
         Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Carrying Cost & Debt Sweeps)<br/>• v_active_subscriptions (Cadence & Price Creep)<br/>• v_subscription_overlap (Redundant Services)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Convenience Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
     end
 
-    subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface"]
-        GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool"]
-        MultimodalVision["Multimodal Ingestion<br/>(Pasted PNG/JPG Screenshots &amp; Plans)"]
-        GoogleChat["Google Chat Space &amp; 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Bidirectional Thread Replies"]
+    subgraph PrivateIngestion ["Private Messaging Integration (Cloud Pub/Sub)"]
+        Topic["Pub/Sub Topic<br/>monarch-chat-incoming"]
+        Worker["Chat Pull Worker<br/>(chat_worker.py)<br/>Outbound Streaming Pull"]
     end
 
-    CronSync -->|"POST /sync/bigquery"| FastAPI
-    FastAPI --> MMClient
+    subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface"]
+        GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool"]
+        MultimodalVision["Multimodal Ingestion<br/>(Pasted PNG/JPG Screenshots & Plans)"]
+        GoogleChat["Google Chat Space & 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Asynchronous REST Replies"]
+    end
+
+    CronSync -->|"IAM OAuth (Cloud Run API)"| JobSync
+    JobSync --> MMClient
     MMClient -->|"GraphQL Extraction"| RawTables
     RawTables --> Views
 
-    CronAlert -->|"POST /advisor/scan-alerts"| AdvisorEngine
-    Views --> AdvisorEngine
+    CronAlert -->|"IAM OAuth (Cloud Run API)"| JobAlert
+    Views --> JobAlert
+    JobAlert --> AdvisorEngine
     AdvisorEngine -->|"Card v2 Notification"| GoogleChat
 
-    GoogleChat -->|"Webhook Event: Text & Images"| FastAPI
-    FastAPI --> MediaDownloader
-    MediaDownloader --> MultimodalVision
+    GoogleChat -->|"Event Publish"| Topic
+    Topic -->|"Outbound Streaming Pull (No Inbound Port)"| Worker
+    Worker --> MultimodalVision
     MultimodalVision --> GeminiFlash
     GeminiFlash -->|"Tool Call: run_readonly_sql"| Views
     Views -->|"Query Results"| GeminiFlash
-    GeminiFlash -->|"Synthesized Advisory Response"| GoogleChat
+    GeminiFlash -->|"Async REST Reply (chat.googleapis.com)"| GoogleChat
 ```
 
 ---
@@ -97,7 +103,7 @@ The data warehouse decouples storage from analytical modeling, allowing queries 
 
 ---
 
-## Interactive Google Chat Copilot
+## Interactive Google Chat Advisor (Sage)
 
 The microservice functions as a registered **Google Chat Bot** supporting both 1:1 direct messages and collaborative family spaces:
 
@@ -124,22 +130,28 @@ Paste images directly into Google Chat:
 ## Repository Structure
 
 ```
-monarch-gemini/
-├── main.py                     # FastAPI application, Monarch client, Gemini Brain, & Google Chat webhook
+family-financial-intelligence-hub/
+├── main.py                     # FastAPI application & webhook router
+├── job.py                      # Cloud Run Job CLI entrypoint (sync & alerts batch runner)
+├── chat_worker.py              # Zero-ingress Google Chat Pub/Sub pull subscriber
+├── config.py                   # Centralized configuration, local overrides, & secret caching
+├── alerts.py                   # Proactive spend anomaly alert engine & Google Chat Card v2 builder
 ├── schema.sql                  # BigQuery schema definitions & analytical optimization views
 ├── Dockerfile                  # Production container definition (Python 3.11-slim)
 ├── cloudbuild.yaml             # Google Cloud Build CI/CD pipeline definition
+├── deploy.sh                   # Hardened zero-ingress deployment script
+├── bootstrap_gcp_project.sh    # Initial GCP project bootstrapping & IAM automation
 ├── config.example.yaml         # YAML configuration template (rates, account overrides, exclusions)
 ├── config.example.json         # JSON configuration template
 ├── sync_secrets_to_gcp.sh      # Automated secret synchronization from .env.local to Secret Manager
 ├── create_ca_agent.py          # Google Cloud Conversational Analytics Agent deployment script
-├── requirements.txt            # Python dependencies
+├── requirements.txt            # Python dependencies (includes google-cloud-pubsub)
 ├── requirements-dev.txt        # Optional test & development dependencies
 ├── .env.example                # Template for environment configuration
 └── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
-    ├── main.tf                 # Cloud Run, BigQuery, Artifact Registry, Cloud Scheduler, IAM
+    ├── main.tf                 # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
     ├── variables.tf            # Configurable deployment variables
-    ├── outputs.tf              # Service URLs, service accounts, and dataset outputs
+    ├── outputs.tf              # Pub/Sub topics, subscriptions, and dataset outputs
     └── terraform.tfvars.example # Example variable values
 ```
 
@@ -228,9 +240,10 @@ cd ..
 Terraform provisions:
 * **Artifact Registry** repository (`monarch-repo`)
 * **BigQuery Dataset** (`family_finance`)
-* **Cloud Run Service** with least-privilege IAM service account (`monarch-gemini-run`)
-* **Cloud Scheduler Jobs** for daily sync (4:00 AM) and proactive advisory alerts (8:00 AM)
+* **Cloud Pub/Sub** topic (`monarch-chat-incoming`) & subscription (`monarch-chat-sub`) for zero-ingress chat
+* **Cloud Scheduler Jobs** (`monarch-daily-sync` and `monarch-daily-advisor-alerts`) authenticated via GCP OAuth IAM
 * **Secret Manager** containers for all credentials
+* **IAM Service Accounts**: Runtime identity (`monarch-gemini-run`) and scheduler identity (`monarch-scheduler-sa`)
 
 ---
 
@@ -249,46 +262,52 @@ Synchronize the secrets to Google Cloud Secret Manager:
 
 ---
 
-### 4. Build & Deploy Microservice via Cloud Build
+### 4. Build & Deploy via Cloud Build
 
-Trigger the automated build, container packaging, and zero-downtime deployment:
+Trigger the automated build, container packaging, and zero-ingress deployment:
 ```bash
 gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
 ```
 
 Cloud Build automatically:
 1. Builds and tags the container image in Artifact Registry.
-2. Deploys the service to Cloud Run.
-3. Applies all analytical views and tables in `schema.sql` to BigQuery.
-4. Performs an automated health check smoke test on the live endpoint.
+2. Deploys the hardened Cloud Run service with `--no-allow-unauthenticated` and `--ingress internal`.
+3. Deploys the Cloud Run batch Jobs (`monarch-sync-job` and `monarch-alerts-job`).
+4. Applies all analytical views and tables in `schema.sql` to BigQuery.
 
 ---
 
-### 5. Configure the Google Chat App
+### 5. Configure the Google Chat App (Zero Ingress via Pub/Sub)
 
 1. Go to the [Google Cloud Console → Google Chat API](https://console.cloud.google.com/apis/api/chat.googleapis.com).
 2. Click **Configuration** and fill in:
-   * **App name**: `Family Finance Copilot`
-   * **Avatar URL**: `https://<YOUR-CLOUD-RUN-URL>/avatar.png`
+   * **App name**: `Sage`
+   * **Avatar URL**: (Optional) URL to your bot avatar image.
    * **Description**: `Interactive family financial advisor powered by Monarch Money, BigQuery, and Gemini 3.8 Flash.`
    * **Functionality**:
      - [x] *Join spaces and group conversations*
      - [x] *Receive 1:1 messages*
-   * **Connection settings**: Select **HTTP endpoint** and enter:
+   * **Connection settings**: Select **Cloud Pub/Sub** and enter:
      ```
-     https://<YOUR-CLOUD-RUN-URL>/chat/event
+     projects/<YOUR_PROJECT_ID>/topics/monarch-chat-incoming
      ```
    * **Visibility**: Set to your Google Workspace domain or personal Google account.
 3. Click **Save**.
-4. In Google Chat, search for `Family Finance Copilot` and add it to your space or direct message thread.
+4. Run the zero-ingress Chat worker (connects outbound via gRPC pull with zero listening ports):
+   ```bash
+   python chat_worker.py --project YOUR_PROJECT_ID --subscription monarch-chat-sub
+   ```
+5. In Google Chat, search for `Sage` and add it to your space or direct message thread.
 
 ---
 
 ## Security & Privacy Architecture
 
+* **Zero-Ingress Posture**: No public listening HTTP endpoints are exposed. Daily ingestion syncs and anomaly scans execute via ephemeral **Cloud Run Jobs** invoked by Cloud Scheduler over Google's internal APIs using short-lived OAuth 2.0 tokens (`monarch-scheduler-sa`).
+* **Private Pub/Sub Chat Integration**: Google Chat events are routed through Cloud Pub/Sub topic `monarch-chat-incoming` and pulled outbound by `chat_worker.py`. Unauthenticated public internet traffic is dropped at Google's edge.
 * **Local-First & Private**: Financial data is synced directly between Monarch Money and your private BigQuery dataset within your own GCP project boundary. No data is shared with third-party aggregators.
 * **Deterministic Guardrails**: Gemini operates with Automatic Function Calling over a single read-only SQL tool. Destructive operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`) are strictly forbidden by IAM and query syntax checks.
-* **Secret Isolation**: Passwords, MFA tokens, and webhook URLs are stored exclusively in **Google Cloud Secret Manager** and accessed dynamically at runtime using short-lived OAuth tokens.
+* **Secret Isolation**: Passwords, MFA tokens, and webhook URLs are stored exclusively in **Google Cloud Secret Manager** and accessed dynamically at runtime using short-lived tokens.
 * **Principle of Least Privilege**: The Cloud Run runtime identity holds `roles/bigquery.dataEditor` (strictly scoped for idempotent dataset table syncs/merges), `roles/bigquery.jobUser`, and `roles/secretmanager.secretAccessor`. Gemini's tool calls are restricted to read-only `SELECT` queries across pre-aggregated analytical views with regex keyword enforcement.
 
 ---

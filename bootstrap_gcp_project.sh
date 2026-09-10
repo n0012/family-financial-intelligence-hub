@@ -129,41 +129,44 @@ echo "============================================================"
 echo "Configuring Scheduled Automation (Daily Sync & Weekly Alerts)"
 echo "============================================================"
 
-# A. Daily Ingestion Sync (4:00 AM)
+SCHEDULER_SA="monarch-scheduler-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# A. Daily Ingestion Sync (4:00 AM) - Cloud Run Job via OAuth
 if ! gcloud scheduler jobs describe monarch-daily-sync --location="$REGION" --project="$PROJECT_ID" &>/dev/null; then
   echo "Creating daily sync job: monarch-daily-sync..."
   gcloud scheduler jobs create http monarch-daily-sync \
     --location="$REGION" \
     --schedule="0 4 * * *" \
-    --uri="$SERVICE_URL/sync/bigquery?days_back=30" \
+    --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/monarch-sync-job:run" \
     --http-method=POST \
-    --headers="X-API-Key=$WRAPPER_KEY" \
+    --oauth-service-account-email="$SCHEDULER_SA" \
+    --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" \
     --time-zone="America/New_York" \
     --project="$PROJECT_ID"
 fi
 
-# B. Daily Proactive Advisory & Fix Scan (Daily at 8:00 AM)
+# B. Daily Proactive Advisory & Fix Scan (8:00 AM) - Cloud Run Job via OAuth
 if ! gcloud scheduler jobs describe monarch-daily-alerts --location="$REGION" --project="$PROJECT_ID" &>/dev/null; then
   echo "Creating daily advisory alert job: monarch-daily-alerts..."
   gcloud scheduler jobs create http monarch-daily-alerts \
     --location="$REGION" \
     --schedule="0 8 * * *" \
-    --uri="$SERVICE_URL/advisor/scan-alerts" \
+    --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/monarch-alerts-job:run" \
     --http-method=POST \
-    --headers="X-API-Key=$WRAPPER_KEY" \
+    --oauth-service-account-email="$SCHEDULER_SA" \
+    --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" \
     --time-zone="America/New_York" \
     --project="$PROJECT_ID"
 fi
 
 echo "============================================================"
-echo "Setup Complete!"
-echo "Service URL: $SERVICE_URL"
+echo "Setup Complete! (Zero Public Ingress Posture)"
 echo ""
-echo "Trigger initial historical sync:"
-echo "curl -X POST -H \"X-API-Key: $WRAPPER_KEY\" \"$SERVICE_URL/sync/bigquery?days_back=180\""
+echo "Trigger initial historical sync via private Cloud Run Job:"
+echo "gcloud run jobs execute monarch-sync-job --args=\"job.py,sync,--days-back,180\" --region=\"$REGION\" --project=\"$PROJECT_ID\""
 echo ""
-echo "Run an immediate proactive alert scan:"
-echo "curl -X POST -H \"X-API-Key: $WRAPPER_KEY\" \"$SERVICE_URL/advisor/scan-alerts\""
+echo "Trigger an immediate advisory alert scan:"
+echo "gcloud run jobs execute monarch-alerts-job --args=\"job.py,alerts\" --region=\"$REGION\" --project=\"$PROJECT_ID\""
 echo ""
 echo "Deploy Conversational Analytics Agent:"
 echo "PROJECT_ID=$PROJECT_ID python3 create_ca_agent.py"

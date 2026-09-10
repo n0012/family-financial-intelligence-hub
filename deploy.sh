@@ -98,28 +98,105 @@ fi
 echo "Applying BigQuery schema and analytical views from schema.sql..."
 bq query --use_legacy_sql=false --project_id="$PROJECT_ID" < schema.sql
 
-# 7. Deploy to Cloud Run from Source
-echo "Deploying Cloud Run service..."
+# 7. Provision Pub/Sub for Zero-Ingress Google Chat
+echo "Configuring Cloud Pub/Sub for Google Chat..."
+if ! gcloud pubsub topics describe monarch-chat-incoming --project="$PROJECT_ID" &>/dev/null; then
+  echo "Creating topic monarch-chat-incoming..."
+  gcloud pubsub topics create monarch-chat-incoming --project="$PROJECT_ID"
+fi
+
+# Allow Google Chat API to publish to the topic
+gcloud pubsub topics add-iam-policy-binding monarch-chat-incoming \
+  --member="serviceAccount:chat-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher" \
+  --project="$PROJECT_ID" \
+  --quiet
+
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+gcloud pubsub topics add-iam-policy-binding monarch-chat-incoming \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com" \
+  --role="roles/pubsub.publisher" \
+  --project="$PROJECT_ID" \
+  --quiet
+
+if ! gcloud pubsub subscriptions describe monarch-chat-sub --project="$PROJECT_ID" &>/dev/null; then
+  echo "Creating pull subscription monarch-chat-sub..."
+  gcloud pubsub subscriptions create monarch-chat-sub \
+    --topic=monarch-chat-incoming \
+    --ack-deadline=60 \
+    --project="$PROJECT_ID"
+fi
+
+# 8. Deploy Cloud Run Service (Private & Locked Down: Internal Ingress & No Unauthenticated Access)
+echo "Deploying Cloud Run service with internal ingress and strict authentication..."
 gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
-  --allow-unauthenticated \
+  --no-allow-unauthenticated \
+  --ingress internal \
   --service-account "$RUN_SA" \
-  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID" \
+  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID",ENABLE_CHAT_PULL_WORKER=true,CHAT_SUBSCRIPTION=monarch-chat-sub \
   --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest \
   --project="$PROJECT_ID"
 
-SERVICE_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --project="$PROJECT_ID" --format='value(status.url)')"
-WRAPPER_KEY="$(gcloud secrets versions access latest --secret=gemini-wrapper-key --project="$PROJECT_ID")"
+# 9. Deploy Cloud Run Jobs for Batch Operations (Zero Ingress, Zero HTTP Ports)
+echo "Deploying Cloud Run Jobs for batch ingestion and alerts..."
+IMAGE="$(gcloud run services describe "$SERVICE" --region "$REGION" --project="$PROJECT_ID" --format='value(spec.template.spec.containers[0].image)')"
+
+# A. Sync Job
+gcloud run jobs deploy monarch-sync-job \
+  --image "$IMAGE" \
+  --region "$REGION" \
+  --service-account "$RUN_SA" \
+  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID" \
+  --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest \
+  --command "python" \
+  --args "job.py,sync,--days-back,30" \
+  --max-retries 1 \
+  --task-timeout 600s \
+  --project="$PROJECT_ID"
+
+# B. Alerts Job
+gcloud run jobs deploy monarch-alerts-job \
+  --image "$IMAGE" \
+  --region "$REGION" \
+  --service-account "$RUN_SA" \
+  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID" \
+  --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest \
+  --command "python" \
+  --args "job.py,alerts" \
+  --max-retries 1 \
+  --task-timeout 300s \
+  --project="$PROJECT_ID"
+
+# 10. Grant Cloud Scheduler SA permissions to execute Jobs
+SCHEDULER_SA="monarch-scheduler-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+gcloud run jobs add-iam-policy-binding monarch-sync-job \
+  --region="$REGION" \
+  --member="serviceAccount:$SCHEDULER_SA" \
+  --role="roles/run.developer" \
+  --project="$PROJECT_ID" \
+  --quiet
+
+gcloud run jobs add-iam-policy-binding monarch-alerts-job \
+  --region="$REGION" \
+  --member="serviceAccount:$SCHEDULER_SA" \
+  --role="roles/run.developer" \
+  --project="$PROJECT_ID" \
+  --quiet
 
 echo "=========================================="
-echo "Deployment Complete!"
-echo "Service URL: $SERVICE_URL"
+echo "Deployment Complete! (Zero Public Ingress Posture)"
+echo "Cloud Run Service: Locked down (--ingress internal, --no-allow-unauthenticated)"
+echo "Cloud Run Jobs:    monarch-sync-job, monarch-alerts-job"
+echo "Pub/Sub Topic:     projects/$PROJECT_ID/topics/monarch-chat-incoming"
+echo "Pub/Sub Sub:       projects/$PROJECT_ID/subscriptions/monarch-chat-sub"
 echo ""
 echo "Next steps:"
-echo "1. Run initial BigQuery sync:"
-echo "   curl -X POST -H \"X-API-Key: $WRAPPER_KEY\" \"$SERVICE_URL/sync/bigquery?days_back=180\""
+echo "1. Run initial BigQuery sync via private Cloud Run Job:"
+echo "   gcloud run jobs execute monarch-sync-job --args=\"job.py,sync,--days-back,180\" --region=\"$REGION\" --project=\"$PROJECT_ID\""
 echo ""
-echo "2. Provision Conversational Analytics Agent:"
-echo "   python3 create_ca_agent.py"
+echo "2. Configure Google Chat API connection:"
+echo "   In Google Cloud Console -> Google Chat API -> Configuration:"
+echo "   Select 'Cloud Pub/Sub' and set Topic name: projects/$PROJECT_ID/topics/monarch-chat-incoming"
 echo "=========================================="
