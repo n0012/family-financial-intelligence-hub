@@ -134,6 +134,7 @@ Paste images directly into Google Chat:
 ```
 family-financial-intelligence-hub/
 ├── main.py                     # FastAPI application & Google Chat webhook router
+├── bq_service.py               # BigQuery SQL query tool, session history & schema migration
 ├── monarch_service.py          # MonarchMoney client auth, sync pipelines & live confirmation tools
 ├── job.py                      # Cloud Run Job CLI entrypoint (sync & alerts batch runner)
 ├── chat_worker.py              # Zero-ingress Google Chat Pub/Sub pull subscriber
@@ -151,8 +152,9 @@ family-financial-intelligence-hub/
 ├── requirements.txt            # Python dependencies (includes google-cloud-pubsub)
 ├── requirements-dev.txt        # Optional test & development dependencies
 ├── .env.example                # Template for environment configuration
-├── tests/                      # Pytest automated test suite
+├── tests/                      # Pytest automated test suite (39 passing unit tests)
 │   ├── test_alerts_and_config.py # Config caching, token auth, Card v2 builders, job CLI
+│   ├── test_bq_service.py        # Read-only SQL safety guards, CA fallback, session history
 │   └── test_monarch_service.py   # Monarch auth, sync pipelines, live read tools, rate limits
 └── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
     ├── main.tf                 # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
@@ -185,11 +187,21 @@ To ensure modularity, maintainability, and test coverage, the system is refactor
   * `get_live_account_balance(account_identifier)`: Queries up-to-the-minute balances directly from Monarch Money when users ask for real-time verification (e.g., *"Did my paycheck post?"* or *"What is my live HELOC balance?"*).
   * `get_live_transaction(transaction_id)`: Inspects individual transaction details, notes, and pending states directly from Monarch.
   * `request_plaid_refresh(institution_name)`: Triggers on-demand aggregator refresh for a connected bank, protected by an in-memory **60-minute rate-limiting cooldown** per institution to prevent account lockouts.
-* **Full Unit Test Coverage ([`tests/test_monarch_service.py`](tests/test_monarch_service.py))**: 28 passing unit tests across the repository verifying login, sync ingestion, live read tools, and cooldown guards.
+* **Unit Test Coverage ([`tests/test_monarch_service.py`](tests/test_monarch_service.py))**: 28 passing unit tests across the repository verifying login, sync ingestion, live read tools, and cooldown guards.
 * **Production Deployment**: Shipped container revision `monarch-gemini-wrapper-00052-lfw` live to Cloud Run with zero ingress.
 
-### **Upcoming Roadmap (PR 3 – PR 5)**
-* **PR 3: BigQuery Storage & Analytical Views Service (`bq_service.py`)**: Modularize BigQuery schema application, view management, query helpers, and chat history persistence.
+### **PR 3: BigQuery Storage & Analytical Views Service ([`bq_service.py`](bq_service.py))**
+* **Extracted [`bq_service.py`](bq_service.py)**: Modularized BigQuery client instantiation, query execution, and session management out of `main.py`, reducing `main.py` down to 807 lines (a 515+ line overall reduction).
+* **Read-Only SQL Safety Engine (`run_readonly_sql`)**: Strictly enforces word-boundary regex blocks against mutating DDL/DML keywords (`insert`, `update`, `delete`, `drop`, `truncate`, `alter`, `create`, `merge`, `grant`, `revoke`) and limits query billing scan budgets to 100 MB.
+* **Conversational Analytics Integration (`ask_conversational_analytics`)**: Isolated fallback agent dispatching to Gemini Conversational Analytics with project resolution.
+* **Chat History Persistence & Hydration**:
+  * Dual-layer caching: in-memory LRU/dict thread and space histories for lightning-fast multi-turn replies within active containers.
+  * Cold-start / post-deployment hydration: dynamically restores conversation turns from `family_finance.chat_history` when in-memory cache is empty.
+  * Automated background persistence: records each conversation turn (`session_id`, `user_email`, `user_text`, `model_response`, `created_at`).
+* **BigQuery Schema Migration (`apply_bigquery_schema`)**: Added programmatic application helper for `schema.sql` tables and analytical views.
+* **Full Unit Test Coverage ([`tests/test_bq_service.py`](tests/test_bq_service.py))**: Added 11 new tests, raising total suite to 39 passing tests.
+
+### **Upcoming Roadmap (PR 4 – PR 5)**
 * **PR 4: Carefully Guarded Monarch Mutations**: Enable category reclassifications and transaction cleanups via HMAC-signed Google Chat confirmation cards with strict 1-transaction-per-call limits.
 * **PR 5: Multi-Turn Memory Bank & User-Scoped Preferences**: Implement persistent cross-thread user preferences (e.g., target debt payoff dates, discretionary spending ceilings) grounded in BigQuery and Vertex AI Memory Bank.
 

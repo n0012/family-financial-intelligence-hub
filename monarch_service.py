@@ -22,6 +22,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from google.cloud import bigquery
+from bq_service import get_bq_client
 from monarchmoney import MonarchMoney
 import pyotp
 
@@ -400,7 +401,7 @@ async def sync_transactions(
 async def execute_sync(days_back: Optional[int] = 30, mfa_code: Optional[str] = None) -> dict:
     """Orchestrates full sync of accounts, categories, and transactions into BigQuery."""
     client = await get_monarch_client(mfa_code=mfa_code)
-    bq = bigquery.Client(project=BQ_PROJECT_ID)
+    bq = get_bq_client(BQ_PROJECT_ID)
     now_ts = datetime.now(timezone.utc).isoformat()
 
     synced_counts = {"accounts": 0, "categories": 0, "transactions": 0}
