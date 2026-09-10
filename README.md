@@ -57,8 +57,8 @@ flowchart TD
         Worker["Chat Pull Worker<br/>(chat_worker.py)<br/>Outbound Streaming Pull"]
     end
 
-    subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface"]
-        GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool"]
+    subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface (Sage)"]
+        GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool<br/>• Live Monarch Confirmation Tools"]
         MultimodalVision["Multimodal Ingestion<br/>(Pasted PNG/JPG Screenshots & Plans)"]
         GoogleChat["Google Chat Space & 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Asynchronous REST Replies"]
     end
@@ -77,8 +77,10 @@ flowchart TD
     Topic -->|"Outbound Streaming Pull (No Inbound Port)"| Worker
     Worker --> MultimodalVision
     MultimodalVision --> GeminiFlash
-    GeminiFlash -->|"Tool Call: run_readonly_sql"| Views
+    GeminiFlash -->|"Analytical SQL: run_readonly_sql"| Views
     Views -->|"Query Results"| GeminiFlash
+    GeminiFlash -->|"Live Read: get_live_account_balance / txn"| MMClient
+    MMClient -->|"Live Data Confirmation"| GeminiFlash
     GeminiFlash -->|"Async REST Reply (chat.googleapis.com)"| GoogleChat
 ```
 
@@ -131,7 +133,8 @@ Paste images directly into Google Chat:
 
 ```
 family-financial-intelligence-hub/
-├── main.py                     # FastAPI application & webhook router
+├── main.py                     # FastAPI application & Google Chat webhook router
+├── monarch_service.py          # MonarchMoney client auth, sync pipelines & live confirmation tools
 ├── job.py                      # Cloud Run Job CLI entrypoint (sync & alerts batch runner)
 ├── chat_worker.py              # Zero-ingress Google Chat Pub/Sub pull subscriber
 ├── config.py                   # Centralized configuration, local overrides, & secret caching
@@ -148,12 +151,47 @@ family-financial-intelligence-hub/
 ├── requirements.txt            # Python dependencies (includes google-cloud-pubsub)
 ├── requirements-dev.txt        # Optional test & development dependencies
 ├── .env.example                # Template for environment configuration
+├── tests/                      # Pytest automated test suite
+│   ├── test_alerts_and_config.py # Config caching, token auth, Card v2 builders, job CLI
+│   └── test_monarch_service.py   # Monarch auth, sync pipelines, live read tools, rate limits
 └── terraform/                  # Infrastructure as Code (Terraform / OpenTofu)
     ├── main.tf                 # BigQuery, Artifact Registry, Pub/Sub, Cloud Scheduler, IAM
     ├── variables.tf            # Configurable deployment variables
     ├── outputs.tf              # Pub/Sub topics, subscriptions, and dataset outputs
     └── terraform.tfvars.example # Example variable values
 ```
+
+---
+
+## Incremental Architecture & PR Changelog
+
+To ensure modularity, maintainability, and test coverage, the system is refactored incrementally across targeted Pull Requests:
+
+### **PR 1: Modular Config, Spend Alerts & Unified Job CLI**
+* **Extracted [`config.py`](config.py)**: Centralized hierarchical configuration resolution. Added local JSON/YAML file overrides (`config.yaml`/`config.json`), Secret Manager client caching with in-memory fallback to environment variables, debt APR defaults, account exclusion rules, and institution name overrides.
+* **Extracted [`alerts.py`](alerts.py)**: Isolated the autonomous Spend Optimization Advisor scan engine. Implemented rich Google Chat **Card v2** formatting with styled headers, metrics, and actionable recommendations, complete with resilient markdown fallbacks.
+* **Implemented [`job.py`](job.py)**: Unified CLI runner for Cloud Run Jobs (`job.py sync` and `job.py alerts`). Cleanly decoupled scheduled batch tasks from the HTTP server lifecycle.
+* **Test Suite**: Introduced unit test coverage in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py) for configurations, card generation, and job execution.
+
+### **PR 1.5: Zero-Ingress Perimeter Security & Google Workspace Add-on Authentication**
+* **Zero-Ingress Pull Worker ([`chat_worker.py`](chat_worker.py))**: Hardened Cloud Run with `--ingress internal` and embedded an asynchronous Pub/Sub streaming pull worker that connects outbound to `monarch-chat-sub`, eliminating all public listening HTTP ports.
+* **IAM & Service Agent Hardening**: Configured Pub/Sub IAM publisher bindings for both `chat-api-push@system.gserviceaccount.com` (direct Chat API) and `service-475933066321@gcp-sa-gsuiteaddons.iam.gserviceaccount.com` (Google Workspace Add-on runtime).
+* **Cryptographic Token Verification**: Added Google OAuth Bearer token signature and audience validation, strictly verifying Google-issued service account tokens.
+* **Persona & Branding Rebrand**: Rebranded the assistant persona to **Sage** across all greetings, Card v2 headers, slash command help text, mention stripper regexes, and public CDN avatar hosting.
+
+### **PR 2: Modular Monarch Service & Real-Time Confirmation Read Tools**
+* **Extracted [`monarch_service.py`](monarch_service.py)**: Moved MonarchMoney GraphQL client session management, TOTP 2FA resolution, and BigQuery data pipeline (`sync_all_accounts`, `sync_all_categories`, `sync_transactions`, `execute_sync`) out of `main.py`, shrinking `main.py` by over 320 lines.
+* **Live Confirmation Read Tools for Gemini AFC**:
+  * `get_live_account_balance(account_identifier)`: Queries up-to-the-minute balances directly from Monarch Money when users ask for real-time verification (e.g., *"Did my paycheck post?"* or *"What is my live HELOC balance?"*).
+  * `get_live_transaction(transaction_id)`: Inspects individual transaction details, notes, and pending states directly from Monarch.
+  * `request_plaid_refresh(institution_name)`: Triggers on-demand aggregator refresh for a connected bank, protected by an in-memory **60-minute rate-limiting cooldown** per institution to prevent account lockouts.
+* **Full Unit Test Coverage ([`tests/test_monarch_service.py`](tests/test_monarch_service.py))**: 28 passing unit tests across the repository verifying login, sync ingestion, live read tools, and cooldown guards.
+* **Production Deployment**: Shipped container revision `monarch-gemini-wrapper-00052-lfw` live to Cloud Run with zero ingress.
+
+### **Upcoming Roadmap (PR 3 – PR 5)**
+* **PR 3: BigQuery Storage & Analytical Views Service (`bq_service.py`)**: Modularize BigQuery schema application, view management, query helpers, and chat history persistence.
+* **PR 4: Carefully Guarded Monarch Mutations**: Enable category reclassifications and transaction cleanups via HMAC-signed Google Chat confirmation cards with strict 1-transaction-per-call limits.
+* **PR 5: Multi-Turn Memory Bank & User-Scoped Preferences**: Implement persistent cross-thread user preferences (e.g., target debt payoff dates, discretionary spending ceilings) grounded in BigQuery and Vertex AI Memory Bank.
 
 ---
 
