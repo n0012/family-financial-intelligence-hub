@@ -128,7 +128,13 @@ Paste images directly into Google Chat:
 * **Outlook & Compensation Tables**: Paste a screenshot of an annual compensation breakdown or bonus projection. The bot extracts base salary, bonuses, and equity vesting dates, then models optimal tax withholding and debt-payoff allocation.
 * **External Brokerage / Loan Statements**: Paste a PDF or PNG statement from an unlinked institution. Gemini extracts balances, interest rates, and minimum payments to incorporate into your debt snow-ball calculations.
 
-### 3. Chat Commands & Shortcuts
+### 3. Persistent User Preferences & Long-Term Memory
+Powered by Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank**, Sage remembers your family's financial targets, payoff milestones, and budget ceilings across conversation threads. It automatically consolidates preferences and resolves conflicting goals without database schema bloat.
+
+### 4. Interactive Transaction Recategorization (Card v2)
+When asking Sage to recategorize a transaction, it verifies the transaction state, checks category taxonomies, and generates an interactive **Card v2** widget with "Confirm Update" and "Cancel" buttons secured by 15-minute expiring HMAC-SHA256 cryptographic signatures.
+
+### 5. Chat Commands & Shortcuts
 * `/sync` — Pulls latest transactions from Monarch Money into BigQuery immediately.
 * `/alerts` — Triggers an on-demand scan across all BigQuery optimization views and posts the alert summary.
 * `/help` — Displays quick reference guides and sample prompts.
@@ -171,70 +177,6 @@ family-financial-intelligence-hub/
     ├── outputs.tf              # Pub/Sub topics, subscriptions, and dataset outputs
     └── terraform.tfvars.example # Example variable values
 ```
-
----
-
-## Incremental Architecture & PR Changelog
-
-To ensure modularity, maintainability, and test coverage, the system is refactored incrementally across targeted Pull Requests:
-
-### **PR 1: Modular Config, Spend Alerts & Unified Job CLI**
-* **Extracted [`config.py`](config.py)**: Centralized hierarchical configuration resolution. Added local JSON/YAML file overrides (`config.yaml`/`config.json`), Secret Manager client caching with in-memory fallback to environment variables, debt APR defaults, account exclusion rules, and institution name overrides.
-* **Extracted [`alerts.py`](alerts.py)**: Isolated the autonomous Spend Optimization Advisor scan engine. Implemented rich Google Chat **Card v2** formatting with styled headers, metrics, and actionable recommendations, complete with resilient markdown fallbacks.
-* **Implemented [`job.py`](job.py)**: Unified CLI runner for Cloud Run Jobs (`job.py sync` and `job.py alerts`). Cleanly decoupled scheduled batch tasks from the HTTP server lifecycle.
-* **Test Suite**: Introduced unit test coverage in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py) for configurations, card generation, and job execution.
-
-### **PR 1.5: Zero-Ingress Perimeter Security & Google Workspace Add-on Authentication**
-* **Zero-Ingress Pull Worker ([`chat_worker.py`](chat_worker.py))**: Hardened Cloud Run with `--ingress internal` and embedded an asynchronous Pub/Sub streaming pull worker that connects outbound to `monarch-chat-sub`, eliminating all public listening HTTP ports.
-* **IAM & Service Agent Hardening**: Configured Pub/Sub IAM publisher bindings for both `chat-api-push@system.gserviceaccount.com` (direct Chat API) and `service-475933066321@gcp-sa-gsuiteaddons.iam.gserviceaccount.com` (Google Workspace Add-on runtime).
-* **Cryptographic Token Verification**: Added Google OAuth Bearer token signature and audience validation, strictly verifying Google-issued service account tokens.
-* **Persona & Branding Rebrand**: Rebranded the assistant persona to **Sage** across all greetings, Card v2 headers, slash command help text, mention stripper regexes, and public CDN avatar hosting.
-
-### **PR 2: Modular Monarch Service & Real-Time Confirmation Read Tools**
-* **Extracted [`monarch_service.py`](monarch_service.py)**: Moved MonarchMoney GraphQL client session management, TOTP 2FA resolution, and BigQuery data pipeline (`sync_all_accounts`, `sync_all_categories`, `sync_transactions`, `execute_sync`) out of `main.py`, shrinking `main.py` by over 320 lines.
-* **Live Confirmation Read Tools for Gemini AFC**:
-  * `get_live_account_balance(account_identifier)`: Queries up-to-the-minute balances directly from Monarch Money when users ask for real-time verification (e.g., *"Did my paycheck post?"* or *"What is my live HELOC balance?"*).
-  * `get_live_transaction(transaction_id)`: Inspects individual transaction details, notes, and pending states directly from Monarch.
-  * `request_plaid_refresh(institution_name)`: Triggers on-demand aggregator refresh for a connected bank, protected by an in-memory **60-minute rate-limiting cooldown** per institution to prevent account lockouts.
-* **Unit Test Coverage ([`tests/test_monarch_service.py`](tests/test_monarch_service.py))**: 28 passing unit tests across the repository verifying login, sync ingestion, live read tools, and cooldown guards.
-* **Production Deployment**: Shipped container revision `monarch-gemini-wrapper-00052-lfw` live to Cloud Run with zero ingress.
-
-### **PR 3: BigQuery Storage & Analytical Views Service ([`bq_service.py`](bq_service.py))**
-* **Extracted [`bq_service.py`](bq_service.py)**: Modularized BigQuery client instantiation, query execution, and session management out of `main.py`, reducing `main.py` down to 807 lines (a 515+ line overall reduction).
-* **Read-Only SQL Safety Engine (`run_readonly_sql`)**: Strictly enforces word-boundary regex blocks against mutating DDL/DML keywords (`insert`, `update`, `delete`, `drop`, `truncate`, `alter`, `create`, `merge`, `grant`, `revoke`) and limits query billing scan budgets to 100 MB.
-* **Conversational Analytics Integration (`ask_conversational_analytics`)**: Isolated fallback agent dispatching to Gemini Conversational Analytics with project resolution.
-* **Chat History Persistence & Hydration**:
-  * Dual-layer caching: in-memory LRU/dict thread and space histories for lightning-fast multi-turn replies within active containers.
-* **BigQuery Schema Migration (`apply_bigquery_schema`)**: Added programmatic application helper for `schema.sql` tables and analytical views.
-* **Full Unit Test Coverage ([`tests/test_bq_service.py`](tests/test_bq_service.py))**: Added 11 new tests, raising total suite to 39 passing tests.
-
-### **PR 4: Carefully Guarded Monarch Mutations & Interactive Card v2 Confirmation**
-* **HMAC-SHA256 Cryptographic Signing & Verification**:
-  * Implemented `generate_mutation_signature` and `verify_mutation_signature` using high-entropy secrets and constant-time comparison (`hmac.compare_digest`).
-  * Cryptographically binds `transaction_id`, `category_id`, `user_email`, and UNIX timestamp with a strict **15-minute expiration window** (`HMAC_EXPIRATION_SECONDS = 900`) to prevent replay or parameter tampering.
-* **Category Resolution & In-Memory Caching (`resolve_category`)**:
-  * High-performance dual-tier resolution: reads from BigQuery `family_finance.raw_categories` fast-path with fallback to MonarchMoney API.
-  * Multi-strategy matching: exact UUID match, case-insensitive name match, alphanumeric-normalized match, and substring search.
-* **Guarded Tool Definition (`propose_transaction_recategorization`)**:
-  * **Strict Single-Transaction Limit**: Blocks bulk IDs, commas, arrays, or whitespace-separated arguments to prevent accidental mass modifications.
-  * **Pending Transaction Refusal**: Checks real-time transaction state via `get_live_transaction_async` and refuses to recategorize pending/unsettled transactions.
-  * Thread-safe ContextVar (`CURRENT_PROPOSED_CARD`, `CURRENT_USER_EMAIL`) passes confirmation cards directly to Google Chat message assembly.
-* **Interactive Google Chat Card v2 Confirmation Pipeline**:
-  * Renders interactive **Card v2** widgets with formatted merchant, amount, date, current category, proposed category, and "Confirm Update" / "Cancel" action buttons.
-  * Webhook handles `CARD_CLICKED` events, validates signature freshness and authenticity, calls `execute_guarded_recategorization`, synchronizes BigQuery `raw_transactions` in-place, and returns a rich success card.
-* **Full Unit Test Coverage ([`tests/test_monarch_mutations.py`](tests/test_monarch_mutations.py))**: Added 12 new unit tests, bringing the total suite to **51 passing unit tests** across the codebase.
-
-### **PR 5: Vertex AI Agent Platform Memory Bank & BigQuery `chat_history` Retirement**
-* **Extracted [`memory_service.py`](memory_service.py)**: Built client integration with Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank** (`Sage Memory Bank` on `us-central1`).
-* **Semantic Fact Extraction & Automatic Consolidation**: Uses foundation model embeddings (`text-embedding-005`) to automatically update, consolidate, and resolve conflicting facts in-place without manual deduplication.
-* **User-Scoped Memory Bank**: Memory retrieval and updates are dynamically anchored to the authenticated user's email (`nick@sagelycreations.com`) via thread-safe `ContextVar`.
-* **Gemini AFC Tool (`store_user_preference`)**: Equips Gemini 3.8 Flash to autonomously persist explicit goals, discretionary spending limits, debt payoff milestones, and alerts on the fly during natural conversation.
-* **Retired BigQuery `chat_history`**: Completely eliminated writes and queries to BigQuery `family_finance.chat_history` table in favor of native Memory Bank facts, while retaining ultra-low-latency in-memory LRU caching strictly for intra-turn multi-turn pronoun tracking.
-* **Full Unit Test Coverage ([`tests/test_memory_service.py`](tests/test_memory_service.py))**: Added 11 new unit tests covering client authentication, email resolution, prompt block formatting, fact generation, and error fallback, bringing the repository suite to **62 passing unit tests**.
-
-### **Upcoming Roadmap (PR 6)**
-* **PR 6: Autonomous Spend Anomaly Alerts & Suppression Rules**: Dynamic multi-table anomaly scan alerting with exact-match suppression table in BigQuery.
-
 
 ---
 
