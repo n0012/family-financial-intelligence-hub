@@ -7,6 +7,7 @@
 [![Google BigQuery](https://img.shields.io/badge/Warehouse-Google%20BigQuery-669DF6.svg)](https://cloud.google.com/bigquery)
 [![Gemini 3.8 Flash](https://img.shields.io/badge/AI%20Model-Gemini%203.8%20Flash-8E24AA.svg)](https://deepmind.google/technologies/gemini/)
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC.svg)](https://www.terraform.io/)
+[![Tests: 76 Passing](https://img.shields.io/badge/Tests-76%20Passing-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 <p align="center">
@@ -40,7 +41,7 @@ flowchart TD
         CronAlert["Daily Proactive Scan (08:00 AM)<br/>monarch-daily-advisor-alerts"]
     end
 
-    subgraph BatchLayer ["Serverless Batch Jobs (Cloud Run Jobs - Zero HTTP Ingress)"]
+    subgraph BatchLayer ["Serverless Batch Layer (Cloud Run Jobs - Ephemeral Execution)"]
         JobSync["monarch-sync-job<br/>(python -m app.job sync)"]
         JobAlert["monarch-alerts-job<br/>(python -m app.job alerts)"]
         MMClient["MonarchMoney GraphQL Client<br/>+ Automated Base32 TOTP (pyotp)"]
@@ -49,22 +50,29 @@ flowchart TD
 
     subgraph DataWarehouse ["Google BigQuery Data Warehouse"]
         RawTables["Raw Tables:<br/>• raw_accounts<br/>• raw_transactions<br/>• raw_categories<br/>• staging_transactions"]
-        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Carrying Cost & Debt Sweeps)<br/>• v_active_subscriptions (Cadence & Price Creep)<br/>• v_subscription_overlap (Redundant Services)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Convenience Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
+        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Daily Compounding Debt)<br/>• v_active_subscriptions (Cadence Run-Rates)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
     end
 
-    subgraph PrivateIngestion ["Private Messaging Integration (Cloud Pub/Sub)"]
+    subgraph ProactiveOutbound ["Proactive Outbound Alerts (Direct Webhook)"]
+        Webhook["Google Chat Incoming Webhook<br/>chat.googleapis.com/v1/spaces/..."]
+    end
+
+    subgraph PrivateIngestion ["Private Inbound Chat Integration (Zero Inbound Ports)"]
         Topic["Pub/Sub Topic<br/>monarch-chat-incoming"]
         Worker["Chat Pull Worker<br/>(python -m app.chat_worker)<br/>Outbound Streaming Pull"]
     end
 
     subgraph MemoryLayer ["Long-Term Memory Bank (Vertex AI Agent Platform)"]
-        MemoryBank["Reasoning Engine Memory Bank<br/>(FinSage Memory Bank)<br/>• User-Scoped Preferences<br/>• Fact Consolidation & Conflict Resolution<br/>• Replaces Legacy BQ chat_history"]
+        MemoryBank["Reasoning Engine Memory Bank<br/>(FinSage Memory Bank)<br/>• User-Scoped Preferences<br/>• Fact Consolidation & Conflict Resolution"]
     end
 
     subgraph Intelligence ["Gemini 3.8 Flash Brain & Chat Interface (FinSage)"]
         GeminiFlash["Gemini 3.8 Flash<br/>• MEDIUM Thinking Budget<br/>• Automatic Function Calling (AFC)<br/>• Read-only BigQuery Tool<br/>• Live Monarch Confirmation Tools<br/>• Persistent Memory Bank AFC Tool"]
-        MultimodalVision["Multimodal Ingestion<br/>(Pasted PNG/JPG Screenshots & Plans)"]
-        GoogleChat["Google Chat Space & 1:1 DMs<br/>• Native Cards v2 Alerts<br/>• Asynchronous REST Replies"]
+        MultimodalVision["Multimodal Vision Ingestion<br/>(Pasted PNG/JPG Screenshots & Plans)"]
+    end
+
+    subgraph ChatSpace ["User Interface (Google Chat Room)"]
+        GoogleChat["Google Chat Space & 1:1 DMs<br/>• Native Cards v2 Actionable Alerts<br/>• Conversational Financial Co-Pilot"]
     end
 
     CronSync -->|"IAM OAuth (Cloud Run API)"| JobSync
@@ -75,16 +83,17 @@ flowchart TD
     CronAlert -->|"IAM OAuth (Cloud Run API)"| JobAlert
     Views --> JobAlert
     JobAlert --> AdvisorEngine
-    AdvisorEngine -->|"Card v2 Notification"| GoogleChat
+    AdvisorEngine -->|"Direct HTTPS Card v2 POST"| Webhook
+    Webhook --> GoogleChat
 
-    GoogleChat -->|"Event Publish"| Topic
-    Topic -->|"Outbound Streaming Pull (No Inbound Port)"| Worker
+    GoogleChat -->|"Inbound User Message Event"| Topic
+    Topic -->|"Outbound Streaming Pull (No Ingress Ports)"| Worker
     Worker --> MultimodalVision
     MultimodalVision --> GeminiFlash
     MemoryBank -->|"Active Preferences & Targets"| GeminiFlash
     GeminiFlash -->|"Consolidate: store_user_preference"| MemoryBank
     GeminiFlash -->|"Analytical SQL: run_readonly_sql_tool"| Views
-    Views -->|"Query Results"| GeminiFlash
+    Views -->|"Deterministic Query Results"| GeminiFlash
     GeminiFlash -->|"Live Read: get_live_account_balance / txn"| MMClient
     MMClient -->|"Live Data Confirmation"| GeminiFlash
     GeminiFlash -->|"Async REST Reply (chat.googleapis.com)"| GoogleChat
@@ -103,8 +112,9 @@ The data warehouse decouples storage from analytical modeling, allowing queries 
 | **`raw_categories`** | Budget envelopes grouped into Fixed Overhead, Discretionary, Debt, and Income. |
 | **`v_account_lifecycle`** | Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity recency, non-zero balance, and transaction count. Resolves duplicate accounts during bank mergers. |
 | **`v_heloc_daily_cost`** | Computes the exact daily compounding cost (`(balance * apr) / 365`) and monthly carrying cost of variable-rate debt, alongside payoff acceleration impacts. |
-| **`v_active_subscriptions`** | Autodetects recurring billing cadences (monthly, quarterly, annual), projects annual run-rates, and flags **price creep** by comparing average vs maximum historical charges. |
-| **`v_subscription_overlap`** | Aggregates concurrent active subscriptions within the same category (e.g. streaming, cloud storage, fitness) to highlight redundancy. |
+| **`v_active_subscriptions`** | Autodetects recurring billing cadences (monthly, quarterly, annual) and projects annual run-rates while filtering out incidental retail micro-transactions (<60% of baseline tier) and variable utility bills. |
+| **`v_subscription_price_creep`** | Compares the latest recurring charge against the immediately preceding charge via `LAG()` windowing to detect authentic price hikes in the last 45 days (+3% to +40%, $\ge \$1.00$). |
+| **`v_subscription_overlap`** | Clusters active subscriptions into functional domains (Video Streaming, AI Productivity, Cloud Storage, Audio, News, Security) to flag genuine service redundancies. |
 | **`v_food_efficiency`** | Calculates the monthly ratio between grocery purchases and dining out / food delivery markups (DoorDash, UberEats, Grubhub). |
 | **`v_micro_transaction_leakage`** | Flags frequent sub-$35 convenience transactions (coffee shops, convenience stores, app purchases) and calculates their annualized drain. |
 | **`v_spend_classification`** | Classifies all monthly outflows into Fixed Overhead vs Discretionary spend to evaluate baseline burn rate. |

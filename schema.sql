@@ -74,32 +74,74 @@ CREATE TABLE IF NOT EXISTS `family_finance.alert_suppression` (
 -- Analytical & Optimization Views for Conversational Analytics Agent
 -- ==============================================================================
 
--- VIEW A: Active Subscriptions & Recurring Debits
+-- VIEW A1: Active Subscriptions & Recurring Debits
 -- Automatically detects monthly, quarterly, and annual recurring charges,
--- calculates run rates, and flags price increases.
+-- filtering out incidental point-of-sale micro-transactions and variable utility bills.
 CREATE OR REPLACE VIEW `family_finance.v_active_subscriptions` AS
-WITH recurring_stats AS (
+WITH candidate_txns AS (
     SELECT
         COALESCE(clean_merchant_name, merchant_name) AS merchant,
         category_name,
+        transaction_date,
+        ABS(amount) AS amount,
+        is_recurring
+    FROM `family_finance.raw_transactions`
+    WHERE amount < 0
+      AND pending = FALSE
+      AND LOWER(category_name) NOT IN (
+          'transfer', 'transfers', 'credit card payment', 'credit card payments', 
+          'loan payment', 'balance transfers', 'utilities', 'gas & electric', 'electric', 'gas', 'water'
+      )
+      AND LOWER(COALESCE(clean_merchant_name, merchant_name)) NOT LIKE '%transfer%'
+      AND (
+          is_recurring = TRUE
+          OR LOWER(category_name) IN ('subscriptions', 'phone', 'internet & cable', 'fitness', 'home security')
+      )
+      AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 18 MONTH)
+),
+merchant_recurring_baseline AS (
+    SELECT
+        merchant,
+        category_name,
+        -- Prioritize median of recurring-flagged transactions; fallback to 75th percentile of candidate charges
+        COALESCE(
+            APPROX_QUANTILES(IF(is_recurring = TRUE, amount, NULL), 100)[SAFE_OFFSET(50)],
+            APPROX_QUANTILES(amount, 100)[SAFE_OFFSET(75)]
+        ) AS baseline_recurring_amount
+    FROM candidate_txns
+    GROUP BY 1, 2
+    HAVING baseline_recurring_amount IS NOT NULL
+),
+clean_recurring_charges AS (
+    SELECT
+        c.merchant,
+        c.category_name,
+        c.transaction_date,
+        c.amount,
+        c.is_recurring
+    FROM candidate_txns c
+    JOIN merchant_recurring_baseline b 
+      ON c.merchant = b.merchant AND c.category_name = b.category_name
+    WHERE 
+        -- If explicitly marked recurring by Monarch, always retain
+        c.is_recurring = TRUE
+        -- Otherwise require charge to be within 60% of baseline recurring tier (drops $8 drinks, $20 passes)
+        OR (c.amount >= b.baseline_recurring_amount * 0.60 
+            AND c.amount <= b.baseline_recurring_amount * 1.60)
+),
+recurring_stats AS (
+    SELECT
+        merchant,
+        category_name,
         COUNT(*) AS charge_count,
-        ROUND(AVG(ABS(amount)), 2) AS avg_charge,
-        ROUND(MIN(ABS(amount)), 2) AS min_charge,
-        ROUND(MAX(ABS(amount)), 2) AS max_charge,
+        ROUND(AVG(amount), 2) AS avg_charge,
+        ROUND(MIN(amount), 2) AS min_charge,
+        ROUND(MAX(amount), 2) AS max_charge,
         MIN(transaction_date) AS first_seen,
         MAX(transaction_date) AS last_seen,
         DATE_DIFF(MAX(transaction_date), MIN(transaction_date), DAY) AS span_days,
         ROUND(DATE_DIFF(MAX(transaction_date), MIN(transaction_date), DAY) / NULLIF(COUNT(*) - 1, 0), 1) AS avg_cadence_days
-    FROM `family_finance.raw_transactions`
-    WHERE amount < 0
-      AND pending = FALSE
-      AND LOWER(category_name) NOT IN ('transfer', 'transfers', 'credit card payment', 'credit card payments', 'loan payment', 'balance transfers')
-      AND LOWER(COALESCE(clean_merchant_name, merchant_name)) NOT LIKE '%transfer%'
-      AND (
-          is_recurring = TRUE
-          OR LOWER(category_name) IN ('subscriptions', 'phone', 'internet & cable', 'fitness', 'home security', 'utilities')
-      )
-      AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 18 MONTH)
+    FROM clean_recurring_charges
     GROUP BY 1, 2
     HAVING charge_count >= 2
 )
@@ -110,10 +152,6 @@ SELECT
     avg_charge,
     min_charge,
     max_charge,
-    CASE 
-        WHEN max_charge > min_charge THEN TRUE 
-        ELSE FALSE 
-    END AS has_price_increased,
     CASE
         WHEN avg_cadence_days BETWEEN 25 AND 35 THEN 'MONTHLY'
         WHEN avg_cadence_days BETWEEN 80 AND 100 THEN 'QUARTERLY'
@@ -132,6 +170,87 @@ SELECT
 FROM recurring_stats
 WHERE avg_cadence_days BETWEEN 25 AND 390
 ORDER BY estimated_annual_cost DESC;
+
+-- VIEW A2: Subscription Price Creep Detection (PR 7)
+-- Compares the latest recurring subscription charge to the immediately preceding charge
+-- to detect actual price hikes within the last 45 days, filtering out tax noise and incidentals.
+CREATE OR REPLACE VIEW `family_finance.v_subscription_price_creep` AS
+WITH candidate_txns AS (
+    SELECT
+        COALESCE(clean_merchant_name, merchant_name) AS merchant,
+        category_name,
+        transaction_date,
+        ABS(amount) AS amount,
+        is_recurring
+    FROM `family_finance.raw_transactions`
+    WHERE amount < 0
+      AND pending = FALSE
+      AND LOWER(category_name) NOT IN (
+          'transfer', 'transfers', 'credit card payment', 'credit card payments', 
+          'loan payment', 'balance transfers', 'utilities', 'gas & electric', 'electric', 'gas', 'water'
+      )
+      AND LOWER(COALESCE(clean_merchant_name, merchant_name)) NOT LIKE '%transfer%'
+      AND (
+          is_recurring = TRUE
+          OR LOWER(category_name) IN ('subscriptions', 'phone', 'internet & cable', 'fitness', 'home security')
+      )
+      AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 18 MONTH)
+),
+merchant_recurring_baseline AS (
+    SELECT
+        merchant,
+        category_name,
+        COALESCE(
+            APPROX_QUANTILES(IF(is_recurring = TRUE, amount, NULL), 100)[SAFE_OFFSET(50)],
+            APPROX_QUANTILES(amount, 100)[SAFE_OFFSET(75)]
+        ) AS baseline_recurring_amount
+    FROM candidate_txns
+    GROUP BY 1, 2
+    HAVING baseline_recurring_amount IS NOT NULL
+),
+clean_recurring_charges AS (
+    SELECT
+        c.merchant,
+        c.category_name,
+        c.transaction_date,
+        c.amount
+    FROM candidate_txns c
+    JOIN merchant_recurring_baseline b 
+      ON c.merchant = b.merchant AND c.category_name = b.category_name
+    WHERE 
+        c.is_recurring = TRUE
+        OR (c.amount >= b.baseline_recurring_amount * 0.60 
+            AND c.amount <= b.baseline_recurring_amount * 1.60)
+),
+ranked_charges AS (
+    SELECT
+        merchant,
+        category_name,
+        transaction_date,
+        amount,
+        LAG(amount, 1) OVER (PARTITION BY merchant ORDER BY transaction_date ASC) AS prev_amount,
+        LAG(transaction_date, 1) OVER (PARTITION BY merchant ORDER BY transaction_date ASC) AS prev_date,
+        ROW_NUMBER() OVER (PARTITION BY merchant ORDER BY transaction_date DESC) AS recency_rank
+    FROM clean_recurring_charges
+)
+SELECT
+    merchant,
+    category_name,
+    amount AS latest_charge,
+    prev_amount AS prior_charge,
+    ROUND(amount - prev_amount, 2) AS price_increase_amount,
+    ROUND(((amount - prev_amount) / prev_amount) * 100, 1) AS pct_increase,
+    ROUND(amount * 12, 2) AS estimated_annual_cost,
+    transaction_date AS effective_date
+FROM ranked_charges
+WHERE recency_rank = 1
+  AND prev_amount IS NOT NULL
+  -- Only alert on price increases that took effect recently (last 45 days)
+  AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 45 DAY)
+  -- Enforce realistic SaaS price hike band: >= $1.00 and between +3% and +40%
+  AND (amount - prev_amount) >= 1.00
+  AND ((amount - prev_amount) / prev_amount) BETWEEN 0.03 AND 0.40
+ORDER BY price_increase_amount DESC;
 
 -- VIEW B: Discretionary Spend vs Fixed Family Overhead
 CREATE OR REPLACE VIEW `family_finance.v_spend_classification` AS
@@ -333,16 +452,55 @@ GROUP BY 1, 2
 HAVING frequency_90d >= 4
 ORDER BY total_spend_90d DESC;
 
--- VIEW F: Subscription Category Overlap & Redundancy
--- Groups concurrent subscriptions by domain to flag overlapping services
+-- VIEW F: Subscription Functional Overlap & Redundancy
+-- Clusters active subscriptions into functional service domains to identify genuine redundancy
+-- (e.g. concurrent video streaming or multiple AI tools) rather than lumping all subscriptions together.
 CREATE OR REPLACE VIEW `family_finance.v_subscription_overlap` AS
+WITH categorized AS (
+    SELECT
+        merchant,
+        category_name,
+        avg_charge,
+        estimated_annual_cost,
+        CASE
+            -- Video Streaming
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'netflix|hulu|disney|max\b|hbo|peacock|paramount|prime video|apple tv|channels\b') 
+                THEN 'VIDEO_STREAMING'
+            -- Audio & Podcasts
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'spotify|apple music|audible|pandora|tidal|sirius') 
+                THEN 'AUDIO_AND_MEDIA'
+            -- AI Assistants & LLMs
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'openai|chatgpt|anthropic|claude|cursor|midjourney|perplexity') 
+                THEN 'AI_PRODUCTIVITY'
+            -- Cloud Storage & Hosting
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'google one|icloud|dropbox|onedrive|unraid|backblaze|aws') 
+                THEN 'CLOUD_STORAGE'
+            -- News & Publications
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'the week|nytimes|wsj|washington post|the athletic|kindle|substack') 
+                THEN 'NEWS_AND_READING'
+            -- Passwords & Security
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'1password|lastpass|bitwarden|nordvpn|expressvpn') 
+                THEN 'SECURITY_AND_PRIVACY'
+            -- Phone & Mobile Telco
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'at&t|verizon|t-mobile|visible|mint mobile') 
+                THEN 'MOBILE_TELECOM'
+            -- Pet Insurance (Explicitly separated from clinical veterinary practices)
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'nationwide|trupanion|lemonade|healthy paws') 
+                THEN 'PET_INSURANCE'
+            ELSE NULL
+        END AS functional_domain
+    FROM `family_finance.v_active_subscriptions`
+    WHERE LOWER(category_name) NOT IN ('veterinary', 'medical', 'utilities', 'pets')
+       OR REGEXP_CONTAINS(LOWER(merchant), r'nationwide|trupanion|lemonade|healthy paws')
+)
 SELECT
-    category_name,
-    COUNT(*) AS active_subscriptions_count,
-    ROUND(SUM(estimated_annual_cost), 2) AS category_annual_run_rate,
+    functional_domain,
+    COUNT(*) AS active_service_count,
     ROUND(SUM(avg_charge), 2) AS combined_monthly_cost,
-    STRING_AGG(merchant, ', ' ORDER BY estimated_annual_cost DESC) AS active_services
-FROM `family_finance.v_active_subscriptions`
+    ROUND(SUM(estimated_annual_cost), 2) AS combined_annual_cost,
+    STRING_AGG(merchant, ', ' ORDER BY avg_charge DESC) AS active_services
+FROM categorized
+WHERE functional_domain IS NOT NULL
 GROUP BY 1
-HAVING active_subscriptions_count >= 2
+HAVING active_service_count >= 2
 ORDER BY combined_monthly_cost DESC;
