@@ -816,6 +816,53 @@ def generate_daily_brief_synopsis(
     daily_burn_rate = (mtd_spend / day_of_month) if day_of_month > 0 else 0.0
     pacing_desc = f"~${daily_burn_rate:,.2f}/day" if day_of_month > 3 else "pacing calibrating"
 
+    import calendar
+
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    month_pct = (day_of_month / days_in_month * 100.0) if days_in_month > 0 else 0.0
+    projected_monthly_spend = daily_burn_rate * days_in_month
+
+    if query_failed:
+        status_code = "DATA_DEGRADED"
+        status_badge = "⚠️ DATA DEGRADED"
+        status_label = "BigQuery live data unavailable"
+    elif liquid_balance < 0:
+        status_code = "CRITICAL"
+        status_badge = "🚨 OVERDRAWN"
+        status_label = f"Overdrawn Checking (-${abs(liquid_balance):,.2f})"
+    elif coverage_ratio < 1.0:
+        status_code = "LOW_BUFFER"
+        status_badge = "🟡 LOW BUFFER"
+        status_label = f"Reserves below 1-month fixed burn ({coverage_ratio:.1f}x)"
+    elif fixed_burn > 0 and projected_monthly_spend > fixed_burn * 1.5:
+        status_code = "ELEVATED_BURN"
+        status_badge = "🟡 ELEVATED BURN"
+        status_label = "Spend pacing exceeds baseline; monitor variable outlay"
+    elif daily_interest_cost >= 15.0:
+        status_code = "DEBT_CARRY"
+        status_badge = "⚡ DEBT CARRY"
+        status_label = f"HELOC interest running at ${daily_interest_cost:,.2f}/day"
+    else:
+        status_code = "ON_TRACK"
+        status_badge = "🟢 ON TRACK"
+        status_label = f"Healthy reserves ({coverage_ratio:.1f}x fixed buffer)"
+
+    def render_ascii_progress_bar(pct: float, length: int = 10) -> str:
+        clamped = max(0.0, min(100.0, pct))
+        filled = int(round((clamped / 100.0) * length))
+        empty = length - filled
+        return "█" * filled + "░" * empty
+
+    bar = render_ascii_progress_bar(month_pct, 10)
+    pacing_thermometer = (
+        f"{bar} Day {day_of_month}/{days_in_month} ({month_pct:.0f}% elapsed)<br>"
+        f"MTD Outflow: ${mtd_spend:,.2f} ({pacing_desc} • Projected: ${projected_monthly_spend:,.2f})"
+    )
+    pacing_thermometer_md = (
+        f"`{bar}` Day {day_of_month}/{days_in_month} ({month_pct:.0f}% elapsed) • "
+        f"MTD Outflow: ${mtd_spend:,.2f} ({pacing_desc} • Projected: ${projected_monthly_spend:,.2f})"
+    )
+
     posture_lines = []
     posture_md_lines = []
 
@@ -823,6 +870,9 @@ def generate_daily_brief_synopsis(
         posture_lines.append("⚠️ <b>Account Posture:</b> BigQuery live data unavailable (query error).")
         posture_md_lines.append("• ⚠️ **Account Posture**: BigQuery live data unavailable (query error).")
     else:
+        posture_lines.append(f"🧭 <b>Posture:</b> {status_badge} — {status_label}")
+        posture_md_lines.append(f"• **Posture**: {status_badge} — {status_label}")
+
         if liquid_balance < 0:
             posture_lines.append(f"🏦 <b>Liquid Cash:</b> -${abs(liquid_balance):,.2f} ⚠️ (OVERDRAWN)")
             posture_md_lines.append(f"• ⚠️ **Liquid Reserves**: -${abs(liquid_balance):,.2f} (OVERDRAWN)")
@@ -933,6 +983,11 @@ def generate_daily_brief_synopsis(
     return {
         "date": brief_date_str,
         "day_of_month": day_of_month,
+        "days_in_month": days_in_month,
+        "month_pct": round(month_pct, 1),
+        "status_code": status_code,
+        "status_badge": status_badge,
+        "status_label": status_label,
         "liquid_balance": liquid_balance,
         "fixed_burn": fixed_burn,
         "coverage_ratio": round(coverage_ratio, 2),
@@ -944,12 +999,51 @@ def generate_daily_brief_synopsis(
         "mtd_spend": mtd_spend,
         "mtd_count": mtd_count,
         "daily_burn_rate": round(daily_burn_rate, 2),
+        "projected_monthly_spend": round(projected_monthly_spend, 2),
+        "pacing_thermometer": pacing_thermometer,
+        "pacing_thermometer_md": pacing_thermometer_md,
         "posture_text": posture_text,
         "posture_md": posture_md,
         "focus_items": focus_items,
         "focus_items_md": focus_items_md,
         "is_error": query_failed,
     }
+
+
+def get_alert_category_label(alert_type: str) -> str:
+    """Returns a formatted category badge for Google Chat card topLabel."""
+    category_map = {
+        "DUPLICATE_CHARGE": "⚡ URGENT ANOMALY • DUPLICATE CHARGE",
+        "NEW_SUBSCRIPTION_DETECTED": "🆕 URGENT ANOMALY • TRIAL INTERCEPT",
+        "PRICE_CREEP": "🔄 RECURRING SPEND • PRICE HIKE",
+        "SUBSCRIPTION_OVERLAP": "🔄 RECURRING SPEND • SUBSCRIPTION OVERLAP",
+        "ANNUAL_BILL_RADAR": "📅 RECURRING SPEND • ANNUAL BILL RADAR",
+        "FOOD_LEAKAGE": "🍔 LIFESTYLE LEAK • DINING EFFICIENCY",
+        "MICRO_TRANSACTION_LEAKAGE": "☕ LIFESTYLE LEAK • CONVENIENCE HABIT",
+        "BUDGET_CAP_EXCEEDED": "⚠️ BUDGET GOAL • CAP EXCEEDED",
+        "BUDGET_CAP_PACING": "⚠️ BUDGET GOAL • PACING WARNING",
+        "HELOC_DAILY_COST": "💳 DEBT & CARRY • HELOC OPTIMIZATION",
+        "HELOC_OPPORTUNITY": "💳 DEBT & CARRY • SURPLUS SWEEP",
+        "UTILITY_SEASONAL_SPIKE": "⚡ UTILITIES • USAGE VARIANCE",
+    }
+    return category_map.get(alert_type, alert_type.replace("_", " "))
+
+
+def get_alert_sort_priority(alert_type: str) -> int:
+    """Returns sort priority integer so high-impact anomalies appear first."""
+    priority_order = {
+        "DUPLICATE_CHARGE": 1,
+        "NEW_SUBSCRIPTION_DETECTED": 2,
+        "BUDGET_CAP_EXCEEDED": 3,
+        "PRICE_CREEP": 4,
+        "SUBSCRIPTION_OVERLAP": 5,
+        "ANNUAL_BILL_RADAR": 6,
+        "FOOD_LEAKAGE": 7,
+        "MICRO_TRANSACTION_LEAKAGE": 8,
+        "HELOC_DAILY_COST": 9,
+        "UTILITY_SEASONAL_SPIKE": 10,
+    }
+    return priority_order.get(alert_type, 99)
 
 
 def build_chat_card_v2(
@@ -981,6 +1075,18 @@ def build_chat_card_v2(
                     }
                 }
             )
+        pacing_thermometer = synopsis.get("pacing_thermometer")
+        if pacing_thermometer:
+            synopsis_widgets.append(
+                {
+                    "decoratedText": {
+                        "topLabel": "MONTH-TO-DATE SPEND PACING THERMOMETER",
+                        "text": pacing_thermometer,
+                        "startIcon": {"knownIcon": "CLOCK"},
+                        "wrapText": True,
+                    }
+                }
+            )
         focus_items = synopsis.get("focus_items", [])
         if focus_items:
             synopsis_widgets.append(
@@ -1003,13 +1109,15 @@ def build_chat_card_v2(
 
     # Section 2: Daily Optimization Opportunities
     alert_widgets: list[dict[str, Any]] = []
-    for a in alerts:
+    sorted_alerts = sorted(alerts, key=lambda x: get_alert_sort_priority(x.get("type", "")))
+    for a in sorted_alerts:
         if not a.get("title"):
             continue
+        category_label = get_alert_category_label(a.get("type", "FINANCIAL_ADVISORY"))
         alert_widgets.append(
             {
                 "decoratedText": {
-                    "topLabel": a.get("type", "FINANCIAL ADVISORY").replace("_", " "),
+                    "topLabel": category_label,
                     "text": f'<b>{a["title"]}</b><br><font color="#5f6368">{a["detail"]}</font><br>👉 <b>Action:</b> {a["suggested_fix"]}',
                     "wrapText": True,
                 }
@@ -1134,7 +1242,11 @@ def build_markdown_fallback(
     if synopsis:
         lines.append(f"**🌅 FinSage Morning Brief — {synopsis.get('date', '')}**\n")
         if synopsis.get("posture_md"):
-            lines.append(f"**Daily Posture Snapshot:**\n{synopsis['posture_md']}\n")
+            lines.append(f"**Daily Posture Snapshot:**\n{synopsis['posture_md']}")
+        if synopsis.get("pacing_thermometer_md"):
+            lines.append(f"• **Pacing Thermometer**: {synopsis['pacing_thermometer_md']}\n")
+        else:
+            lines.append("")
         if synopsis.get("focus_items_md"):
             lines.append("**What to Pay Attention to Today:**")
             for item in synopsis["focus_items_md"]:
@@ -1146,7 +1258,8 @@ def build_markdown_fallback(
     if not alerts or not any(a.get("title") for a in alerts):
         lines.append("✅ No active financial anomalies or spending leaks detected.")
     else:
-        for a in alerts:
+        sorted_alerts = sorted(alerts, key=lambda x: get_alert_sort_priority(x.get("type", "")))
+        for a in sorted_alerts:
             if a.get("title"):
                 lines.append(f"• **{a['title']}**\n  _{a['detail']}_\n  👉 **Action**: {a['suggested_fix']}\n")
     return "\n".join(lines)
@@ -1295,3 +1408,527 @@ def snooze_spend_alert(alert_key_or_name: str, days: int = 7) -> str:
         return f"Successfully snoozed alert '{clean_key}' for {clamped_days} days."
     else:
         return f"Failed to snooze alert '{clean_key}'. Please check logs."
+
+
+def generate_executive_digest(
+    bq: Any,
+    project_id: str,
+    dataset_id: str,
+    period: str = "WEEKLY",
+) -> dict[str, Any]:
+    """
+    Generates an executive-level family CFO digest for a given period (WEEKLY or MONTHLY).
+    Aggregates:
+    - Outflow volume, transaction count, average ticket, daily run-rate
+    - Liquid cash reserves and buffer coverage
+    - HELOC debt balance, APR, and interest accrued in period
+    - Top 5 spend categories by dollar amount and share of total
+    - Top 5 merchants by spend
+    - Actionable strategic CFO recommendations
+    """
+    from datetime import date, timedelta
+
+    period_upper = "MONTHLY" if str(period).upper().startswith("M") else "WEEKLY"
+    today = date.today()
+
+    if period_upper == "WEEKLY":
+        start_date = today - timedelta(days=7)
+        period_days = 7
+        period_title = "Weekly"
+        period_label = f"Trailing 7 Days ({start_date.strftime('%b %-d')} – {today.strftime('%b %-d, %Y')})"
+    else:
+        start_date = today.replace(day=1)
+        period_days = max(1, today.day)
+        period_title = "Monthly"
+        period_label = f"Month-to-Date ({start_date.strftime('%b %-d')} – {today.strftime('%b %-d, %Y')})"
+
+    total_spend = 0.0
+    txn_count = 0
+    avg_ticket = 0.0
+    daily_run_rate = 0.0
+    liquid_balance = 0.0
+    fixed_burn = 0.0
+    coverage_ratio = 0.0
+    heloc_name = "HELOC"
+    heloc_balance = 0.0
+    heloc_apr = 0.0
+    daily_interest_cost = 0.0
+    monthly_interest_cost = 0.0
+    period_interest_cost = 0.0
+    top_categories: list[dict[str, Any]] = []
+    top_merchants: list[dict[str, Any]] = []
+    cfo_takeaways: list[str] = []
+    query_failed = False
+
+    sql_summary = f"""
+    WITH params AS (
+        SELECT
+            DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 7 DAY) AS weekly_start,
+            DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH) AS monthly_start,
+            CURRENT_DATE('America/New_York') AS end_date
+    ),
+    chosen AS (
+        SELECT
+            IF('{period_upper}' = 'WEEKLY', weekly_start, monthly_start) AS start_date,
+            end_date
+        FROM params
+    ),
+    txns AS (
+        SELECT
+            ABS(t.amount) AS amount,
+            COALESCE(t.merchant, 'Uncategorized') AS merchant,
+            COALESCE(t.category_name, 'Uncategorized') AS category_name
+        FROM `{project_id}.{dataset_id}.raw_transactions` t
+        CROSS JOIN chosen p
+        WHERE t.transaction_date >= p.start_date
+          AND t.transaction_date <= p.end_date
+          AND t.amount < 0
+          AND NOT COALESCE(t.pending, FALSE)
+          AND LOWER(COALESCE(t.category_name, '')) NOT IN (
+              'transfer', 'credit card payment', 'balance transfer',
+              'loan payment', 'investment', 'savings'
+          )
+    ),
+    liquid AS (
+        SELECT COALESCE(ROUND(SUM(current_balance), 2), 0.0) AS liquid_balance
+        FROM `{project_id}.{dataset_id}.raw_accounts`
+        WHERE (
+            LOWER(COALESCE(type_name, '')) IN ('depository', 'checking')
+            OR LOWER(COALESCE(subtype_name, '')) IN ('checking', 'savings', 'money_market')
+        )
+        AND is_asset = TRUE
+    ),
+    fixed AS (
+        SELECT COALESCE(
+            (
+                SELECT ROUND(AVG(total_amount), 2)
+                FROM `{project_id}.{dataset_id}.v_spend_classification`
+                WHERE spend_type = 'FIXED_OVERHEAD'
+                  AND month >= FORMAT_DATE('%Y-%m', DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 3 MONTH))
+                  AND month < FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'))
+            ),
+            (
+                SELECT COALESCE(ROUND(SUM(monthly_run_rate), 2), 0.0)
+                FROM `{project_id}.{dataset_id}.v_active_subscriptions`
+                WHERE is_currently_active = TRUE
+            ),
+            0.0
+        ) AS fixed_burn
+    ),
+    heloc AS (
+        SELECT
+            display_name AS account_name,
+            current_balance AS heloc_balance,
+            apr AS heloc_apr,
+            daily_interest_cost,
+            monthly_interest_cost
+        FROM `{project_id}.{dataset_id}.v_heloc_daily_cost`
+        ORDER BY current_balance DESC
+        LIMIT 1
+    )
+    SELECT
+        COALESCE(ROUND(SUM(t.amount), 2), 0.0) AS total_spend,
+        COUNT(t.amount) AS txn_count,
+        COALESCE(ROUND(AVG(t.amount), 2), 0.0) AS avg_ticket,
+        (SELECT liquid_balance FROM liquid) AS liquid_balance,
+        (SELECT fixed_burn FROM fixed) AS fixed_burn,
+        (SELECT account_name FROM heloc) AS heloc_name,
+        (SELECT heloc_balance FROM heloc) AS heloc_balance,
+        (SELECT heloc_apr FROM heloc) AS heloc_apr,
+        (SELECT daily_interest_cost FROM heloc) AS daily_interest_cost,
+        (SELECT monthly_interest_cost FROM heloc) AS monthly_interest_cost
+    FROM txns t;
+    """
+
+    sql_categories = f"""
+    WITH params AS (
+        SELECT
+            IF('{period_upper}' = 'WEEKLY',
+               DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 7 DAY),
+               DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH)) AS start_date,
+            CURRENT_DATE('America/New_York') AS end_date
+    )
+    SELECT
+        COALESCE(t.category_name, 'Uncategorized') AS category_name,
+        ROUND(SUM(ABS(t.amount)), 2) AS total,
+        COUNT(*) AS count
+    FROM `{project_id}.{dataset_id}.raw_transactions` t
+    CROSS JOIN params p
+    WHERE t.transaction_date >= p.start_date
+      AND t.transaction_date <= p.end_date
+      AND t.amount < 0
+      AND NOT COALESCE(t.pending, FALSE)
+      AND LOWER(COALESCE(t.category_name, '')) NOT IN (
+          'transfer', 'credit card payment', 'balance transfer',
+          'loan payment', 'investment', 'savings'
+      )
+    GROUP BY category_name
+    ORDER BY total DESC
+    LIMIT 5;
+    """
+
+    sql_merchants = f"""
+    WITH params AS (
+        SELECT
+            IF('{period_upper}' = 'WEEKLY',
+               DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 7 DAY),
+               DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH)) AS start_date,
+            CURRENT_DATE('America/New_York') AS end_date
+    )
+    SELECT
+        COALESCE(t.merchant, 'Uncategorized') AS merchant,
+        ROUND(SUM(ABS(t.amount)), 2) AS total,
+        COUNT(*) AS count
+    FROM `{project_id}.{dataset_id}.raw_transactions` t
+    CROSS JOIN params p
+    WHERE t.transaction_date >= p.start_date
+      AND t.transaction_date <= p.end_date
+      AND t.amount < 0
+      AND NOT COALESCE(t.pending, FALSE)
+      AND LOWER(COALESCE(t.category_name, '')) NOT IN (
+          'transfer', 'credit card payment', 'balance transfer',
+          'loan payment', 'investment', 'savings'
+      )
+    GROUP BY merchant
+    ORDER BY total DESC
+    LIMIT 5;
+    """
+
+    try:
+        rows = list(bq.query(sql_summary).result())
+        if rows:
+            r = rows[0]
+            total_spend = float(getattr(r, "total_spend", 0.0) or 0.0)
+            txn_count = int(getattr(r, "txn_count", 0) or 0)
+            avg_ticket = float(getattr(r, "avg_ticket", 0.0) or 0.0)
+            liquid_balance = float(getattr(r, "liquid_balance", 0.0) or 0.0)
+            fixed_burn = float(getattr(r, "fixed_burn", 0.0) or 0.0)
+            heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
+            heloc_balance = float(getattr(r, "heloc_balance", 0.0) or 0.0)
+            heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
+            daily_interest_cost = float(getattr(r, "daily_interest_cost", 0.0) or 0.0)
+            monthly_interest_cost = float(getattr(r, "monthly_interest_cost", 0.0) or 0.0)
+            period_interest_cost = round(daily_interest_cost * period_days, 2)
+            daily_run_rate = (total_spend / period_days) if period_days > 0 else 0.0
+            coverage_ratio = (liquid_balance / fixed_burn) if fixed_burn > 0 else 0.0
+        else:
+            query_failed = True
+    except Exception as e:
+        logger.warning(f"Executive digest summary query failed: {e}")
+        query_failed = True
+
+    try:
+        cat_rows = list(bq.query(sql_categories).result())
+        for cr in cat_rows:
+            cat_tot = float(getattr(cr, "total", 0.0) or 0.0)
+            pct = (cat_tot / total_spend * 100.0) if total_spend > 0 else 0.0
+            top_categories.append(
+                {
+                    "category_name": str(getattr(cr, "category_name", "Other")),
+                    "total": cat_tot,
+                    "count": int(getattr(cr, "count", 0) or 0),
+                    "pct": round(pct, 1),
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Executive digest category query failed: {e}")
+
+    try:
+        merch_rows = list(bq.query(sql_merchants).result())
+        for mr in merch_rows:
+            m_tot = float(getattr(mr, "total", 0.0) or 0.0)
+            pct = (m_tot / total_spend * 100.0) if total_spend > 0 else 0.0
+            top_merchants.append(
+                {
+                    "merchant": str(getattr(mr, "merchant", "Merchant")),
+                    "total": m_tot,
+                    "count": int(getattr(mr, "count", 0) or 0),
+                    "pct": round(pct, 1),
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Executive digest merchant query failed: {e}")
+
+    if query_failed:
+        cfo_takeaways.append("⚠️ Live BigQuery data was unreachable. Review database connectivity.")
+    else:
+        if total_spend > 0:
+            cfo_takeaways.append(
+                f"Household spend totaled ${total_spend:,.2f} ({txn_count} transactions, ~${daily_run_rate:,.2f}/day)."
+            )
+        else:
+            cfo_takeaways.append("Zero debit spend posted during this observation window.")
+
+        if top_categories:
+            top_cat = top_categories[0]
+            cfo_takeaways.append(
+                f"Highest category concentration: **{top_cat['category_name']}** consumed ${top_cat['total']:,.2f} ({top_cat['pct']:.1f}% of total outflow)."
+            )
+
+        if heloc_balance > 0:
+            if liquid_balance > 0 and coverage_ratio >= 1.5:
+                safe_buffer = fixed_burn * 1.25 if fixed_burn > 0 else 2500.0
+                surplus = liquid_balance - safe_buffer
+                if surplus >= 250.0:
+                    cfo_takeaways.append(
+                        f"💳 **Actionable Sweep**: Liquid reserves (${liquid_balance:,.2f}) exceed required buffer. "
+                        f"Consider sweeping ~${surplus:,.2f} surplus cash to {heloc_name} to curb ${daily_interest_cost:,.2f}/day carry."
+                    )
+                else:
+                    cfo_takeaways.append(
+                        f"💳 {heloc_name} balance is ${heloc_balance:,.2f} (${daily_interest_cost:,.2f}/day carry). Accrued ~${period_interest_cost:,.2f} interest in this period."
+                    )
+            elif liquid_balance < 0:
+                cfo_takeaways.append(
+                    f"🚨 Checking account is overdrawn (-${abs(liquid_balance):,.2f}). Replenish immediately."
+                )
+            else:
+                cfo_takeaways.append(
+                    f"💳 Liquid buffer is tight ({coverage_ratio:.1f}x monthly fixed burn). Maintain buffer before accelerating {heloc_name} paydown."
+                )
+        else:
+            cfo_takeaways.append("✅ Zero variable HELOC debt carry. Balance sheet posture is clean.")
+
+    return {
+        "period": period_upper,
+        "period_title": period_title,
+        "period_label": period_label,
+        "period_days": period_days,
+        "total_spend": total_spend,
+        "txn_count": txn_count,
+        "avg_ticket": avg_ticket,
+        "daily_run_rate": round(daily_run_rate, 2),
+        "liquid_balance": liquid_balance,
+        "fixed_burn": fixed_burn,
+        "coverage_ratio": round(coverage_ratio, 2),
+        "heloc_name": heloc_name,
+        "heloc_balance": heloc_balance,
+        "heloc_apr": heloc_apr,
+        "daily_interest_cost": daily_interest_cost,
+        "monthly_interest_cost": monthly_interest_cost,
+        "period_interest_cost": period_interest_cost,
+        "top_categories": top_categories,
+        "top_merchants": top_merchants,
+        "cfo_takeaways": cfo_takeaways,
+        "is_error": query_failed,
+    }
+
+
+def build_executive_digest_card(digest: dict[str, Any]) -> dict[str, Any]:
+    """Constructs Google Chat Card v2 representation of the executive weekly/monthly CFO digest."""
+    period = digest.get("period", "WEEKLY")
+    period_title = digest.get("period_title", "Weekly")
+    period_label = digest.get("period_label", period)
+    total_spend = float(digest.get("total_spend", 0.0) or 0.0)
+    txn_count = int(digest.get("txn_count", 0) or 0)
+    avg_ticket = float(digest.get("avg_ticket", 0.0) or 0.0)
+    daily_run = float(digest.get("daily_run_rate", 0.0) or 0.0)
+    liquid = float(digest.get("liquid_balance", 0.0) or 0.0)
+    coverage = float(digest.get("coverage_ratio", 0.0) or 0.0)
+    heloc_name = digest.get("heloc_name", "HELOC")
+    heloc_balance = float(digest.get("heloc_balance", 0.0) or 0.0)
+    daily_interest = float(digest.get("daily_interest_cost", 0.0) or 0.0)
+    period_interest = float(digest.get("period_interest_cost", 0.0) or 0.0)
+
+    sections: list[dict[str, Any]] = []
+
+    overview_widgets: list[dict[str, Any]] = []
+    buffer_str = f" ({coverage:.1f}x fixed buffer)" if coverage > 0 else ""
+    overview_text = (
+        f"<b>Total Outflow:</b> ${total_spend:,.2f} (~${daily_run:,.2f}/day)<br>"
+        f"<b>Volume:</b> {txn_count} transactions (avg ${avg_ticket:,.2f}/ticket)<br>"
+        f"<b>Liquid Reserves:</b> ${liquid:,.2f}{buffer_str}"
+    )
+    overview_widgets.append(
+        {
+            "decoratedText": {
+                "topLabel": f"OUTFLOW & LIQUIDITY • {period_label.upper()}",
+                "text": overview_text,
+                "startIcon": {"knownIcon": "DOLLAR"},
+                "wrapText": True,
+            }
+        }
+    )
+
+    if heloc_balance > 0:
+        debt_text = (
+            f"<b>{heloc_name} Balance:</b> ${heloc_balance:,.2f}<br>"
+            f"<b>Period Interest Accrued:</b> ~${period_interest:,.2f} (${daily_interest:,.2f}/day carry)"
+        )
+        overview_widgets.append(
+            {
+                "decoratedText": {
+                    "topLabel": "DEBT CARRY POSTURE",
+                    "text": debt_text,
+                    "startIcon": {"knownIcon": "DESCRIPTION"},
+                    "wrapText": True,
+                }
+            }
+        )
+    sections.append(
+        {
+            "header": f"📊 Executive CFO {period_title} Overview",
+            "widgets": overview_widgets,
+        }
+    )
+
+    concentration_widgets: list[dict[str, Any]] = []
+    top_cats = digest.get("top_categories", [])
+    if top_cats:
+        cat_lines = [
+            f"• <b>{c['category_name']}</b>: ${c['total']:,.2f} ({c.get('pct', 0.0):.1f}% • {c['count']} txns)"
+            for c in top_cats
+        ]
+        concentration_widgets.append(
+            {
+                "decoratedText": {
+                    "topLabel": "TOP 5 EXPENSE CATEGORIES",
+                    "text": "<br>".join(cat_lines),
+                    "startIcon": {"knownIcon": "SHOPPING_CART"},
+                    "wrapText": True,
+                }
+            }
+        )
+
+    top_merchs = digest.get("top_merchants", [])
+    if top_merchs:
+        merch_lines = [f"• <b>{m['merchant']}</b>: ${m['total']:,.2f} ({m['count']} txns)" for m in top_merchs]
+        concentration_widgets.append(
+            {
+                "decoratedText": {
+                    "topLabel": "TOP 5 MERCHANTS BY VOLUME",
+                    "text": "<br>".join(merch_lines),
+                    "startIcon": {"knownIcon": "STORE"},
+                    "wrapText": True,
+                }
+            }
+        )
+
+    if concentration_widgets:
+        sections.append(
+            {
+                "header": "🏷️ Outflow Concentration",
+                "widgets": concentration_widgets,
+            }
+        )
+
+    takeaways = digest.get("cfo_takeaways", [])
+    if takeaways:
+        takeaway_lines = [f"• {t}" for t in takeaways]
+        sections.append(
+            {
+                "header": "🎯 Strategic CFO Takeaways",
+                "widgets": [
+                    {
+                        "decoratedText": {
+                            "topLabel": "CAPITAL ALLOCATION ACTIONS",
+                            "text": "<br>".join(takeaway_lines),
+                            "startIcon": {"knownIcon": "STAR"},
+                            "wrapText": True,
+                        }
+                    }
+                ],
+            }
+        )
+
+    card_header = {
+        "title": "FinSage",
+        "subtitle": f"{period_title} Executive CFO Digest",
+        "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+        "imageType": "CIRCLE",
+    }
+
+    notification_text = f"📊 *FinSage*: {period_title} Executive CFO Digest is ready."
+    return {
+        "text": notification_text,
+        "cardsV2": [
+            {
+                "cardId": f"executiveDigest_{period.lower()}_{int(time.time())}",
+                "card": {
+                    "header": card_header,
+                    "sections": sections,
+                },
+            }
+        ],
+    }
+
+
+def build_executive_digest_markdown(digest: dict[str, Any]) -> str:
+    """Constructs plain text / Markdown representation of the executive CFO digest."""
+    period = digest.get("period", "WEEKLY")
+    period_title = digest.get("period_title", "Weekly")
+    period_label = digest.get("period_label", period)
+    total_spend = float(digest.get("total_spend", 0.0) or 0.0)
+    txn_count = int(digest.get("txn_count", 0) or 0)
+    avg_ticket = float(digest.get("avg_ticket", 0.0) or 0.0)
+    daily_run = float(digest.get("daily_run_rate", 0.0) or 0.0)
+    liquid = float(digest.get("liquid_balance", 0.0) or 0.0)
+    coverage = float(digest.get("coverage_ratio", 0.0) or 0.0)
+    heloc_name = digest.get("heloc_name", "HELOC")
+    heloc_bal = float(digest.get("heloc_balance", 0.0) or 0.0)
+    daily_int = float(digest.get("daily_interest_cost", 0.0) or 0.0)
+    period_int = float(digest.get("period_interest_cost", 0.0) or 0.0)
+
+    lines = [
+        f"## 📊 FinSage Executive CFO Digest: {period_title} Recap",
+        f"_{period_label}_\n",
+        "### 💰 Outflow & Liquidity Posture",
+        f"• **Total Spend**: ${total_spend:,.2f} (~${daily_run:,.2f}/day)",
+        f"• **Transactions**: {txn_count} (avg ${avg_ticket:,.2f}/ticket)",
+        f"• **Liquid Reserves**: ${liquid:,.2f} ({coverage:.1f}x fixed monthly buffer)",
+    ]
+    if heloc_bal > 0:
+        lines.append(
+            f"• **Debt Carry ({heloc_name})**: ${heloc_bal:,.2f} | Accrued ~${period_int:,.2f} interest (${daily_int:,.2f}/day)"
+        )
+    lines.append("")
+
+    top_cats = digest.get("top_categories", [])
+    if top_cats:
+        lines.append("### 🏷️ Top Outflow Categories")
+        for c in top_cats:
+            lines.append(
+                f"• **{c['category_name']}**: ${c['total']:,.2f} ({c.get('pct', 0.0):.1f}% • {c['count']} txns)"
+            )
+        lines.append("")
+
+    top_merchs = digest.get("top_merchants", [])
+    if top_merchs:
+        lines.append("### 🏬 Top Merchants by Spend")
+        for m in top_merchs:
+            lines.append(f"• **{m['merchant']}**: ${m['total']:,.2f} ({m['count']} txns)")
+        lines.append("")
+
+    takeaways = digest.get("cfo_takeaways", [])
+    if takeaways:
+        lines.append("### 🎯 Strategic CFO Takeaways")
+        for t in takeaways:
+            lines.append(f"• {t}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def get_executive_cfo_digest(period: str = "weekly") -> str:
+    """
+    Retrieves the Executive CFO Digest (weekly or monthly) summarizing spend volume,
+    category and merchant concentration, debt carry, and strategic capital allocation actions.
+
+    Args:
+        period: 'weekly' (trailing 7 days) or 'monthly' (month-to-date). Default 'weekly'.
+    """
+    target_project = BQ_PROJECT_ID
+    target_dataset = BQ_DATASET_ID
+    if not target_project:
+        return "Error: BQ_PROJECT_ID is not configured."
+
+    try:
+        if bigquery:
+            bq = bigquery.Client(project=target_project)
+        else:
+            return "BigQuery client is not available."
+    except Exception as e:
+        return f"Error initializing BigQuery client: {e}"
+
+    digest = generate_executive_digest(bq, target_project, target_dataset, period=period)
+    return build_executive_digest_markdown(digest)
