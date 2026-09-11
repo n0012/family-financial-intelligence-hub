@@ -35,6 +35,7 @@ from app.config import (
     BQ_DATASET_ID,
     BQ_PROJECT_ID,
     get_account_overrides,
+    get_chat_action_target,
     get_decommissioned_account_ids,
     get_excluded_institutions,
     get_rates_config,
@@ -966,7 +967,8 @@ def build_recategorization_card(
     timestamp: int,
     signature: str,
 ) -> dict:
-    """Builds an interactive Google Chat Card v2 with HMAC-signed confirmation buttons."""
+    target_action = get_chat_action_target("confirm_recategorize")
+    cancel_action = get_chat_action_target("cancel_recategorize")
     return {
         "cardId": f"recat_{transaction_id}_{timestamp}",
         "card": {
@@ -983,21 +985,21 @@ def build_recategorization_card(
                         {
                             "decoratedText": {
                                 "topLabel": "Merchant & Amount",
-                                "text": f"<b>{merchant_name}</b> &nbsp;•&nbsp; <b>${amount:,.2f}</b>",
+                                "text": f"<b>{merchant_name}</b> • <b>${amount:,.2f}</b>",
                                 "startIcon": {"knownIcon": "STORE"},
                             }
                         },
                         {
                             "decoratedText": {
                                 "topLabel": "Date & Transaction ID",
-                                "text": f"{txn_date} (ID: <code>{transaction_id}</code>)",
+                                "text": f"{txn_date} (ID: {transaction_id})",
                                 "startIcon": {"knownIcon": "CLOCK"},
                             }
                         },
                         {
                             "decoratedText": {
                                 "topLabel": "Category Reclassification",
-                                "text": f"Current: <i>{current_category}</i> ➔ Proposed: <b>{new_category}</b>",
+                                "text": f"Current: <i>{current_category}</i> → Proposed: <b>{new_category}</b>",
                                 "startIcon": {"knownIcon": "CONFIRMATION_NUMBER_ICON"},
                             }
                         },
@@ -1006,10 +1008,10 @@ def build_recategorization_card(
                                 "buttons": [
                                     {
                                         "text": "Confirm Update",
-                                        "color": {"red": 0.12, "green": 0.53, "blue": 0.90, "alpha": 1.0},
+                                        "color": {"red": 0.12, "green": 0.53, "blue": 0.90},
                                         "onClick": {
                                             "action": {
-                                                "function": "confirm_recategorize",
+                                                "function": target_action,
                                                 "parameters": [
                                                     {"key": "action", "value": "confirm_recategorize"},
                                                     {"key": "transaction_id", "value": str(transaction_id)},
@@ -1026,7 +1028,7 @@ def build_recategorization_card(
                                         "text": "Cancel",
                                         "onClick": {
                                             "action": {
-                                                "function": "cancel_recategorize",
+                                                "function": cancel_action,
                                                 "parameters": [
                                                     {"key": "action", "value": "cancel_recategorize"},
                                                     {"key": "transaction_id", "value": str(transaction_id)},
@@ -1051,10 +1053,10 @@ def build_recategorization_success_card(
     amount: float | None = None,
 ) -> dict:
     """Builds a confirmation Card v2 acknowledging successful recategorization in Monarch."""
-    details = f"Transaction <code>#{transaction_id}</code>"
+    details = f"Transaction #{transaction_id}"
     if merchant_name:
         amt_str = f" (${amount:,.2f})" if amount is not None else ""
-        details = f"<b>{merchant_name}</b>{amt_str} (ID: <code>{transaction_id}</code>)"
+        details = f"<b>{merchant_name}</b>{amt_str} (ID: {transaction_id})"
 
     return {
         "cardId": f"recat_success_{transaction_id}",
@@ -1245,15 +1247,24 @@ def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str,
     Extracts action name and string key-value parameters from Google Chat or
     Google Workspace Add-on CARD_CLICKED interaction payloads.
     """
-    # 1. Google Workspace Add-on commonEventObject
-    common_obj = payload.get("commonEventObject") or {}
+    # 1. Google Workspace Add-on commonEventObject or direct common
+    common_obj = payload.get("commonEventObject") or payload.get("common") or {}
     if common_obj:
         action_name = common_obj.get("invokedFunction") or common_obj.get("action")
         params = common_obj.get("parameters") or {}
+        params_dict = {}
         if isinstance(params, dict):
-            if not action_name and "action" in params:
-                action_name = params["action"]
-            return action_name, {str(k): str(v) for k, v in params.items()}
+            params_dict = {str(k): str(v) for k, v in params.items()}
+        elif isinstance(params, list):
+            for item in params:
+                if isinstance(item, dict) and "key" in item:
+                    params_dict[str(item["key"])] = str(item.get("value", ""))
+
+        # If action_name is a pubsub topic path or missing, fallback to explicit "action" parameter
+        if (not action_name or "/topics/" in str(action_name) or str(action_name).startswith("projects/")) and "action" in params_dict:
+            action_name = params_dict["action"]
+
+        return action_name, params_dict
 
     # 2. Google Chat direct action object
     action_obj = payload.get("action") or {}
@@ -1268,7 +1279,7 @@ def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str,
         elif isinstance(raw_params, dict):
             params_dict = {str(k): str(v) for k, v in raw_params.items()}
 
-        if not action_name and "action" in params_dict:
+        if (not action_name or "/topics/" in str(action_name) or str(action_name).startswith("projects/")) and "action" in params_dict:
             action_name = params_dict["action"]
 
         return action_name, params_dict

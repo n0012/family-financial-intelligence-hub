@@ -31,6 +31,22 @@ DEFAULT_ACCOUNT_OVERRIDES: dict[str, dict] = {}
 DEFAULT_EXCLUDED_INSTITUTIONS: set[str] = set()
 
 
+def get_chat_action_target(default_action: str = "confirm_recategorize") -> str:
+    """
+    Returns the target action function for Google Chat Card v2 onClick actions.
+    When operating in Google Workspace Add-ons / Pub/Sub mode, Google Workspace
+    requires the fully-qualified Pub/Sub topic path (projects/<project>/topics/<topic>)
+    as the action function name so that GSuiteAddOns publishes the CARD_CLICKED event.
+    """
+    topic = os.getenv("CHAT_TOPIC", "monarch-chat-incoming")
+    project = BQ_PROJECT_ID
+    if project and project != "family-finance-hub":
+        return f"projects/{project}/topics/{topic}"
+    if os.getenv("CHAT_ACTION_USE_PUBSUB", "false").lower() in ("true", "1", "yes"):
+        return f"projects/{project}/topics/{topic}"
+    return default_action
+
+
 @functools.lru_cache(maxsize=128)
 def resolve_secret(secret_name: str, env_var: str) -> str | None:
     """Resolves secret from Secret Manager latest version, falling back to environment variable.

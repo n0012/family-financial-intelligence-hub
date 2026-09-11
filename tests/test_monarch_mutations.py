@@ -250,6 +250,35 @@ class TestMonarchMutations(unittest.TestCase):
         self.assertEqual(action2, "cancel_recategorize")
         self.assertEqual(params2["transaction_id"], "txn_555")
 
+        # 3. Google Workspace Add-on Pub/Sub topic shape
+        pubsub_addon_payload = {
+            "commonEventObject": {
+                "invokedFunction": "projects/sagely-family-finance/topics/monarch-chat-incoming",
+                "parameters": {
+                    "action": "confirm_recategorize",
+                    "transaction_id": "txn_888",
+                    "category_id": "cat_999",
+                },
+            }
+        }
+        action3, params3 = extract_card_action_parameters(pubsub_addon_payload)
+        self.assertEqual(action3, "confirm_recategorize")
+        self.assertEqual(params3["transaction_id"], "txn_888")
+
+        # 4. Google Chat direct common shape with list of key/value params
+        common_chat_payload = {
+            "common": {
+                "invokedFunction": "projects/sagely-family-finance/topics/monarch-chat-incoming",
+                "parameters": [
+                    {"key": "action", "value": "snooze_alert"},
+                    {"key": "alert_key", "value": "price_creep:netflix"},
+                ],
+            }
+        }
+        action4, params4 = extract_card_action_parameters(common_chat_payload)
+        self.assertEqual(action4, "snooze_alert")
+        self.assertEqual(params4["alert_key"], "price_creep:netflix")
+
     def test_webhook_card_clicked_confirm_success(self):
         now_ts = int(datetime.now(UTC).timestamp())
         sig = generate_mutation_signature("txn_777", "cat_888", "user@example.com", now_ts)

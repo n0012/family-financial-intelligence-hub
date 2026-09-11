@@ -21,7 +21,7 @@ try:
 except ImportError:
     bigquery = None
 
-from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, resolve_secret
+from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, get_chat_action_target, resolve_secret
 
 logger = logging.getLogger("monarch-gemini.alerts")
 
@@ -1398,7 +1398,7 @@ def build_chat_card_v2(
                                 "text": "💤 Snooze 7 Days",
                                 "onClick": {
                                     "action": {
-                                        "function": "snooze_alert",
+                                        "function": get_chat_action_target("snooze_alert"),
                                         "parameters": [
                                             {"key": "action", "value": "snooze_alert"},
                                             {"key": "alert_key", "value": snooze_key},
