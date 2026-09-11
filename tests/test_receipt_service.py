@@ -529,7 +529,7 @@ class TestGoogleChatReceiptWebhookAndJob(unittest.TestCase):
             "message": {
                 "name": "spaces/AAA/messages/123",
                 "text": "@FinSage /tax 2026",
-                "sender": {"displayName": "Nick", "email": "test@family.internal"},
+                "sender": {"displayName": "FinSage User", "email": "test@family.internal"},
                 "space": {"name": "spaces/AAA"},
             },
         }
@@ -547,7 +547,7 @@ class TestGoogleChatReceiptWebhookAndJob(unittest.TestCase):
             "message": {
                 "name": "spaces/AAA/messages/456",
                 "text": "@FinSage /receipt",
-                "sender": {"displayName": "Nick", "email": "test@family.internal"},
+                "sender": {"displayName": "FinSage User", "email": "test@family.internal"},
                 "space": {"name": "spaces/AAA"},
                 "attachment": [{"contentName": "receipt.jpg", "contentType": "image/jpeg", "name": "media/12345"}],
             },
