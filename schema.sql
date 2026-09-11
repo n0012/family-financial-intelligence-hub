@@ -70,6 +70,21 @@ CREATE TABLE IF NOT EXISTS `family_finance.alert_suppression` (
     reason STRING
 );
 
+-- 5. Mutation & Guardrail Audit Log Table (PR 10)
+CREATE TABLE IF NOT EXISTS `family_finance.mutation_audit_log` (
+    mutation_id STRING NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    user_email STRING NOT NULL,
+    action_type STRING NOT NULL,     -- 'RECATEGORIZE_TRANSACTION', 'SNOOZE_ALERT', 'STORE_PREFERENCE'
+    target_id STRING NOT NULL,       -- transaction_id, alert_key, preference_key
+    previous_value STRING,           -- JSON/string of prior state
+    new_value STRING,                -- JSON/string of proposed/applied state
+    status STRING NOT NULL,          -- 'SUCCESS', 'REJECTED', 'FAILED', 'RATE_LIMITED', 'NOOP', 'CANCELLED'
+    signature_valid BOOL,            -- TRUE if HMAC verified, FALSE if signature failed/missing, NULL if N/A
+    details STRING,                  -- notes, reason for rejection or failure
+    created_at TIMESTAMP
+);
+
 -- ==============================================================================
 -- Analytical & Optimization Views for Conversational Analytics Agent
 -- ==============================================================================

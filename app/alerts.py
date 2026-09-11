@@ -712,12 +712,20 @@ def generate_daily_brief_synopsis(
     focus_items_md = []
 
     if query_failed:
-        focus_items.append("⚠️ <b>Data Degraded:</b> Live BigQuery posture query failed. Check credentials and dataset views.")
-        focus_items_md.append("⚠️ **Data Degraded**: Live BigQuery posture query failed. Check credentials and dataset views.")
+        focus_items.append(
+            "⚠️ <b>Data Degraded:</b> Live BigQuery posture query failed. Check credentials and dataset views."
+        )
+        focus_items_md.append(
+            "⚠️ **Data Degraded**: Live BigQuery posture query failed. Check credentials and dataset views."
+        )
     else:
         if liquid_balance < 0:
-            focus_items.append(f"🚨 <b>Overdrawn Checking:</b> Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately.")
-            focus_items_md.append(f"🚨 **Overdrawn Checking**: Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately.")
+            focus_items.append(
+                f"🚨 <b>Overdrawn Checking:</b> Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately."
+            )
+            focus_items_md.append(
+                f"🚨 **Overdrawn Checking**: Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately."
+            )
 
         price_alerts = [a for a in alerts if a.get("type") == "PRICE_CREEP"]
         for pa in price_alerts[:2]:
@@ -732,7 +740,9 @@ def generate_daily_brief_synopsis(
 
         overlap_alerts = [a for a in alerts if a.get("type") == "SUBSCRIPTION_OVERLAP"]
         for oa in overlap_alerts[:1]:
-            focus_items.append(f"🔄 <b>Subscription Duplication:</b> {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
+            focus_items.append(
+                f"🔄 <b>Subscription Duplication:</b> {oa.get('title', '')}. {oa.get('suggested_fix', '')}"
+            )
             focus_items_md.append(f"**Subscription Duplication**: {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
 
         budget_alerts = [a for a in alerts if a.get("type") in ("BUDGET_CAP_EXCEEDED", "BUDGET_CAP_PACING")]
@@ -754,8 +764,12 @@ def generate_daily_brief_synopsis(
             )
 
         if not focus_items:
-            focus_items.append("✅ <b>All Systems Normal:</b> Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
-            focus_items_md.append("**All Systems Normal**: Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
+            focus_items.append(
+                "✅ <b>All Systems Normal:</b> Spend is tracking normally and no recurring charge spikes or anomalies were detected today."
+            )
+            focus_items_md.append(
+                "**All Systems Normal**: Spend is tracking normally and no recurring charge spikes or anomalies were detected today."
+            )
 
     return {
         "date": brief_date_str,
@@ -848,6 +862,7 @@ def build_chat_card_v2(
             snooze_ts = int(time.time())
             try:
                 from app.monarch_service import generate_snooze_signature
+
                 snooze_sig = generate_snooze_signature(snooze_key, snooze_days, snooze_ts)
             except Exception:
                 snooze_sig = ""
@@ -978,7 +993,6 @@ def build_markdown_fallback(
     return "\n".join(lines)
 
 
-
 def collect_all_alerts(
     bq: Any,
     target_project: str,
@@ -1076,7 +1090,6 @@ def get_daily_morning_brief() -> str:
     alerts = collect_all_alerts(bq, target_project, target_dataset)
     synopsis = generate_daily_brief_synopsis(bq, target_project, target_dataset, alerts)
     return build_markdown_fallback(alerts, synopsis=synopsis)
-
 
 
 def snooze_spend_alert(alert_key_or_name: str, days: int = 7) -> str:
