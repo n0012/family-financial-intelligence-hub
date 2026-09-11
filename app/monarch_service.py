@@ -526,23 +526,67 @@ async def get_live_transaction_async(transaction_id: str) -> dict:
     """Fetches details for a single transaction directly from Monarch Money."""
     client = await get_monarch_client()
     try:
-        txn = await client.get_transaction_details(transaction_id)
-        if not txn:
+        raw_txn = await client.get_transaction_details(transaction_id)
+        if not raw_txn:
+            return {"found": False, "message": f"Transaction {transaction_id} not found."}
+
+        # Monarch GraphQL wraps the transaction drawer under 'getTransaction'
+        txn = raw_txn.get("getTransaction") or raw_txn.get("transaction") or raw_txn
+        if not isinstance(txn, dict):
             return {"found": False, "message": f"Transaction {transaction_id} not found."}
 
         cat = txn.get("category") or {}
         acc = txn.get("account") or {}
         merchant = txn.get("merchant") or {}
 
+        # Handle nested merchant object or string / fallback to plaidName / name
+        merchant_name = None
+        if isinstance(merchant, dict) and merchant.get("name"):
+            merchant_name = merchant["name"]
+        elif isinstance(merchant, str) and merchant:
+            merchant_name = merchant
+        else:
+            merchant_name = txn.get("plaidName") or txn.get("name")
+
+        category_name = None
+        if isinstance(cat, dict) and cat.get("name"):
+            category_name = cat["name"]
+        elif isinstance(cat, str) and cat:
+            category_name = cat
+
+        amount_val = float(txn.get("amount") or 0.0)
+        txn_date = txn.get("date")
+
+        # Fallback to BigQuery raw_transactions if live metadata is missing or incomplete
+        if not merchant_name or amount_val == 0.0 or not txn_date or not category_name:
+            try:
+                from app.bq_service import run_query
+
+                bq_rows = run_query(
+                    f"SELECT merchant_name, clean_merchant_name, amount, transaction_date, category_name "
+                    f"FROM `{BQ_PROJECT_ID}.family_finance.raw_transactions` "
+                    f"WHERE transaction_id = '{transaction_id}' LIMIT 1"
+                )
+                if bq_rows:
+                    row = bq_rows[0]
+                    if not merchant_name:
+                        merchant_name = row.get("clean_merchant_name") or row.get("merchant_name")
+                    if amount_val == 0.0 and row.get("amount") is not None:
+                        amount_val = float(row.get("amount"))
+                    if not txn_date and row.get("transaction_date"):
+                        txn_date = str(row.get("transaction_date"))
+                    if not category_name and row.get("category_name"):
+                        category_name = str(row.get("category_name"))
+            except Exception as bq_err:
+                logger.debug(f"BigQuery fallback lookup skipped for txn {transaction_id}: {bq_err}")
+
         return {
             "found": True,
-            "transaction_id": txn.get("id"),
-            "date": txn.get("date"),
-            "amount": float(txn.get("amount") or 0.0),
-            "merchant_name": merchant.get("name")
-            if isinstance(merchant, dict)
-            else (txn.get("plaidName") or txn.get("name")),
-            "category_name": cat.get("name") if isinstance(cat, dict) else str(cat),
+            "transaction_id": txn.get("id") or transaction_id,
+            "date": txn_date,
+            "amount": amount_val,
+            "merchant_name": merchant_name,
+            "category_name": category_name or "Uncategorized",
             "account_name": acc.get("displayName") if isinstance(acc, dict) else str(acc),
             "pending": txn.get("pending", False),
             "is_recurring": txn.get("isRecurring", False),
@@ -969,6 +1013,8 @@ def build_recategorization_card(
 ) -> dict:
     target_action = get_chat_action_target("confirm_recategorize")
     cancel_action = get_chat_action_target("cancel_recategorize")
+    amount_clean = abs(float(amount or 0.0))
+    date_display = f"{txn_date} " if txn_date else ""
     return {
         "cardId": f"recat_{transaction_id}_{timestamp}",
         "card": {
@@ -985,14 +1031,14 @@ def build_recategorization_card(
                         {
                             "decoratedText": {
                                 "topLabel": "Merchant & Amount",
-                                "text": f"<b>{merchant_name}</b> • <b>${amount:,.2f}</b>",
+                                "text": f"<b>{merchant_name}</b> • <b>${amount_clean:,.2f}</b>",
                                 "startIcon": {"knownIcon": "STORE"},
                             }
                         },
                         {
                             "decoratedText": {
                                 "topLabel": "Date & Transaction ID",
-                                "text": f"{txn_date} (ID: {transaction_id})",
+                                "text": f"{date_display}(ID: {transaction_id})",
                                 "startIcon": {"knownIcon": "CLOCK"},
                             }
                         },
@@ -1017,6 +1063,8 @@ def build_recategorization_card(
                                                     {"key": "transaction_id", "value": str(transaction_id)},
                                                     {"key": "category_id", "value": str(category_id)},
                                                     {"key": "category_name", "value": str(new_category)},
+                                                    {"key": "merchant_name", "value": str(merchant_name)},
+                                                    {"key": "amount", "value": f"{amount_clean:.2f}"},
                                                     {"key": "user_email", "value": str(user_email)},
                                                     {"key": "timestamp", "value": str(timestamp)},
                                                     {"key": "signature", "value": str(signature)},
@@ -1055,7 +1103,7 @@ def build_recategorization_success_card(
     """Builds a confirmation Card v2 acknowledging successful recategorization in Monarch."""
     details = f"Transaction #{transaction_id}"
     if merchant_name:
-        amt_str = f" (${amount:,.2f})" if amount is not None else ""
+        amt_str = f" (${abs(amount):,.2f})" if amount is not None else ""
         details = f"<b>{merchant_name}</b>{amt_str} (ID: {transaction_id})"
 
     return {
@@ -1142,11 +1190,15 @@ async def propose_transaction_recategorization_async(
     sig = generate_mutation_signature(cleaned_id, new_cat_id, user_email, timestamp)
 
     # 6. Build Card v2
+    merchant_name = txn.get("merchant_name") or "Merchant"
+    amount = abs(float(txn.get("amount") or 0.0))
+    txn_date = str(txn.get("date") or "")
+
     card = build_recategorization_card(
         transaction_id=cleaned_id,
-        merchant_name=txn.get("merchant_name") or "Merchant",
-        amount=float(txn.get("amount") or 0.0),
-        txn_date=str(txn.get("date") or ""),
+        merchant_name=merchant_name,
+        amount=amount,
+        txn_date=txn_date,
         current_category=current_cat_name,
         new_category=new_cat_name,
         category_id=new_cat_id,
@@ -1160,9 +1212,9 @@ async def propose_transaction_recategorization_async(
     return {
         "status": "confirmation_required",
         "transaction_id": cleaned_id,
-        "merchant": txn.get("merchant_name"),
-        "amount": txn.get("amount"),
-        "date": txn.get("date"),
+        "merchant": merchant_name,
+        "amount": amount,
+        "date": txn_date,
         "current_category": current_cat_name,
         "proposed_category": new_cat_name,
         "card": card,

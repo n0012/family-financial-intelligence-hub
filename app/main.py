@@ -602,6 +602,10 @@ def post_to_chat_thread(
             )
             if resp.status_code == 200:
                 return True
+            else:
+                logger.warning(
+                    f"Google Chat API async post returned {resp.status_code}: {resp.text}"
+                )
         except Exception as e:
             logger.warning(f"Google Chat API async post encountered error: {e}; falling back to webhook.")
 
@@ -617,7 +621,7 @@ def post_to_chat_thread(
         url = f"{url}{sep}messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
     payload = {"text": formatted_text}
-    if thread_name:
+    if thread_name and thread_name != "None" and thread_name != "spaces/None":
         payload["thread"] = {"name": thread_name}
     if cards_v2:
         payload["cardsV2"] = cards_v2
@@ -625,9 +629,34 @@ def post_to_chat_thread(
     try:
         resp = requests.post(url, json=payload, timeout=10)
         logger.info(f"Posted async reply via webhook to thread {thread_name}: status={resp.status_code}")
+        if resp.status_code != 200:
+            logger.warning(f"Webhook post returned {resp.status_code}: {resp.text}")
         return resp.status_code == 200
     except Exception as e:
         logger.error(f"Failed to post async reply via webhook: {e}")
+        return False
+
+
+def patch_chat_card(message_name: str, cards_v2: list) -> bool:
+    """Updates the cards of an existing message in-place (e.g. replacing action buttons upon confirmation)."""
+    if not message_name:
+        return False
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/chat.bot"])
+        creds.refresh(GoogleAuthRequest())
+        headers = {
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+        }
+        url = f"https://chat.googleapis.com/v1/{message_name}?updateMask=cardsV2"
+        payload = {"cardsV2": cards_v2}
+        resp = requests.patch(url, headers=headers, json=payload, timeout=10)
+        logger.info(f"Google Chat API patch {message_name}: status={resp.status_code}")
+        if resp.status_code != 200:
+            logger.warning(f"Google Chat API patch returned {resp.status_code}: {resp.text}")
+        return resp.status_code == 200
+    except Exception as e:
+        logger.warning(f"Google Chat API patch encountered error: {e}")
         return False
 
 
@@ -791,9 +820,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     chat_obj = raw_payload.get("chat", {}) or {}
     message_payload = chat_obj.get("messagePayload", {}) or {}
     app_command_payload = chat_obj.get("appCommandPayload", {}) or {}
+    button_clicked_payload = chat_obj.get("buttonClickedPayload", {}) or {}
     message = (
         message_payload.get("message")
         or app_command_payload.get("message")
+        or button_clicked_payload.get("message")
         or chat_obj.get("message")
         or raw_payload.get("message")
         or {}
@@ -803,6 +834,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         or (
             "CARD_CLICKED"
             if raw_payload.get("action")
+            or button_clicked_payload
             or (raw_payload.get("commonEventObject", {}).get("invokedFunction"))
             or (raw_payload.get("common", {}).get("invokedFunction"))
             or (raw_payload.get("commonEventObject", {}).get("parameters"))
@@ -824,7 +856,8 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
     # Parse space.name robustly across all Google Chat event shapes
     space_obj = (
-        message.get("space")
+        button_clicked_payload.get("space")
+        or message.get("space")
         or message_payload.get("space")
         or app_command_payload.get("space")
         or chat_obj.get("space")
@@ -838,6 +871,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     # Parse thread.name robustly across all Google Chat event shapes
     thread_obj = (
         message.get("thread")
+        or button_clicked_payload.get("thread")
         or message_payload.get("thread")
         or app_command_payload.get("thread")
         or chat_obj.get("thread")
@@ -887,6 +921,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             txn_id = action_params.get("transaction_id", "")
             cat_id = action_params.get("category_id", "")
             cat_name = action_params.get("category_name", "Updated Category")
+            merchant_name = action_params.get("merchant_name")
+            raw_amount = action_params.get("amount")
+            amount_val = float(raw_amount) if raw_amount else None
             ts_str = action_params.get("timestamp", "0")
             target_user = action_params.get("user_email", "unknown")
             sig = action_params.get("signature", "")
@@ -951,7 +988,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 success_card = build_recategorization_success_card(
                     transaction_id=txn_id,
                     category_name=cat_name,
+                    merchant_name=merchant_name,
+                    amount=amount_val,
                 )
+                if msg_name:
+                    patch_chat_card(msg_name, [success_card])
                 return respond(
                     f"✅ Transaction #{txn_id} was already reclassified to *{cat_name}*.",
                     cards_v2=[success_card],
@@ -978,7 +1019,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 success_card = build_recategorization_success_card(
                     transaction_id=txn_id,
                     category_name=cat_name,
+                    merchant_name=merchant_name,
+                    amount=amount_val,
                 )
+                if msg_name:
+                    patch_chat_card(msg_name, [success_card])
                 success_msg = (
                     f"✅ Transaction #{txn_id} was successfully reclassified to *{cat_name}* in Monarch Money."
                 )
