@@ -161,14 +161,37 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(res["alert_count"], 0)
         self.assertFalse(res["webhook_dispatched"])
 
+    def test_check_subscription_price_creep(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.merchant = "CloudStream"
+        mock_row.latest_charge = 19.99
+        mock_row.prior_charge = 15.99
+        mock_row.price_increase_amount = 4.00
+        mock_row.pct_increase = 25.0
+        mock_row.estimated_annual_cost = 239.88
+        mock_row.effective_date = "2026-09-01"
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        found = alerts.check_subscription_price_creep(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "PRICE_CREEP")
+        self.assertEqual(a["severity"], "WARNING")
+        self.assertEqual(a["alert_key"], "price_creep:cloudstream")
+        self.assertIn("+25.0%", a["title"])
+        self.assertIn("$15.99 to $19.99", a["detail"])
+        self.assertIn("2026-09-01", a["detail"])
+
     def test_check_subscription_overlap(self):
         mock_bq = MagicMock()
         mock_row = MagicMock()
-        mock_row.category_name = "Entertainment & Streaming"
-        mock_row.active_subscriptions_count = 3
-        mock_row.category_annual_run_rate = 540.0
+        mock_row.domain_name = "VIDEO_STREAMING"
+        mock_row.functional_domain = "VIDEO_STREAMING"
+        mock_row.active_service_count = 3
+        mock_row.combined_annual_cost = 540.0
         mock_row.combined_monthly_cost = 45.0
-        mock_row.active_services = "Netflix, Hulu, HBO"
+        mock_row.active_services = "StreamA, StreamB, StreamC"
         mock_bq.query.return_value.result.return_value = [mock_row]
 
         found = alerts.check_subscription_overlap(mock_bq, "proj", "ds")
@@ -176,8 +199,9 @@ class TestAlerts(unittest.TestCase):
         a = found[0]
         self.assertEqual(a["type"], "SUBSCRIPTION_OVERLAP")
         self.assertEqual(a["severity"], "WARNING")
-        self.assertEqual(a["alert_key"], "overlap:entertainment_&_streaming")
-        self.assertIn("Netflix, Hulu, HBO", a["detail"])
+        self.assertEqual(a["alert_key"], "overlap:video_streaming")
+        self.assertIn("Video Streaming", a["title"])
+        self.assertIn("StreamA, StreamB, StreamC", a["detail"])
         self.assertIn("$45.00/mo", a["detail"])
 
     def test_check_micro_transaction_leakage(self):

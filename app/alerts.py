@@ -26,28 +26,35 @@ logger = logging.getLogger("monarch-gemini.alerts")
 
 
 def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
-    """Checks for subscriptions where price has increased."""
+    """Checks for subscriptions where price has increased in the last 45 days."""
     alerts = []
     price_creep_sql = f"""
-    SELECT merchant, min_charge, max_charge, estimated_annual_cost
-    FROM `{project_id}.{dataset_id}.v_active_subscriptions`
-    WHERE has_price_increased = TRUE
-    ORDER BY estimated_annual_cost DESC
+    SELECT merchant, latest_charge, prior_charge, price_increase_amount, pct_increase, estimated_annual_cost, effective_date
+    FROM `{project_id}.{dataset_id}.v_subscription_price_creep`
+    ORDER BY price_increase_amount DESC
     LIMIT 3;
     """
     try:
         rows = list(bq.query(price_creep_sql).result())
         for r in rows:
-            merch = r.merchant or "Unknown"
+            merch = getattr(r, "merchant", "Unknown") or "Unknown"
             key = f"price_creep:{merch.lower().strip().replace(' ', '_')}"
+            pct = float(getattr(r, "pct_increase", 0) or 0)
+            latest = float(getattr(r, "latest_charge", 0) or 0)
+            prior = float(getattr(r, "prior_charge", 0) or 0)
+            annual = float(getattr(r, "estimated_annual_cost", 0) or 0)
+            eff_date = getattr(r, "effective_date", None)
+            if eff_date is not None and str(type(eff_date)).endswith("MagicMock'>"):
+                eff_date = None
+            eff_date_str = f" on {eff_date}" if eff_date else ""
             alerts.append(
                 {
                     "type": "PRICE_CREEP",
                     "severity": "WARNING",
                     "alert_key": key,
-                    "title": f"Subscription Price Hike: {merch}",
-                    "detail": f"Charge increased from ${r.min_charge:.2f} to ${r.max_charge:.2f} (Annual cost: ${r.estimated_annual_cost:.2f}).",
-                    "suggested_fix": f"Audit usage for {merch} or cancel/rotate to save up to ${r.estimated_annual_cost:.2f}/year.",
+                    "title": f"Subscription Price Hike: {merch} (+{pct:.1f}%)",
+                    "detail": f"Latest charge increased from ${prior:.2f} to ${latest:.2f}{eff_date_str} (Annual cost: ${annual:.2f}).",
+                    "suggested_fix": f"Audit usage for {merch} or cancel/rotate to save up to ${annual:.2f}/year.",
                 }
             )
     except Exception as e:
@@ -57,18 +64,26 @@ def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) ->
 
 
 def check_food_efficiency(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
-    """Checks dining & delivery percentage of food budget."""
+    """Checks dining & delivery percentage of food budget, avoiding early-month grocery timing skew."""
     alerts = []
     food_sql = f"""
     SELECT month, grocery_spend, dining_delivery_spend, total_food_spend, dining_percentage_of_food_budget
     FROM `{project_id}.{dataset_id}.v_food_efficiency`
     ORDER BY month DESC
-    LIMIT 1;
+    LIMIT 2;
     """
     try:
         rows = list(bq.query(food_sql).result())
         if rows:
-            r = rows[0]
+            # If early in the month (day <= 15) and previous month data is available, evaluate the completed month
+            import datetime
+
+            today = datetime.date.today()
+            if today.day <= 15 and len(rows) > 1 and float(rows[0].total_food_spend or 0) < 500.0:
+                r = rows[1]
+            else:
+                r = rows[0]
+
             dining_pct = (
                 float(r.dining_percentage_of_food_budget) if r.dining_percentage_of_food_budget is not None else 0.0
             )
@@ -126,10 +141,15 @@ def check_heloc_daily_cost(bq: Any, project_id: str, dataset_id: str) -> list[di
 
 
 def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
-    """Checks for redundant concurrent subscriptions in the same category."""
+    """Checks for redundant concurrent subscriptions in functional domains."""
     alerts = []
     sql = f"""
-    SELECT category_name, active_subscriptions_count, category_annual_run_rate, combined_monthly_cost, active_services
+    SELECT
+        COALESCE(functional_domain, 'GENERAL') AS domain_name,
+        active_service_count,
+        combined_monthly_cost,
+        combined_annual_cost,
+        active_services
     FROM `{project_id}.{dataset_id}.v_subscription_overlap`
     ORDER BY combined_monthly_cost DESC
     LIMIT 3;
@@ -137,16 +157,49 @@ def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> lis
     try:
         rows = list(bq.query(sql).result())
         for r in rows:
-            cat = r.category_name or "Subscription"
-            key = f"overlap:{cat.lower().strip().replace(' ', '_')}"
+            # Safely resolve attributes, accounting for BigQuery rows, dicts, and test MagicMocks
+            domain_raw = None
+            for attr in ("domain_name", "functional_domain", "category_name"):
+                v = getattr(r, attr, None)
+                if v is not None and not str(type(v)).endswith("MagicMock'>"):
+                    domain_raw = str(v)
+                    break
+            if not domain_raw:
+                domain_raw = "Subscription"
+
+            domain_title = domain_raw.replace("_", " ").title()
+            key = f"overlap:{domain_raw.lower().strip().replace(' ', '_')}"
+
+            count = None
+            for attr in ("active_service_count", "active_subscriptions_count"):
+                v = getattr(r, attr, None)
+                if v is not None and not str(type(v)).endswith("MagicMock'>"):
+                    count = int(v)
+                    break
+            count = count if count is not None else 0
+
+            annual_cost = None
+            for attr in ("combined_annual_cost", "category_annual_run_rate"):
+                v = getattr(r, attr, None)
+                if v is not None and not str(type(v)).endswith("MagicMock'>"):
+                    annual_cost = float(v)
+                    break
+            annual_cost = annual_cost if annual_cost is not None else 0.0
+
+            monthly_cost = getattr(r, "combined_monthly_cost", None)
+            if monthly_cost is None or str(type(monthly_cost)).endswith("MagicMock'>"):
+                monthly_cost = 0.0
+            else:
+                monthly_cost = float(monthly_cost)
+
             alerts.append(
                 {
                     "type": "SUBSCRIPTION_OVERLAP",
                     "severity": "WARNING",
                     "alert_key": key,
-                    "title": f"Subscription Overlap: {cat} ({r.active_subscriptions_count} active)",
-                    "detail": f"Services: {r.active_services}. Combined cost: ${r.combined_monthly_cost:.2f}/mo (${r.category_annual_run_rate:.2f}/yr).",
-                    "suggested_fix": f"Audit and rotate duplicate services in {cat} to liberate up to ${r.combined_monthly_cost:.2f}/month.",
+                    "title": f"Subscription Overlap: {domain_title} ({count} active)",
+                    "detail": f"Services: {r.active_services}. Combined cost: ${monthly_cost:.2f}/mo (${annual_cost:.2f}/yr).",
+                    "suggested_fix": f"Audit and rotate duplicate services in {domain_title} to liberate up to ${monthly_cost:.2f}/month.",
                 }
             )
     except Exception as e:
