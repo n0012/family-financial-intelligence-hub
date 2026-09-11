@@ -16,9 +16,7 @@ from google.cloud import bigquery
 
 logger = logging.getLogger("monarch-gemini.bq")
 
-FORBIDDEN_SQL_PATTERN = (
-    r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke|export\s+data|call|execute\s+immediate|declare)\b"
-)
+FORBIDDEN_SQL_PATTERN = r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke|export\s+data|call|execute\s+immediate|declare)\b"
 
 _bq_client: bigquery.Client | None = None
 

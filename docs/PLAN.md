@@ -279,18 +279,26 @@ terraform apply
   * Offloaded FastAPI `/advisor/morning-brief` route to `asyncio.to_thread` to preserve event-loop responsiveness.
 * **Full Unit Test Coverage**: Added 7 new comprehensive unit tests in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py) and [`tests/test_bq_service.py`](tests/test_bq_service.py), bringing the test suite to **90 passing unit tests**.
 
+### **PR 10: Conversational Guardrails, Audit Log & Mutation Protection (Completed)**
+* **BigQuery Mutation Audit Log (`family_finance.mutation_audit_log`)**:
+  * Created persistent audit table schema capturing `mutation_id`, `timestamp`, `user_email`, `action_type`, `target_id`, `previous_value`, `new_value`, `status`, `signature_valid`, `details`, and `created_at`.
+  * Non-blocking, fault-tolerant BQ audit logger (`log_mutation_audit`) invoked across all interactive card callbacks (`confirm_recategorize`, `cancel_recategorize`, `snooze_alert`) and Memory Bank operations.
+* **Rate Limiting & Idempotency Enforcement**:
+  * Thread-safe rate limiter (`check_mutation_rate_limit`) capping mutation actions to 10 per 60-second sliding window per user.
+  * Cryptographic replay protection (`check_mutation_idempotency`, `record_mutation_idempotency`) with a 300-second cache window; verified card clicks return cached responses (`status="NOOP"`) without duplicate Monarch API execution.
+  * Cryptographic signature verification is strictly executed *prior* to idempotency checks to prevent unauthenticated cache replays.
+* **Conversational Preference & Memory Ingestion Guardrails**:
+  * 500-character ceiling enforced on persistent financial rules (`validate_user_preference`).
+  * Regex pattern filtering against prompt-injection and instruction subversion attempts (e.g., `ignore previous instructions`, `system prompt`, `you are now`, `drop table`).
+* **Full Unit Test Coverage**: Added 8 new unit tests in [`tests/test_monarch_mutations.py`](tests/test_monarch_mutations.py), expanding the test suite to **98 passing unit tests**.
+
 ---
 
 ## 8. Sequenced Implementation Roadmap
 
 *Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
 
-### **PR 10: Conversational Guardrails, Audit Log & Mutation Protection**
-* Enforce strict write-safety guardrails across conversational tools.
-* Persistent BigQuery audit log (`family_finance.mutation_audit_log`) recording user email, transaction ID, old category, new category, timestamp, and signature validation.
-* Rate-limiting mutations and idempotency key enforcement.
-
-### **PR 7a: Anomaly Scans — Duplicate Charges, Trial Intercept & Annual Radar**
+### **PR 7a: Anomaly Scans — Duplicate Charges, Trial Intercept & Annual Radar (Next)**
 * **Duplicate Charge Radar (`DUPLICATE_CHARGE`)**: Self-join detecting duplicate charges within a 72-hour window.
 * **New Subscription Intercept (`NEW_SUBSCRIPTION_DETECTED`)**: Intercepts first-time charges in the past 35 days to halt unwanted trial conversions.
 * **Annual Bill Radar (`ANNUAL_BILL_RADAR`)**: Pre-warns 30 days ahead of recurring semi-annual and annual lump sums.

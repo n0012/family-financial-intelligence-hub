@@ -749,7 +749,6 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(len(param_dict["sig"]), 64)
 
 
-
 class TestJobCLI(unittest.TestCase):
     def test_run_sync_delegation(self):
         from app import job

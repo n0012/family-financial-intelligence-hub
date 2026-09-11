@@ -47,13 +47,17 @@ from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
     CURRENT_USER_EMAIL,
     build_recategorization_success_card,
+    check_mutation_idempotency,
+    check_mutation_rate_limit,
     execute_guarded_recategorization,
     execute_sync,
     extract_card_action_parameters,
     get_live_account_balance,
     get_live_transaction,
     get_monarch_client,
+    log_mutation_audit,
     propose_transaction_recategorization,
+    record_mutation_idempotency,
     request_plaid_refresh,
     verify_mutation_signature,
 )
@@ -235,7 +239,6 @@ async def morning_brief():
     bq = get_bq_client()
     alerts = await asyncio.to_thread(collect_all_alerts, bq, BQ_PROJECT_ID, BQ_DATASET_ID)
     return await asyncio.to_thread(generate_daily_brief_synopsis, bq, BQ_PROJECT_ID, BQ_DATASET_ID, alerts)
-
 
 
 def run_readonly_sql_tool(sql_query: str) -> str:
@@ -778,18 +781,73 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             target_user = action_params.get("user_email", "unknown")
             sig = action_params.get("signature", "")
 
+            # 1. Rate Limiting Check
+            allowed, rate_msg = check_mutation_rate_limit(user_email)
+            if not allowed:
+                logger.warning(f"Mutation rate limit exceeded for user '{user_email}' on txn #{txn_id}")
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="RATE_LIMITED",
+                    new_value=cat_name,
+                    details=rate_msg,
+                )
+                return respond(f"⛔ {rate_msg}")
+
+            # 2. Timestamp Validation
             try:
                 ts = int(ts_str)
             except ValueError:
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    new_value=cat_name,
+                    signature_valid=False,
+                    details="Invalid timestamp in confirmation card",
+                )
                 return respond("⛔ Invalid timestamp in confirmation card.")
 
-            # Validate cryptographic signature & freshness
+            # 3. Cryptographic Signature & Freshness Validation
             is_valid, reason = verify_mutation_signature(txn_id, cat_id, target_user, ts, sig)
             if not is_valid:
                 logger.warning(f"Mutation signature rejected: {reason} (txn={txn_id}, user={user_email})")
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    new_value=cat_name,
+                    signature_valid=False,
+                    details=reason,
+                )
                 return respond(f"⛔ Confirmation rejected: {reason}")
 
-            # Execute guarded mutation
+            # 4. Idempotency Check (prevent duplicate replay mutations for authenticated requests)
+            cached_result = check_mutation_idempotency(user_email, "RECATEGORIZE_TRANSACTION", txn_id, cat_id)
+            if cached_result:
+                logger.info(f"Idempotent replay detected for txn #{txn_id} to category #{cat_id}")
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="NOOP",
+                    new_value=cat_name,
+                    signature_valid=True,
+                    details="Idempotent replay: already executed within cooldown window.",
+                )
+                success_card = build_recategorization_success_card(
+                    transaction_id=txn_id,
+                    category_name=cat_name,
+                )
+                return respond(
+                    f"✅ Transaction #{txn_id} was already reclassified to *{cat_name}*.",
+                    cards_v2=[success_card],
+                )
+
+            # 5. Execute Guarded Mutation
             mutation_result = await execute_guarded_recategorization(
                 transaction_id=txn_id,
                 category_id=cat_id,
@@ -797,6 +855,16 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             )
 
             if mutation_result.get("success"):
+                record_mutation_idempotency(user_email, "RECATEGORIZE_TRANSACTION", txn_id, cat_id, mutation_result)
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="SUCCESS",
+                    new_value=cat_name,
+                    signature_valid=True,
+                    details="Successfully recategorized and synchronized to BigQuery",
+                )
                 success_card = build_recategorization_success_card(
                     transaction_id=txn_id,
                     category_name=cat_name,
@@ -807,10 +875,26 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 return respond(success_msg, cards_v2=[success_card])
             else:
                 err = mutation_result.get("error", "Unknown error")
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="FAILED",
+                    new_value=cat_name,
+                    signature_valid=True,
+                    details=err,
+                )
                 return respond(f"⚠️ Failed to update transaction #{txn_id}: {err}")
 
         elif action_name == "cancel_recategorize":
             txn_id = action_params.get("transaction_id", "")
+            log_mutation_audit(
+                action_type="RECATEGORIZE_TRANSACTION",
+                target_id=txn_id,
+                user_email=user_email,
+                status="CANCELLED",
+                details="User clicked Cancel on confirmation card",
+            )
             return respond(f"🚫 Recategorization for transaction #{txn_id} was cancelled. No changes were made.")
 
         elif action_name == "snooze_alert":
@@ -827,16 +911,34 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             days = max(1, min(days, 90))
 
             # Cryptographically verify snooze action if signature parameters are provided
+            sig_valid = None
             if sig and ts_str:
                 try:
                     ts = int(ts_str)
                     from app.monarch_service import verify_snooze_signature
 
                     is_valid, reason = verify_snooze_signature(alert_key, days, ts, sig)
+                    sig_valid = is_valid
                     if not is_valid:
                         logger.warning(f"Snooze signature rejected: {reason} (key={alert_key})")
+                        log_mutation_audit(
+                            action_type="SNOOZE_ALERT",
+                            target_id=alert_key,
+                            user_email=user_email,
+                            status="REJECTED",
+                            signature_valid=False,
+                            details=reason,
+                        )
                         return respond(f"⛔ Snooze rejected: {reason}")
                 except (ValueError, TypeError):
+                    log_mutation_audit(
+                        action_type="SNOOZE_ALERT",
+                        target_id=alert_key,
+                        user_email=user_email,
+                        status="REJECTED",
+                        signature_valid=False,
+                        details="Invalid timestamp in snooze action",
+                    )
                     return respond("⛔ Invalid timestamp in snooze action.")
 
             logger.info(
@@ -861,12 +963,28 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             )
 
             if suppressed:
+                log_mutation_audit(
+                    action_type="SNOOZE_ALERT",
+                    target_id=alert_key,
+                    user_email=user_email,
+                    status="SUCCESS",
+                    signature_valid=sig_valid,
+                    details=f"Snoozed for {days} days",
+                )
                 snooze_card = build_snooze_success_card(alert_key, alert_type, days)
                 success_text = (
                     f"💤 Alert *{alert_type.replace('_', ' ').title()}* (`{alert_key}`) snoozed for {days} days."
                 )
                 return respond(success_text, cards_v2=[snooze_card])
             else:
+                log_mutation_audit(
+                    action_type="SNOOZE_ALERT",
+                    target_id=alert_key,
+                    user_email=user_email,
+                    status="FAILED",
+                    signature_valid=sig_valid,
+                    details="BigQuery suppression insert failed",
+                )
                 return respond(f"⚠️ Failed to snooze alert '{alert_key}'.")
 
         return respond("ℹ️ Action received.")

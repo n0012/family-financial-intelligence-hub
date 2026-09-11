@@ -22,7 +22,9 @@ import json
 import logging
 import re
 import secrets
+import threading
 import time
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -722,6 +724,150 @@ def verify_snooze_signature(
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch on snooze action."
     return True, "Valid"
+
+
+# =============================================================================
+# PR 10: Conversational Guardrails, Idempotency & BigQuery Audit Log
+# =============================================================================
+
+_MUTATION_RATE_LIMITS: dict[str, list[float]] = {}
+_MUTATION_RATE_LOCK = threading.Lock()
+MUTATION_RATE_LIMIT_MAX = 10
+MUTATION_RATE_LIMIT_WINDOW_SECONDS = 60
+
+_MUTATION_IDEMPOTENCY_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+IDEMPOTENCY_WINDOW_SECONDS = 300  # 5 minutes
+
+
+def check_mutation_rate_limit(user_email: str | None = None) -> tuple[bool, str]:
+    """
+    Checks if user has exceeded the mutation rate limit (max 10 actions per 60s).
+    Returns (True, 'OK') or (False, rejection_reason).
+    """
+    clean_user = (user_email or CURRENT_USER_EMAIL.get() or "unknown").lower().strip()
+    now = time.time()
+    with _MUTATION_RATE_LOCK:
+        timestamps = _MUTATION_RATE_LIMITS.setdefault(clean_user, [])
+        cutoff = now - MUTATION_RATE_LIMIT_WINDOW_SECONDS
+        valid_timestamps = [t for t in timestamps if t > cutoff]
+        _MUTATION_RATE_LIMITS[clean_user] = valid_timestamps
+        if len(valid_timestamps) >= MUTATION_RATE_LIMIT_MAX:
+            return (
+                False,
+                f"Rate limit exceeded ({MUTATION_RATE_LIMIT_MAX} actions per {MUTATION_RATE_LIMIT_WINDOW_SECONDS}s). Please wait before trying again.",
+            )
+        _MUTATION_RATE_LIMITS[clean_user].append(now)
+        return True, "OK"
+
+
+def check_mutation_idempotency(
+    user_email: str,
+    action_type: str,
+    target_id: str,
+    new_value: str,
+) -> dict[str, Any] | None:
+    """
+    Checks whether the identical mutation was executed within the idempotency window (300s).
+    Returns cached result dict if found, else None.
+    """
+    clean_user = user_email.lower().strip()
+    key = (clean_user, action_type.strip().upper(), str(target_id).strip(), str(new_value).strip())
+    now = time.time()
+    with _MUTATION_RATE_LOCK:
+        if key in _MUTATION_IDEMPOTENCY_CACHE:
+            ts, result = _MUTATION_IDEMPOTENCY_CACHE[key]
+            if now - ts <= IDEMPOTENCY_WINDOW_SECONDS:
+                return result
+            del _MUTATION_IDEMPOTENCY_CACHE[key]
+    return None
+
+
+def record_mutation_idempotency(
+    user_email: str,
+    action_type: str,
+    target_id: str,
+    new_value: str,
+    result: dict[str, Any],
+):
+    """Caches executed mutation for idempotency deduplication."""
+    clean_user = user_email.lower().strip()
+    key = (clean_user, action_type.strip().upper(), str(target_id).strip(), str(new_value).strip())
+    now = time.time()
+    with _MUTATION_RATE_LOCK:
+        _MUTATION_IDEMPOTENCY_CACHE[key] = (now, result)
+
+
+def reset_mutation_guardrails():
+    """Resets in-memory rate limiting and idempotency caches (primarily for unit tests)."""
+    with _MUTATION_RATE_LOCK:
+        _MUTATION_RATE_LIMITS.clear()
+        _MUTATION_IDEMPOTENCY_CACHE.clear()
+
+
+def log_mutation_audit(
+    action_type: str,
+    target_id: str,
+    user_email: str | None = None,
+    status: str = "SUCCESS",
+    previous_value: str | None = None,
+    new_value: str | None = None,
+    signature_valid: bool | None = None,
+    details: str | None = None,
+    mutation_id: str | None = None,
+    bq: bigquery.Client | None = None,
+    project_id: str | None = None,
+    dataset_id: str | None = None,
+) -> str:
+    """
+    Inserts an audit record into family_finance.mutation_audit_log.
+    Guarantees non-blocking and fault-tolerant behavior (catches and logs errors without raising).
+    Returns the mutation_id.
+    """
+    m_id = mutation_id or str(uuid.uuid4())
+    target_user = (user_email or CURRENT_USER_EMAIL.get() or "unknown").strip().lower()
+    target_project = project_id or BQ_PROJECT_ID
+    target_dataset = dataset_id or BQ_DATASET_ID
+    now_utc = datetime.now(UTC)
+
+    insert_sql = f"""
+    INSERT INTO `{target_project}.{target_dataset}.mutation_audit_log`
+    (mutation_id, timestamp, user_email, action_type, target_id, previous_value, new_value, status, signature_valid, details, created_at)
+    VALUES (
+        @mutation_id,
+        @timestamp,
+        @user_email,
+        @action_type,
+        @target_id,
+        @previous_value,
+        @new_value,
+        @status,
+        @signature_valid,
+        @details,
+        CURRENT_TIMESTAMP()
+    )
+    """
+    try:
+        client = bq or get_bq_client(target_project)
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("mutation_id", "STRING", m_id),
+                bigquery.ScalarQueryParameter("timestamp", "TIMESTAMP", now_utc),
+                bigquery.ScalarQueryParameter("user_email", "STRING", target_user),
+                bigquery.ScalarQueryParameter("action_type", "STRING", action_type.strip().upper()),
+                bigquery.ScalarQueryParameter("target_id", "STRING", str(target_id)),
+                bigquery.ScalarQueryParameter("previous_value", "STRING", previous_value),
+                bigquery.ScalarQueryParameter("new_value", "STRING", new_value),
+                bigquery.ScalarQueryParameter("status", "STRING", status.strip().upper()),
+                bigquery.ScalarQueryParameter("signature_valid", "BOOL", signature_valid),
+                bigquery.ScalarQueryParameter("details", "STRING", details),
+            ]
+        )
+        client.query(insert_sql, job_config=job_config).result()
+        logger.info(f"Audit log recorded: id={m_id}, action={action_type}, target={target_id}, status={status}")
+    except Exception as e:
+        logger.warning(f"Could not write audit log entry to BigQuery (id={m_id}): {e}")
+
+    return m_id
 
 
 async def get_cached_categories(client: MonarchMoney | None = None, force_refresh: bool = False) -> dict[str, Any]:
