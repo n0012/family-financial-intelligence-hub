@@ -84,6 +84,150 @@ def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) ->
     return alerts
 
 
+def check_duplicate_charges(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
+    """Checks for identical charges from the same merchant within a 72-hour window."""
+    alerts = []
+    sql = f"""
+    SELECT
+        t1_id, t2_id, account_id, account_name, merchant, category_name,
+        amount, t1_date, t2_date, days_apart, alert_key
+    FROM `{project_id}.{dataset_id}.v_duplicate_charges`
+    ORDER BY t2_date DESC, amount DESC
+    LIMIT 3;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        for r in rows:
+            merch = getattr(r, "merchant", "Merchant") or "Merchant"
+            amt = float(getattr(r, "amount", 0.0) or 0.0)
+            acct = getattr(r, "account_name", "Account") or "Account"
+            days = int(getattr(r, "days_apart", 0) or 0)
+            t1_d = str(getattr(r, "t1_date", ""))
+            t2_d = str(getattr(r, "t2_date", ""))
+            key = getattr(r, "alert_key", f"duplicate:{merch.lower().strip()}:{amt}")
+            day_str = "same day" if days == 0 else f"{days} day(s) apart"
+            alerts.append(
+                {
+                    "type": "DUPLICATE_CHARGE",
+                    "severity": "WARNING",
+                    "alert_key": key,
+                    "title": f"Potential Duplicate Charge: {merch} (${amt:.2f})",
+                    "detail": (f"Two identical charges of ${amt:.2f} posted to {acct} {day_str} ({t1_d} and {t2_d})."),
+                    "suggested_fix": (
+                        f"Check your receipt or contact {merch} to verify if you were double-billed. "
+                        "Snooze this alert if both charges were intentional."
+                    ),
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Duplicate charge check failed: {e}")
+        alerts.append({"type": "QUERY_ERROR", "detail": f"Duplicate charge check failed: {e}"})
+    return alerts
+
+
+def check_new_subscriptions(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
+    """Intercepts newly detected recurring subscriptions or trial conversions within the last 35 days."""
+    alerts = []
+    sql = f"""
+    SELECT
+        merchant, category_name, functional_domain, disposition,
+        first_seen, latest_seen, charge_count, avg_charge, total_spend,
+        is_recurring_flagged, days_since_first_charge, alert_key
+    FROM `{project_id}.{dataset_id}.v_new_subscription_intercept`
+    ORDER BY latest_seen DESC, avg_charge DESC
+    LIMIT 3;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        for r in rows:
+            merch = getattr(r, "merchant", "Subscription") or "Subscription"
+            avg_amt = float(getattr(r, "avg_charge", 0.0) or 0.0)
+            total = float(getattr(r, "total_spend", 0.0) or 0.0)
+            first_d = str(getattr(r, "first_seen", ""))
+            days_ago = int(getattr(r, "days_since_first_charge", 0) or 0)
+            count = int(getattr(r, "charge_count", 1) or 1)
+            key = getattr(r, "alert_key", f"new_sub:{merch.lower().strip().replace(' ', '_')}")
+            alerts.append(
+                {
+                    "type": "NEW_SUBSCRIPTION_DETECTED",
+                    "severity": "WARNING",
+                    "alert_key": key,
+                    "title": f"New Subscription Detected: {merch} (${avg_amt:.2f}/mo)",
+                    "detail": (
+                        f"First charged on {first_d} ({days_ago} days ago). "
+                        f"Total charged so far: ${total:.2f} across {count} transaction(s)."
+                    ),
+                    "suggested_fix": (
+                        "If this was an auto-converting free trial, cancel now to halt future recurring charges. "
+                        "Snooze if this is a desired long-term household service."
+                    ),
+                }
+            )
+    except Exception as e:
+        logger.warning(f"New subscription intercept check failed: {e}")
+        alerts.append({"type": "QUERY_ERROR", "detail": f"New subscription check failed: {e}"})
+    return alerts
+
+
+def check_annual_bill_radar(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
+    """Predicts upcoming annual and semi-annual renewal lump sums within the next 30 days."""
+    alerts = []
+    sql = f"""
+    SELECT
+        merchant, category_name, functional_domain, disposition,
+        cadence_type, prior_charge_amount, prior_charge_date,
+        predicted_renewal_date, days_until_renewal, alert_key
+    FROM `{project_id}.{dataset_id}.v_annual_bill_radar`
+    WHERE days_until_renewal BETWEEN -7 AND 30
+    ORDER BY days_until_renewal ASC, prior_charge_amount DESC
+    LIMIT 3;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        for r in rows:
+            merch = getattr(r, "merchant", "Merchant") or "Merchant"
+            amt = float(getattr(r, "prior_charge_amount", 0.0) or 0.0)
+            cadence = str(getattr(r, "cadence_type", "ANNUAL") or "ANNUAL").replace("_", " ").title()
+            pred_date = str(getattr(r, "predicted_renewal_date", ""))
+            prior_date = str(getattr(r, "prior_charge_date", ""))
+            days_due = int(getattr(r, "days_until_renewal", 0) or 0)
+            disp = getattr(r, "disposition", "UNKNOWN")
+            key = getattr(r, "alert_key", f"annual_bill:{merch.lower().strip().replace(' ', '_')}")
+
+            if days_due < 0:
+                timing_str = f"due around now ({abs(days_due)} day(s) ago window)"
+            elif days_due == 0:
+                timing_str = "due today"
+            else:
+                timing_str = f"due in ~{days_due} days ({pred_date})"
+
+            if disp == "RESHOPPABLE":
+                action_text = (
+                    f"Shop competing insurance/contract rates before {merch} auto-renews for ~${amt:.2f}, "
+                    "and verify checking account has sufficient cash buffer."
+                )
+            else:
+                action_text = (
+                    f"Ensure checking account has sufficient liquidity to absorb this ~${amt:.2f} renewal, "
+                    "or cancel/downgrade before the renewal date if no longer needed."
+                )
+
+            alerts.append(
+                {
+                    "type": "ANNUAL_BILL_RADAR",
+                    "severity": "WARNING" if amt >= 250.0 else "INFO",
+                    "alert_key": key,
+                    "title": f"Upcoming {cadence} Bill: {merch} (~${amt:.2f})",
+                    "detail": (f"Expected {timing_str}. Prior billing was ${amt:.2f} on {prior_date}."),
+                    "suggested_fix": action_text,
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Annual bill radar check failed: {e}")
+        alerts.append({"type": "QUERY_ERROR", "detail": f"Annual bill radar check failed: {e}"})
+    return alerts
+
+
 def check_food_efficiency(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks dining & delivery percentage of food budget, avoiding early-month grocery timing skew."""
     alerts = []
@@ -727,6 +871,21 @@ def generate_daily_brief_synopsis(
                 f"🚨 **Overdrawn Checking**: Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately."
             )
 
+        dup_alerts = [a for a in alerts if a.get("type") == "DUPLICATE_CHARGE"]
+        for da in dup_alerts[:1]:
+            focus_items.append(f"⚡ <b>Duplicate Charge:</b> {da.get('title', '')} — {da.get('detail', '')}")
+            focus_items_md.append(f"**Duplicate Charge**: {da.get('title', '')} — {da.get('detail', '')}")
+
+        new_sub_alerts = [a for a in alerts if a.get("type") == "NEW_SUBSCRIPTION_DETECTED"]
+        for nsa in new_sub_alerts[:1]:
+            focus_items.append(f"🆕 <b>New Recurring Plan:</b> {nsa.get('title', '')}. {nsa.get('suggested_fix', '')}")
+            focus_items_md.append(f"**New Recurring Plan**: {nsa.get('title', '')}. {nsa.get('suggested_fix', '')}")
+
+        annual_alerts = [a for a in alerts if a.get("type") == "ANNUAL_BILL_RADAR"]
+        for aa in annual_alerts[:1]:
+            focus_items.append(f"📅 <b>Annual Bill Radar:</b> {aa.get('title', '')} — {aa.get('detail', '')}")
+            focus_items_md.append(f"**Annual Bill Radar**: {aa.get('title', '')} — {aa.get('detail', '')}")
+
         price_alerts = [a for a in alerts if a.get("type") == "PRICE_CREEP"]
         for pa in price_alerts[:2]:
             t = pa.get("title", "").replace("Subscription Price Hike: ", "")
@@ -1002,6 +1161,9 @@ def collect_all_alerts(
     """Runs all spend optimization checks synchronously and filters out suppressed alerts."""
     raw_alerts: list[dict[str, Any]] = []
     raw_alerts.extend(check_subscription_price_creep(bq, target_project, target_dataset))
+    raw_alerts.extend(check_duplicate_charges(bq, target_project, target_dataset))
+    raw_alerts.extend(check_new_subscriptions(bq, target_project, target_dataset))
+    raw_alerts.extend(check_annual_bill_radar(bq, target_project, target_dataset))
     raw_alerts.extend(check_food_efficiency(bq, target_project, target_dataset))
     raw_alerts.extend(check_heloc_daily_cost(bq, target_project, target_dataset))
     raw_alerts.extend(check_subscription_overlap(bq, target_project, target_dataset))

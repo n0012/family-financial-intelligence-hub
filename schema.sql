@@ -709,3 +709,168 @@ JOIN seasonal_norm n USING (merchant, calendar_month)
 WHERE m.spend_month = DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
   AND n.years_observed >= 1
 ORDER BY variance_vs_season DESC;
+
+-- VIEW H: Duplicate Charge Radar (PR 7a)
+-- Detects identical debit charges on the same account from the same merchant within a 72-hour window.
+-- Excludes transfers, credit card payments, loan payments, ATM withdrawals, pending transactions, and micro-transit/parking taps (< $3.00).
+CREATE OR REPLACE VIEW `family_finance.v_duplicate_charges` AS
+SELECT
+    t1.transaction_id AS t1_id,
+    t2.transaction_id AS t2_id,
+    t1.account_id,
+    COALESCE(a.display_name, 'Account') AS account_name,
+    COALESCE(t1.clean_merchant_name, t1.merchant_name) AS merchant,
+    t1.category_name,
+    ROUND(CAST(ABS(t1.amount) AS FLOAT64), 2) AS amount,
+    t1.transaction_date AS t1_date,
+    t2.transaction_date AS t2_date,
+    DATE_DIFF(t2.transaction_date, t1.transaction_date, DAY) AS days_apart,
+    CONCAT('duplicate:', t1.transaction_id, ':', t2.transaction_id) AS alert_key
+FROM `family_finance.raw_transactions` t1
+JOIN `family_finance.raw_transactions` t2
+  ON t1.account_id = t2.account_id
+ AND t1.transaction_id != t2.transaction_id
+ AND (
+     t1.transaction_date < t2.transaction_date
+     OR (t1.transaction_date = t2.transaction_date AND t1.transaction_id < t2.transaction_id)
+ )
+ AND COALESCE(t1.clean_merchant_name, t1.merchant_name) = COALESCE(t2.clean_merchant_name, t2.merchant_name)
+ AND ROUND(CAST(ABS(t1.amount) AS FLOAT64), 2) = ROUND(CAST(ABS(t2.amount) AS FLOAT64), 2)
+LEFT JOIN `family_finance.raw_accounts` a ON t1.account_id = a.account_id
+WHERE t1.amount < 0
+  AND t2.amount < 0
+  AND NOT COALESCE(t1.pending, FALSE)
+  AND NOT COALESCE(t2.pending, FALSE)
+  AND COALESCE(t1.clean_merchant_name, t1.merchant_name) IS NOT NULL
+  AND ABS(t1.amount) >= 3.00
+  AND LOWER(t1.category_name) NOT IN (
+      'transfer', 'transfers', 'credit card payment', 'credit card payments',
+      'loan payment', 'loan repayment', 'balance transfers', 'cash & atm', 'atm'
+  )
+  AND DATE_DIFF(t2.transaction_date, t1.transaction_date, DAY) BETWEEN 0 AND 3
+  AND t1.transaction_date >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 30 DAY)
+ORDER BY t2.transaction_date DESC, amount DESC;
+
+-- VIEW I: New Subscription & Free Trial Intercept (PR 7a)
+-- Catches recurring subscription charges or trial conversions appearing for the very first time within the last 35 days.
+CREATE OR REPLACE VIEW `family_finance.v_new_subscription_intercept` AS
+WITH merchant_history AS (
+    SELECT
+        COALESCE(clean_merchant_name, merchant_name) AS merchant,
+        ANY_VALUE(category_name) AS category_name,
+        MIN(transaction_date) AS first_seen,
+        MAX(transaction_date) AS latest_seen,
+        COUNT(*) AS charge_count,
+        ROUND(AVG(CAST(ABS(amount) AS FLOAT64)), 2) AS avg_charge,
+        ROUND(SUM(CAST(ABS(amount) AS FLOAT64)), 2) AS total_spend,
+        LOGICAL_OR(COALESCE(is_recurring, FALSE)) AS is_recurring_flagged
+    FROM `family_finance.raw_transactions`
+    WHERE amount < 0
+      AND NOT COALESCE(pending, FALSE)
+      AND COALESCE(clean_merchant_name, merchant_name) IS NOT NULL
+      AND LOWER(category_name) NOT IN (
+          'transfer', 'transfers', 'credit card payment', 'credit card payments',
+          'loan payment', 'loan repayment', 'balance transfers', 'mortgage', 'rent',
+          'cash & atm', 'atm', 'financial fees', 'bank fees', 'taxes'
+      )
+    GROUP BY 1
+)
+SELECT
+    h.merchant,
+    h.category_name,
+    COALESCE(d.domain, 'UNCLASSIFIED') AS functional_domain,
+    COALESCE(d.disposition, 'UNKNOWN') AS disposition,
+    h.first_seen,
+    h.latest_seen,
+    h.charge_count,
+    h.avg_charge,
+    h.total_spend,
+    h.is_recurring_flagged,
+    DATE_DIFF(CURRENT_DATE('America/New_York'), h.first_seen, DAY) AS days_since_first_charge,
+    CONCAT('new_sub:', LOWER(REGEXP_REPLACE(h.merchant, r'[^a-zA-Z0-9]+', '_'))) AS alert_key
+FROM merchant_history h
+LEFT JOIN `family_finance.v_merchant_domain` d ON h.merchant = d.merchant
+WHERE h.first_seen >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 35 DAY)
+  AND (
+      h.is_recurring_flagged
+      OR d.domain IS NOT NULL
+      OR LOWER(h.category_name) IN ('subscriptions', 'subscription', 'software', 'entertainment', 'memberships', 'gym')
+  )
+ORDER BY h.latest_seen DESC, h.avg_charge DESC;
+
+-- VIEW J: Annual & Semi-Annual Bill Radar (PR 7a)
+-- Predicts upcoming annual (330-380 day cycle) and semi-annual (150-195 day cycle) lump sums
+-- due within the next 30 days that have not yet posted.
+CREATE OR REPLACE VIEW `family_finance.v_annual_bill_radar` AS
+WITH trailing_candidates AS (
+    SELECT
+        COALESCE(clean_merchant_name, merchant_name) AS merchant,
+        category_name,
+        transaction_date,
+        ROUND(CAST(ABS(amount) AS FLOAT64), 2) AS amount,
+        COALESCE(is_recurring, FALSE) AS is_recurring
+    FROM `family_finance.raw_transactions`
+    WHERE amount < 0
+      AND NOT COALESCE(pending, FALSE)
+      AND COALESCE(clean_merchant_name, merchant_name) IS NOT NULL
+      AND ABS(amount) >= 20.00
+      AND LOWER(category_name) NOT IN (
+          'transfer', 'transfers', 'credit card payment', 'credit card payments',
+          'loan payment', 'loan repayment', 'balance transfers', 'mortgage', 'rent',
+          'cash & atm', 'atm', 'financial fees', 'bank fees', 'taxes'
+      )
+),
+recent_charges AS (
+    SELECT DISTINCT merchant
+    FROM trailing_candidates
+    WHERE transaction_date >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 60 DAY)
+),
+prior_cycles AS (
+    SELECT
+        c.merchant,
+        c.category_name,
+        c.amount,
+        c.transaction_date AS prior_charge_date,
+        DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) AS days_since_charge,
+        CASE
+            WHEN DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) BETWEEN 330 AND 380 THEN 'ANNUAL'
+            WHEN DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) BETWEEN 150 AND 195 THEN 'SEMI_ANNUAL'
+            ELSE NULL
+        END AS cadence_type,
+        CASE
+            WHEN DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) BETWEEN 330 AND 380 THEN 365
+            WHEN DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) BETWEEN 150 AND 195 THEN 182
+            ELSE NULL
+        END AS cadence_days
+    FROM trailing_candidates c
+    WHERE c.merchant NOT IN (SELECT merchant FROM recent_charges)
+      AND (
+          DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) BETWEEN 330 AND 380
+          OR DATE_DIFF(CURRENT_DATE('America/New_York'), c.transaction_date, DAY) BETWEEN 150 AND 195
+      )
+)
+SELECT
+    p.merchant,
+    p.category_name,
+    COALESCE(d.domain, 'UNCLASSIFIED') AS functional_domain,
+    COALESCE(d.disposition, 'UNKNOWN') AS disposition,
+    p.cadence_type,
+    p.amount AS prior_charge_amount,
+    p.prior_charge_date,
+    DATE_ADD(p.prior_charge_date, INTERVAL p.cadence_days DAY) AS predicted_renewal_date,
+    DATE_DIFF(DATE_ADD(p.prior_charge_date, INTERVAL p.cadence_days DAY), CURRENT_DATE('America/New_York'), DAY) AS days_until_renewal,
+    CONCAT('annual_bill:', LOWER(REGEXP_REPLACE(p.merchant, r'[^a-zA-Z0-9]+', '_')), ':', FORMAT_DATE('%Y', DATE_ADD(p.prior_charge_date, INTERVAL p.cadence_days DAY))) AS alert_key
+FROM prior_cycles p
+LEFT JOIN `family_finance.v_merchant_domain` d ON p.merchant = d.merchant
+WHERE p.cadence_type IS NOT NULL
+  AND (
+      d.domain IS NOT NULL
+      OR LOWER(p.category_name) LIKE '%insurance%'
+      OR LOWER(p.category_name) IN ('subscriptions', 'subscription', 'software', 'memberships', 'dues', 'licenses')
+  )
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY p.merchant, p.cadence_type
+    ORDER BY p.prior_charge_date DESC
+) = 1
+ORDER BY days_until_renewal ASC;
+

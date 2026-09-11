@@ -748,6 +748,228 @@ class TestAlerts(unittest.TestCase):
         self.assertIn("sig", param_dict)
         self.assertEqual(len(param_dict["sig"]), 64)
 
+    def test_check_duplicate_charges(self):
+        mock_bq = MagicMock()
+        row = SimpleNamespace(
+            t1_id="txn_101",
+            t2_id="txn_102",
+            account_id="acct_checking_01",
+            account_name="Primary Checking",
+            merchant="Merchant X",
+            category_name="Shopping",
+            amount=49.99,
+            t1_date="2026-09-08",
+            t2_date="2026-09-08",
+            days_apart=0,
+            alert_key="duplicate:txn_101:txn_102",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
+
+        found = alerts.check_duplicate_charges(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "DUPLICATE_CHARGE")
+        self.assertEqual(a["severity"], "WARNING")
+        self.assertEqual(a["alert_key"], "duplicate:txn_101:txn_102")
+        self.assertIn("Potential Duplicate Charge: Merchant X ($49.99)", a["title"])
+        self.assertIn("same day", a["detail"])
+        self.assertIn("double-billed", a["suggested_fix"].lower())
+
+    def test_check_duplicate_charges_days_apart_and_error(self):
+        mock_bq = MagicMock()
+        row = SimpleNamespace(
+            t1_id="txn_201",
+            t2_id="txn_202",
+            account_id="acct_checking_01",
+            account_name="Primary Checking",
+            merchant="Restaurant Y",
+            category_name="Dining",
+            amount=85.50,
+            t1_date="2026-09-06",
+            t2_date="2026-09-08",
+            days_apart=2,
+            alert_key="duplicate:txn_201:txn_202",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
+
+        found = alerts.check_duplicate_charges(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        self.assertIn("2 day(s) apart", found[0]["detail"])
+
+        mock_bq.query.side_effect = Exception("BQ connection timeout")
+        err_alerts = alerts.check_duplicate_charges(mock_bq, "proj", "ds")
+        self.assertEqual(len(err_alerts), 1)
+        self.assertEqual(err_alerts[0]["type"], "QUERY_ERROR")
+
+    def test_check_new_subscriptions(self):
+        mock_bq = MagicMock()
+        row = SimpleNamespace(
+            merchant="SuperSaaS",
+            category_name="Software",
+            functional_domain="SOFTWARE_SAAS",
+            disposition="CANCELLABLE",
+            first_seen="2026-09-01",
+            latest_seen="2026-09-01",
+            charge_count=1,
+            avg_charge=19.99,
+            total_spend=19.99,
+            is_recurring_flagged=True,
+            days_since_first_charge=9,
+            alert_key="new_sub:supersaas",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
+
+        found = alerts.check_new_subscriptions(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "NEW_SUBSCRIPTION_DETECTED")
+        self.assertEqual(a["severity"], "WARNING")
+        self.assertEqual(a["alert_key"], "new_sub:supersaas")
+        self.assertIn("New Subscription Detected: SuperSaaS ($19.99/mo)", a["title"])
+        self.assertIn("9 days ago", a["detail"])
+        self.assertIn("auto-converting free trial", a["suggested_fix"].lower())
+
+    def test_check_new_subscriptions_error(self):
+        mock_bq = MagicMock()
+        mock_bq.query.side_effect = Exception("Query execution error")
+        err_alerts = alerts.check_new_subscriptions(mock_bq, "proj", "ds")
+        self.assertEqual(len(err_alerts), 1)
+        self.assertEqual(err_alerts[0]["type"], "QUERY_ERROR")
+
+    def test_check_annual_bill_radar_reshoppable(self):
+        mock_bq = MagicMock()
+        row = SimpleNamespace(
+            merchant="Acme Auto Insurance",
+            category_name="Auto Insurance",
+            functional_domain="INSURANCE_AUTO",
+            disposition="RESHOPPABLE",
+            cadence_type="SEMI_ANNUAL",
+            prior_charge_amount=650.00,
+            prior_charge_date="2026-03-25",
+            predicted_renewal_date="2026-09-23",
+            days_until_renewal=12,
+            alert_key="annual_bill:acme_auto_insurance:2026",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
+
+        found = alerts.check_annual_bill_radar(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "ANNUAL_BILL_RADAR")
+        self.assertEqual(a["severity"], "WARNING")  # >= 250
+        self.assertEqual(a["alert_key"], "annual_bill:acme_auto_insurance:2026")
+        self.assertIn("Upcoming Semi Annual Bill: Acme Auto Insurance (~$650.00)", a["title"])
+        self.assertIn("due in ~12 days", a["detail"])
+        self.assertIn("Shop competing insurance/contract rates", a["suggested_fix"])
+
+    def test_check_annual_bill_radar_cancellable_and_timing_variations(self):
+        mock_bq = MagicMock()
+        row_today = SimpleNamespace(
+            merchant="Annual Cloud Backup",
+            category_name="Software",
+            functional_domain="CLOUD_STORAGE",
+            disposition="CANCELLABLE",
+            cadence_type="ANNUAL",
+            prior_charge_amount=99.00,
+            prior_charge_date="2025-09-10",
+            predicted_renewal_date="2026-09-10",
+            days_until_renewal=0,
+            alert_key="annual_bill:annual_cloud_backup:2026",
+        )
+        mock_bq.query.return_value.result.return_value = [row_today]
+
+        found = alerts.check_annual_bill_radar(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["severity"], "INFO")  # < 250
+        self.assertIn("due today", found[0]["detail"])
+        self.assertIn("sufficient liquidity", found[0]["suggested_fix"])
+
+        mock_bq.query.side_effect = Exception("Query error")
+        err_alerts = alerts.check_annual_bill_radar(mock_bq, "proj", "ds")
+        self.assertEqual(len(err_alerts), 1)
+        self.assertEqual(err_alerts[0]["type"], "QUERY_ERROR")
+
+    def test_collect_all_alerts_pr7a_integration(self):
+        mock_bq = MagicMock()
+        with (
+            patch(
+                "app.alerts.check_subscription_price_creep",
+                return_value=[{"type": "PRICE_CREEP", "alert_key": "k1"}],
+            ),
+            patch(
+                "app.alerts.check_duplicate_charges",
+                return_value=[{"type": "DUPLICATE_CHARGE", "alert_key": "k2"}],
+            ),
+            patch(
+                "app.alerts.check_new_subscriptions",
+                return_value=[{"type": "NEW_SUBSCRIPTION_DETECTED", "alert_key": "k3"}],
+            ),
+            patch(
+                "app.alerts.check_annual_bill_radar",
+                return_value=[{"type": "ANNUAL_BILL_RADAR", "alert_key": "k4"}],
+            ),
+            patch("app.alerts.check_food_efficiency", return_value=[]),
+            patch("app.alerts.check_heloc_daily_cost", return_value=[]),
+            patch("app.alerts.check_subscription_overlap", return_value=[]),
+            patch("app.alerts.check_utility_seasonal_spike", return_value=[]),
+            patch("app.alerts.check_micro_transaction_leakage", return_value=[]),
+            patch("app.alerts.check_memory_budget_limits", return_value=[]),
+            patch("app.alerts.get_active_suppressions", return_value={"k2"}),
+        ):
+            all_alerts = alerts.collect_all_alerts(mock_bq, "proj", "ds")
+            keys = [a["alert_key"] for a in all_alerts]
+            self.assertIn("k1", keys)
+            self.assertNotIn("k2", keys)  # k2 suppressed
+            self.assertIn("k3", keys)
+            self.assertIn("k4", keys)
+
+    def test_generate_daily_brief_synopsis_with_pr7a_anomalies(self):
+        mock_bq = MagicMock()
+        checking_row = SimpleNamespace(liquid_checking_balance=5000.0)
+        burn_row = SimpleNamespace(fixed_monthly_burn=3000.0)
+        heloc_row = SimpleNamespace(display_name="HELOC", current_balance=10000.0, interest_rate=8.5)
+        mtd_row = SimpleNamespace(mtd_spend=1200.0, mtd_count=20)
+        mock_bq.query.return_value.result.side_effect = [
+            [checking_row],
+            [burn_row],
+            [heloc_row],
+            [mtd_row],
+        ]
+
+        active_alerts = [
+            {
+                "type": "DUPLICATE_CHARGE",
+                "title": "Potential Duplicate Charge: Merchant A ($25.00)",
+                "detail": "Two identical charges posted same day.",
+                "suggested_fix": "Verify with merchant.",
+                "alert_key": "dup:1:2",
+            },
+            {
+                "type": "NEW_SUBSCRIPTION_DETECTED",
+                "title": "New Subscription Detected: Service B ($14.99/mo)",
+                "detail": "First charged 5 days ago.",
+                "suggested_fix": "Cancel if trial.",
+                "alert_key": "new_sub:b",
+            },
+            {
+                "type": "ANNUAL_BILL_RADAR",
+                "title": "Upcoming Annual Bill: Policy C (~$500.00)",
+                "detail": "Expected due in ~10 days.",
+                "suggested_fix": "Shop competing rates.",
+                "alert_key": "annual:c:2026",
+            },
+        ]
+
+        synopsis = alerts.generate_daily_brief_synopsis(mock_bq, "proj", "ds", alerts=active_alerts)
+        self.assertFalse(synopsis["is_error"])
+        focus_md = "\n".join(synopsis["focus_items_md"])
+        self.assertIn("Duplicate Charge", focus_md)
+        self.assertIn("Merchant A", focus_md)
+        self.assertIn("New Recurring Plan", focus_md)
+        self.assertIn("Service B", focus_md)
+        self.assertIn("Annual Bill Radar", focus_md)
+        self.assertIn("Policy C", focus_md)
+
 
 class TestJobCLI(unittest.TestCase):
     def test_run_sync_delegation(self):
