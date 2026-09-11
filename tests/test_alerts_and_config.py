@@ -1307,7 +1307,7 @@ class TestChatWorker(unittest.TestCase):
             "message": {
                 "name": "spaces/test/messages/msg123",
                 "text": "@FinSage /digest weekly",
-                "sender": {"displayName": "Nick", "email": "nick@example.com"},
+                "sender": {"displayName": "FinSage User", "email": "user@example.com"},
             },
             "space": {"name": "spaces/test"},
         }
