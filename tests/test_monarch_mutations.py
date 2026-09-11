@@ -550,6 +550,87 @@ class TestMonarchMutations(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "Valid")
 
+    def test_button_clicked_payload_session_anchors_and_patch(self):
+        """Tests that buttonClickedPayload properly extracts space_name, thread_name, and triggers card patch."""
+        now_ts = int(datetime.now(UTC).timestamp())
+        sig = generate_mutation_signature("txn_card_btn", "cat_cleaning", "user@example.com", now_ts)
+
+        payload = {
+            "commonEventObject": {
+                "userLocale": "en",
+                "hostApp": "CHAT",
+                "parameters": {
+                    "action": "confirm_recategorize",
+                    "transaction_id": "txn_card_btn",
+                    "category_id": "cat_cleaning",
+                    "category_name": "House Cleaning",
+                    "merchant_name": "Marybel Santibanez",
+                    "amount": "185.00",
+                    "timestamp": str(now_ts),
+                    "user_email": "user@example.com",
+                    "signature": sig,
+                },
+            },
+            "chat": {
+                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "buttonClickedPayload": {
+                    "space": {"name": "spaces/testSpace123"},
+                    "message": {
+                        "name": "spaces/testSpace123/messages/msg456.sub789",
+                        "thread": {"name": "spaces/testSpace123/threads/thread456"},
+                    },
+                },
+            },
+        }
+
+        with (
+            patch(
+                "app.main.execute_guarded_recategorization",
+                AsyncMock(return_value={"success": True, "transaction_id": "txn_card_btn"}),
+            ),
+            patch("app.main.patch_chat_card", return_value=True) as mock_patch,
+            patch("app.main.post_to_chat_thread", return_value=True) as mock_post_thread,
+            patch("app.main.log_mutation_audit") as mock_audit,
+        ):
+            resp = asyncio.run(main.google_chat_webhook(payload))
+            # Verify patch was called with the card's original message name
+            mock_patch.assert_called_once()
+            self.assertEqual(mock_patch.call_args[0][0], "spaces/testSpace123/messages/msg456.sub789")
+
+            # Verify response is formatted properly for Workspace Add-on
+            msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
+            self.assertIn("House Cleaning", msg["text"])
+            self.assertEqual(mock_audit.call_args[1]["status"], "SUCCESS")
+
+    @patch("app.monarch_service.get_monarch_client")
+    def test_get_live_transaction_nested_graphql(self, mock_get_client):
+        """Tests that get_live_transaction_async unwraps Monarch GraphQL GetTransactionDrawer structure."""
+        from app.monarch_service import get_live_transaction_async
+
+        mock_client = MagicMock()
+        mock_client.get_transaction_details = AsyncMock(
+            return_value={
+                "getTransaction": {
+                    "id": "254392634511512343",
+                    "amount": -185.0,
+                    "date": "2026-08-09",
+                    "merchant": {"name": "Marybel Santibanez"},
+                    "category": {"name": "Transfer"},
+                    "account": {"displayName": "Checking"},
+                    "pending": False,
+                }
+            }
+        )
+        mock_get_client.return_value = mock_client
+
+        txn_data = asyncio.run(get_live_transaction_async("254392634511512343"))
+        self.assertTrue(txn_data["found"])
+        self.assertEqual(txn_data["merchant_name"], "Marybel Santibanez")
+        self.assertEqual(txn_data["amount"], -185.0)
+        self.assertEqual(txn_data["date"], "2026-08-09")
+        self.assertEqual(txn_data["category_name"], "Transfer")
+
 
 if __name__ == "__main__":
     unittest.main()
+
