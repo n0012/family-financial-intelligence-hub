@@ -91,8 +91,13 @@ Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity r
 
 ### `v_debt_daily_cost`
 Computes the exact daily interest cost and monthly carrying cost across all active liability facilities (Mortgage, HELOC, Loans, Revolving Credit):
-$$\text{daily\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{365}$$
-$$\text{monthly\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{12}$$
+
+```math
+\text{daily\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{365}
+```
+```math
+\text{monthly\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{12}
+```
 
 ### `v_debt_summary`
 Aggregates portfolio-wide liability metrics into a single summary row:
@@ -166,11 +171,18 @@ Scans for periodic quarterly/annual lump-sum obligations (property taxes, insura
 
 ### `v_paycheck_surplus_allocation` (`v_paycheck_surplus_sweep`)
 Evaluates recent paycheck deposits against liquid checking reserves, 30-day fixed overhead burn (with a 15% safety buffer), and upcoming 30-day lump-sum bills:
-$$\text{safe\_reserve\_buffer} = \max(\$2000, (\text{monthly\_fixed\_burn} \times 1.15) + \text{upcoming\_30d\_lump\_sums})$$
-$$\text{safe\_surplus} = \max(0, \text{liquid\_balance} - \text{safe\_reserve\_buffer})$$
-$$\text{recommended\_sweep} = \min(\text{safe\_surplus}, \text{target\_debt\_balance})$$
 
-Surplus cash is routed to the highest-rate liability (e.g. variable HELOC), calculating immediate daily, monthly, and annual compound interest savings while reporting total multi-facility debt posture.
+```math
+\text{safe\_reserve\_buffer} = \max(2000, (\text{monthly\_fixed\_burn} \times 1.15) + \text{upcoming\_30d\_lump\_sums})
+```
+```math
+\text{safe\_surplus} = \max(0, \text{liquid\_balance} - \text{safe\_reserve\_buffer})
+```
+```math
+\text{recommended\_sweep} = \min(\text{safe\_surplus}, \text{target\_debt\_balance})
+```
+
+Surplus cash is routed to the highest-rate liability (e.g. variable HELOC), calculating immediate daily, monthly, and annual interest carry savings while reporting total multi-facility debt posture.
 
 ### `v_tax_deductible_summary`
 Aggregates verified multimodal receipts and deductible expenses by tax year across IRS classifications: Schedule C (Business Expense), IRC §213(d) (HSA/FSA Medical), IRC §170 (Charitable Donations), and Childcare Tax Credits.

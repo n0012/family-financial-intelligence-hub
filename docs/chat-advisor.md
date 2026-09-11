@@ -57,15 +57,15 @@ FinSage opens connections outward via an asynchronous **Pub/Sub streaming pull**
 Gemini automatically maps user intent to BigQuery analytical views using Automatic Function Calling (AFC):
 
 * *"What is our daily debt interest cost across mortgage and HELOC right now?"*  
-  $\rightarrow$ Queries `v_debt_summary` and reports total balance ($884k), daily carry ($113.74/day), and mortgage vs HELOC breakdowns.
+  → Queries `v_debt_summary` and reports total balance ($884k), daily carry ($113.74/day), and mortgage vs HELOC breakdowns.
 * *"Which subscriptions increased in price over the last year?"*  
-  $\rightarrow$ Queries `v_subscription_price_creep` and advises on the exact annualized increase.
+  → Queries `v_subscription_price_creep` and advises on the exact annualized increase.
 * *"How much did we spend on dining out vs groceries last month?"*  
-  $\rightarrow$ Queries `v_food_efficiency` to compare grocery baseline vs dining markups.
+  → Queries `v_food_efficiency` to compare grocery baseline vs dining markups.
 * *"Where are our top micro-transaction leaks under $35?"*  
-  $\rightarrow$ Queries `v_micro_transaction_leakage` for coffee shops and convenience spending.
+  → Queries `v_micro_transaction_leakage` for coffee shops and convenience spending.
 * *"How much safe surplus can we sweep from checking to pay down debt today?"*  
-  $\rightarrow$ Queries `v_paycheck_surplus_allocation` to determine safe paydown allocation.
+  → Queries `v_paycheck_surplus_allocation` to determine safe paydown allocation.
 
 ---
 
