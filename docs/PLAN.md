@@ -292,18 +292,25 @@ terraform apply
   * Regex pattern filtering against prompt-injection and instruction subversion attempts (e.g., `ignore previous instructions`, `system prompt`, `you are now`, `drop table`).
 * **Full Unit Test Coverage**: Added 8 new unit tests in [`tests/test_monarch_mutations.py`](tests/test_monarch_mutations.py), expanding the test suite to **98 passing unit tests**.
 
+### **PR 7a: Anomaly Scans — Duplicate Charges, Trial Intercept & Annual Radar (Completed)**
+* **BigQuery Analytical Views (`schema.sql`)**:
+  * **Duplicate Charge Radar (`v_duplicate_charges`)**: Deterministic self-join on `raw_transactions` detecting duplicate debit charges on the same account within a 72-hour window. Excludes money transfers, credit card payments, loan payments, ATM withdrawals, and micro-parking/transit taps (< $3.00).
+  * **New Subscription & Free Trial Intercept (`v_new_subscription_intercept`)**: Catches recurring subscription charges or trial conversions appearing for the very first time across household history within the past 35 days.
+  * **Annual & Semi-Annual Bill Radar (`v_annual_bill_radar`)**: Identifies trailing recurring annual (330–380 days) and semi-annual (150–195 days) cycles to project upcoming lump sums due in the next 30 days that have not yet posted.
+* **Proactive Advisory Scanners (`app/alerts.py`)**:
+  * `check_duplicate_charges`: Evaluates `v_duplicate_charges` and produces actionable alerts with timing context ("same day" vs "X days apart") and verification advice.
+  * `check_new_subscriptions`: Evaluates `v_new_subscription_intercept` to catch auto-converting free trials before the next cycle locks in.
+  * `check_annual_bill_radar`: Evaluates `v_annual_bill_radar`, differentiating reshoppable policies (insurance) from cancellable software/memberships.
+  * Wired all 3 scanners into `collect_all_alerts`, Morning Financial Synopsis focus item synthesis (`generate_daily_brief_synopsis`), and Card v2 interactive HMAC snooze flows.
+* **Full Unit Test Coverage**: Added 8 new unit tests in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py), bringing the test suite to **106 passing unit tests**.
+
 ---
 
 ## 8. Sequenced Implementation Roadmap
 
 *Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
 
-### **PR 7a: Anomaly Scans — Duplicate Charges, Trial Intercept & Annual Radar (Next)**
-* **Duplicate Charge Radar (`DUPLICATE_CHARGE`)**: Self-join detecting duplicate charges within a 72-hour window.
-* **New Subscription Intercept (`NEW_SUBSCRIPTION_DETECTED`)**: Intercepts first-time charges in the past 35 days to halt unwanted trial conversions.
-* **Annual Bill Radar (`ANNUAL_BILL_RADAR`)**: Pre-warns 30 days ahead of recurring semi-annual and annual lump sums.
-
-### **PR 11: Executive CFO Briefing Card & Digest**
+### **PR 11: Executive CFO Briefing Card & Digest (Next)**
 * Multi-section Google Chat card with visual emoji KPIs, burn pacing thermometer, and categorized optimization action items.
 * Weekly / monthly family executive digest.
 
