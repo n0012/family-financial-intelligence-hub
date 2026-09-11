@@ -112,6 +112,29 @@ async def run_sweep() -> dict:
     }
 
 
+async def run_tax_summary(tax_year: int | None = None) -> dict:
+    import datetime
+
+    from app.bq_service import get_bq_client
+    from app.config import BQ_DATASET_ID, BQ_PROJECT_ID
+    from app.receipt_service import format_tax_summary_text, get_tax_deductible_summary
+
+    target_project = BQ_PROJECT_ID
+    target_dataset = BQ_DATASET_ID
+    bq = get_bq_client(target_project)
+    target_year = tax_year or datetime.date.today().year
+
+    rows = await asyncio.to_thread(get_tax_deductible_summary, bq, target_project, target_dataset, target_year)
+    formatted = format_tax_summary_text(rows, target_year)
+
+    print("\n" + formatted + "\n")
+    return {
+        "status": "success",
+        "tax_year": target_year,
+        "summary": rows,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="job")
     sub = parser.add_subparsers(dest="task", required=True)
@@ -136,6 +159,14 @@ def main() -> int:
 
     sub.add_parser("sweep", help="Scan for paycheck surplus sweep opportunities")
 
+    tax_cmd = sub.add_parser("tax-summary", help="Print annual tax deductibility summary")
+    tax_cmd.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="Tax year (e.g. 2026)",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -148,6 +179,8 @@ def main() -> int:
             result = asyncio.run(run_digest(args.period))
         elif args.task == "sweep":
             result = asyncio.run(run_sweep())
+        elif args.task == "tax-summary":
+            result = asyncio.run(run_tax_summary(args.year))
         else:
             result = {"error": f"Unknown task {args.task}"}
     except Exception as e:

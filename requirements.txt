@@ -11,3 +11,4 @@ google-genai>=2.20.0
 pyyaml>=6.0.2
 google-cloud-pubsub>=2.19.0
 google-cloud-aiplatform>=1.111.0
+python-multipart>=0.0.20

@@ -994,4 +994,46 @@ CROSS JOIN upcoming_bills ub
 LEFT JOIN recent_income inc ON TRUE
 LEFT JOIN heloc_debt hd ON TRUE;
 
+-- ============================================================================
+-- PR 9: RECEIPT & TAX DEDUCTIBILITY INGESTION
+-- ============================================================================
+
+-- 1. Receipt Records Table (Document AI & Gemini Vision Extraction)
+CREATE TABLE IF NOT EXISTS `family_finance.receipt_records` (
+    receipt_id STRING NOT NULL,
+    uploaded_at TIMESTAMP NOT NULL,
+    user_email STRING,
+    merchant_name STRING NOT NULL,
+    receipt_date DATE NOT NULL,
+    total_amount NUMERIC NOT NULL,
+    deductible_amount NUMERIC NOT NULL,     -- Isolates deductible portion from mixed receipts
+    tax_amount NUMERIC,
+    tip_amount NUMERIC,
+    payment_method_last4 STRING,
+    tax_category STRING NOT NULL,           -- SCHEDULE_C_EXPENSE, HSA_FSA_ELIGIBLE, CHARITABLE_DONATION, CHILDCARE_DEPENDENT_CARE, STANDARD_NON_DEDUCTIBLE
+    is_tax_deductible BOOL NOT NULL,
+    deductibility_confidence FLOAT64,
+    tax_justification STRING,               -- Cites IRS IRC code or Pub (e.g. IRC Sec. 213(d) / Pub 502)
+    audit_status STRING NOT NULL,           -- VERIFIED, NEEDS_REVIEW, REJECTED
+    matched_transaction_id STRING,          -- Foreign key to raw_transactions.transaction_id
+    line_items_json STRING,                 -- PII-sanitized JSON line items: [{"description": "...", "amount": 0.0, "is_deductible": true}]
+    notes STRING
+);
+
+-- 2. Tax Deductible Summary Analytical View (Annual Schedule C / HSA / Charity Aggregations)
+CREATE OR REPLACE VIEW `family_finance.v_tax_deductible_summary` AS
+SELECT
+    EXTRACT(YEAR FROM receipt_date) AS tax_year,
+    tax_category,
+    COUNT(DISTINCT receipt_id) AS receipt_count,
+    ROUND(SUM(deductible_amount), 2) AS total_deductible_amount,
+    ROUND(SUM(total_amount), 2) AS total_gross_receipt_amount,
+    COUNTIF(matched_transaction_id IS NOT NULL) AS matched_transaction_count,
+    COUNTIF(audit_status = 'NEEDS_REVIEW') AS pending_review_count,
+    ARRAY_AGG(DISTINCT merchant_name IGNORE NULLS LIMIT 10) AS sample_merchants
+FROM `family_finance.receipt_records`
+WHERE is_tax_deductible = TRUE
+  AND audit_status != 'REJECTED'
+GROUP BY 1, 2;
+
 
