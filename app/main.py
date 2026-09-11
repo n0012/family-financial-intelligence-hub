@@ -802,7 +802,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         raw_payload.get("type")
         or (
             "CARD_CLICKED"
-            if raw_payload.get("action") or (raw_payload.get("commonEventObject", {}).get("invokedFunction"))
+            if raw_payload.get("action")
+            or (raw_payload.get("commonEventObject", {}).get("invokedFunction"))
+            or (raw_payload.get("common", {}).get("invokedFunction"))
+            or (raw_payload.get("commonEventObject", {}).get("parameters"))
+            or (raw_payload.get("common", {}).get("parameters"))
             else None
         )
         or ("SLASH_COMMAND" if app_command_payload else None)
