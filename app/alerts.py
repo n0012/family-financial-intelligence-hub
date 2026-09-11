@@ -1577,7 +1577,7 @@ def generate_executive_digest(
     txns AS (
         SELECT
             ABS(t.amount) AS amount,
-            COALESCE(t.merchant, 'Uncategorized') AS merchant,
+            COALESCE(t.clean_merchant_name, t.merchant_name, 'Uncategorized') AS merchant,
             COALESCE(t.category_name, 'Uncategorized') AS category_name
         FROM `{project_id}.{dataset_id}.raw_transactions` t
         CROSS JOIN chosen p
@@ -1677,7 +1677,7 @@ def generate_executive_digest(
             CURRENT_DATE('America/New_York') AS end_date
     )
     SELECT
-        COALESCE(t.merchant, 'Uncategorized') AS merchant,
+        COALESCE(t.clean_merchant_name, t.merchant_name, 'Uncategorized') AS merchant,
         ROUND(SUM(ABS(t.amount)), 2) AS total,
         COUNT(*) AS count
     FROM `{project_id}.{dataset_id}.raw_transactions` t
