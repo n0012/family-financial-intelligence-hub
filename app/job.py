@@ -71,6 +71,47 @@ async def run_digest(period: str = "weekly") -> dict:
     }
 
 
+async def run_sweep() -> dict:
+    import requests
+
+    from app.alerts import (
+        BQ_DATASET_ID,
+        BQ_PROJECT_ID,
+        build_chat_card_v2,
+        build_markdown_fallback,
+        check_paycheck_surplus_sweep,
+        resolve_secret,
+    )
+    from app.bq_service import get_bq_client
+
+    target_project = BQ_PROJECT_ID
+    target_dataset = BQ_DATASET_ID
+    bq = get_bq_client(target_project)
+
+    sweep_alerts = await asyncio.to_thread(check_paycheck_surplus_sweep, bq, target_project, target_dataset)
+
+    webhook_url = resolve_secret("alert-webhook-url", "ALERT_WEBHOOK_URL")
+    webhook_sent = False
+    if sweep_alerts and webhook_url:
+        try:
+            if "chat.googleapis.com" in webhook_url:
+                payload = build_chat_card_v2(sweep_alerts)
+            else:
+                md = build_markdown_fallback(sweep_alerts)
+                payload = {"content": md, "text": md}
+            resp = await asyncio.to_thread(requests.post, webhook_url, json=payload, timeout=10)
+            webhook_sent = resp.status_code in (200, 204)
+        except Exception as e:
+            logger.error(f"Sweep webhook dispatch failed: {e}")
+
+    return {
+        "status": "success",
+        "has_sweep_opportunity": len(sweep_alerts) > 0,
+        "sweep_alerts": sweep_alerts,
+        "webhook_dispatched": webhook_sent,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="job")
     sub = parser.add_subparsers(dest="task", required=True)
@@ -93,6 +134,8 @@ def main() -> int:
         help="Period for executive digest (weekly or monthly)",
     )
 
+    sub.add_parser("sweep", help="Scan for paycheck surplus sweep opportunities")
+
     args = parser.parse_args()
 
     try:
@@ -103,6 +146,8 @@ def main() -> int:
             result = asyncio.run(run_alerts())
         elif args.task == "digest":
             result = asyncio.run(run_digest(args.period))
+        elif args.task == "sweep":
+            result = asyncio.run(run_sweep())
         else:
             result = {"error": f"Unknown task {args.task}"}
     except Exception as e:

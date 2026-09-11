@@ -19,12 +19,14 @@ from app.alerts import (
     build_chat_card_v2,
     build_executive_digest_card,
     build_snooze_success_card,
+    check_paycheck_surplus_sweep,
     collect_all_alerts,
     execute_alert_scan,
     generate_daily_brief_synopsis,
     generate_executive_digest,
     get_daily_morning_brief,
     get_executive_cfo_digest,
+    get_paycheck_surplus_analysis,
     snooze_spend_alert,
     suppress_alert,
 )
@@ -255,6 +257,22 @@ async def executive_digest(period: str = "weekly"):
     return await asyncio.to_thread(generate_executive_digest, bq, BQ_PROJECT_ID, BQ_DATASET_ID, p)
 
 
+@app.get("/advisor/surplus-sweep", dependencies=[Depends(verify_api_key)], tags=["Spend Optimization Advisor"])
+async def paycheck_surplus_sweep():
+    """
+    Evaluates whether the family has safe surplus cash following recent paycheck deposits
+    to sweep into variable-rate debt (HELOC), protecting 30-day fixed overhead reserves
+    and computing exact daily, monthly, and annual interest savings.
+    """
+    bq = get_bq_client()
+    alerts = await asyncio.to_thread(check_paycheck_surplus_sweep, bq, BQ_PROJECT_ID, BQ_DATASET_ID)
+    return {
+        "status": "success",
+        "has_sweep_opportunity": len(alerts) > 0,
+        "alerts": alerts,
+    }
+
+
 def run_readonly_sql_tool(sql_query: str) -> str:
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
@@ -389,6 +407,7 @@ def ask_gemini_brain(
                     snooze_spend_alert,
                     get_daily_morning_brief,
                     get_executive_cfo_digest,
+                    get_paycheck_surplus_analysis,
                 ],
             ),
         )
@@ -1053,6 +1072,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             "• `/sync` to pull latest transactions\n"
             "• `/alerts` to run proactive spend scan\n"
             "• `/digest` for weekly or monthly executive CFO brief\n"
+            "• `/sweep` to calculate safe surplus cash to pay down HELOC\n"
             "• *You can also paste screenshots or financial documents!*"
         )
         return respond(help_text)
@@ -1147,6 +1167,31 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             )
         except Exception as e:
             return respond(f"⚠️ Failed to generate {period.lower()} digest: {e}")
+
+    # Command: /sweep or natural surplus sweep intent
+    is_sweep_intent = lower_text.startswith(("/sweep", "sweep")) or any(
+        phrase in lower_text
+        for phrase in [
+            "surplus sweep",
+            "paycheck sweep",
+            "safe to sweep",
+            "safe surplus",
+            "can i sweep",
+            "sweep money",
+            "sweep cash",
+            "heloc sweep",
+            "debt sweep",
+        ]
+    )
+    if is_sweep_intent:
+        try:
+            target_project = BQ_PROJECT_ID
+            target_dataset = BQ_DATASET_ID
+            bq = get_bq_client(target_project)
+            analysis_text = await asyncio.to_thread(get_paycheck_surplus_analysis, bq, target_project, target_dataset)
+            return respond(analysis_text)
+        except Exception as e:
+            return respond(f"⚠️ Failed to evaluate paycheck surplus sweep: {e}")
 
     # Natural language query -> Conversational Analytics Agent
     # If the response completes within 20s, return synchronously.
