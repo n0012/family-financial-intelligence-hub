@@ -93,10 +93,10 @@ Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity r
 Computes the exact daily interest cost and monthly carrying cost across all active liability facilities (Mortgage, HELOC, Loans, Revolving Credit):
 
 ```math
-\text{daily\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{365}
+\text{Daily Interest Cost} = \frac{\text{Current Balance} \times \text{APR}}{365}
 ```
 ```math
-\text{monthly\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{12}
+\text{Monthly Interest Cost} = \frac{\text{Current Balance} \times \text{APR}}{12}
 ```
 
 ### `v_debt_summary`
@@ -173,13 +173,20 @@ Scans for periodic quarterly/annual lump-sum obligations (property taxes, insura
 Evaluates recent paycheck deposits against liquid checking reserves, 30-day fixed overhead burn (with a 15% safety buffer), and upcoming 30-day lump-sum bills:
 
 ```math
-\text{safe\_reserve\_buffer} = \max(2000, (\text{monthly\_fixed\_burn} \times 1.15) + \text{upcoming\_30d\_lump\_sums})
+\text{Safe Reserve Buffer} = \max(2000, (\text{Monthly Fixed Burn} \times 1.15) + \text{Upcoming 30d Lump Sums})
 ```
 ```math
-\text{safe\_surplus} = \max(0, \text{liquid\_balance} - \text{safe\_reserve\_buffer})
+\text{Safe Surplus} = \max(0, \text{Liquid Balance} - \text{Safe Reserve Buffer})
 ```
 ```math
-\text{recommended\_sweep} = \min(\text{safe\_surplus}, \text{target\_debt\_balance})
+\text{Recommended Sweep} = \min(\text{Safe Surplus}, \text{Target Debt Balance})
+```
+
+**BigQuery SQL Expressions:**
+```sql
+safe_reserve_buffer      = GREATEST(2000.00, (monthly_fixed_burn * 1.15) + upcoming_30d_lump_sums)
+safe_surplus             = GREATEST(0.00, liquid_balance - safe_reserve_buffer)
+recommended_sweep_amount = LEAST(safe_surplus, target_debt_balance)
 ```
 
 Surplus cash is routed to the highest-rate liability (e.g. variable HELOC), calculating immediate daily, monthly, and annual interest carry savings while reporting total multi-facility debt posture.
