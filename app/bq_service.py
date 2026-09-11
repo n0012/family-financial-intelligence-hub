@@ -67,8 +67,9 @@ def run_readonly_sql(
 ) -> str:
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
-    (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_overlap,
-    v_food_efficiency, v_micro_transaction_leakage, raw_accounts, raw_transactions).
+    (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_price_creep,
+    v_subscription_overlap, v_utility_seasonal_baseline, v_food_efficiency,
+    v_micro_transaction_leakage, raw_accounts, raw_transactions).
 
     Strictly enforces read-only access and caps query byte scans to prevent cost overruns.
     """

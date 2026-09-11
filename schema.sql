@@ -157,7 +157,7 @@ classified AS (
                 THEN 'HOME_MEDIA_SERVER'
             WHEN REGEXP_CONTAINS(LOWER(merchant), r'(xbox game pass|playstation plus|nintendo switch online|steam\b)')
                 THEN 'GAMING'
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(hellofresh|blue apron|home chef|factor|every ?plate|sunbasket)')
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(hellofresh|blue apron|home chef|green chef|factor|every ?plate|sunbasket)')
                 THEN 'MEAL_KIT_DELIVERY'
             WHEN LOWER(category_name) IN ('fitness', 'gym', 'gyms & fitness')
               OR REGEXP_CONTAINS(LOWER(merchant), r'(gym|fitness|athletic club|peloton|crossfit|yoga|pilates|health club)')
@@ -320,11 +320,15 @@ SELECT
     s.min_charge,
     s.max_charge,
     s.charge_variability,
+    -- Bands are deliberately wide: avg_cadence_days is span/(n-1), so a single skipped or
+    -- doubled cycle in two years of history drags a plainly monthly service off a narrow
+    -- 25-35 band. The label is descriptive only -- estimated_annual_cost below is derived
+    -- from the raw cadence, so a mislabelled band never distorts the run rate.
     CASE
-        WHEN s.avg_cadence_days BETWEEN 25 AND 35 THEN 'MONTHLY'
-        WHEN s.avg_cadence_days BETWEEN 80 AND 100 THEN 'QUARTERLY'
+        WHEN s.avg_cadence_days BETWEEN 25 AND 40 THEN 'MONTHLY'
+        WHEN s.avg_cadence_days BETWEEN 80 AND 110 THEN 'QUARTERLY'
         WHEN s.avg_cadence_days BETWEEN 160 AND 200 THEN 'SEMI_ANNUAL'
-        WHEN s.avg_cadence_days BETWEEN 340 AND 400 THEN 'ANNUAL'
+        WHEN s.avg_cadence_days BETWEEN 330 AND 400 THEN 'ANNUAL'
         ELSE 'IRREGULAR'
     END AS billing_cadence,
     -- Cadence-normalised. The previous CASE fell through to avg_charge * charge_count for
@@ -668,8 +672,10 @@ seasonal_norm AS (
         ROUND(STDDEV_SAMP(month_total), 2) AS seasonal_stddev,
         COUNT(*) AS years_observed
     FROM utility_months
-    -- Prior years only; the month under test must not be inside its own baseline.
-    WHERE spend_month < DATE_TRUNC(CURRENT_DATE(), MONTH)
+    -- Strictly before the month under test (the last completed month). Cutting at the
+    -- current month instead would leave the tested month inside its own baseline, pulling
+    -- the average toward it and blunting exactly the overage we are trying to detect.
+    WHERE spend_month < DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
     GROUP BY 1, 2
 )
 SELECT

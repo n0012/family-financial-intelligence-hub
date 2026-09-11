@@ -25,13 +25,29 @@ from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, resolve_secret
 logger = logging.getLogger("monarch-gemini.alerts")
 
 
+def _price_creep_action(merchant: str, disposition: Any, annual_impact: float) -> str:
+    """Suggested action wording. An underwritten policy cannot be 'rotated', so the verb
+    has to follow the merchant's disposition or the advice is unactionable."""
+    if disposition == "RESHOPPABLE":
+        return (
+            f"{merchant} is a contracted service, so cancelling is not the lever. "
+            f"Request the loyalty/renewal rate or obtain two competing quotes before the next term "
+            f"to recover the ${annual_impact:.2f}/year increase."
+        )
+    return (
+        f"Audit usage for {merchant}. Downgrading a tier or rotating away recovers the "
+        f"${annual_impact:.2f}/year increase; cancelling outright recovers the full plan cost."
+    )
+
+
 def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks for subscriptions where price has increased in the last 45 days."""
     alerts = []
     price_creep_sql = f"""
-    SELECT merchant, latest_charge, prior_charge, price_increase_amount, pct_increase, estimated_annual_cost, effective_date
+    SELECT merchant, disposition, latest_charge, prior_charge, price_increase_amount,
+           pct_increase, annual_impact, estimated_annual_cost, effective_date
     FROM `{project_id}.{dataset_id}.v_subscription_price_creep`
-    ORDER BY price_increase_amount DESC
+    ORDER BY annual_impact DESC
     LIMIT 3;
     """
     try:
@@ -42,10 +58,11 @@ def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) ->
             pct = float(getattr(r, "pct_increase", 0) or 0)
             latest = float(getattr(r, "latest_charge", 0) or 0)
             prior = float(getattr(r, "prior_charge", 0) or 0)
+            # The recoverable amount is the annualised *increase*, never the whole run
+            # rate: a $2.89/mo step is $34.68/yr of new spend, not a $727/yr saving.
+            impact = float(getattr(r, "annual_impact", 0) or 0)
             annual = float(getattr(r, "estimated_annual_cost", 0) or 0)
             eff_date = getattr(r, "effective_date", None)
-            if eff_date is not None and str(type(eff_date)).endswith("MagicMock'>"):
-                eff_date = None
             eff_date_str = f" on {eff_date}" if eff_date else ""
             alerts.append(
                 {
@@ -53,8 +70,11 @@ def check_subscription_price_creep(bq: Any, project_id: str, dataset_id: str) ->
                     "severity": "WARNING",
                     "alert_key": key,
                     "title": f"Subscription Price Hike: {merch} (+{pct:.1f}%)",
-                    "detail": f"Latest charge increased from ${prior:.2f} to ${latest:.2f}{eff_date_str} (Annual cost: ${annual:.2f}).",
-                    "suggested_fix": f"Audit usage for {merch} or cancel/rotate to save up to ${annual:.2f}/year.",
+                    "detail": (
+                        f"Charge rose from ${prior:.2f} to ${latest:.2f}{eff_date_str} "
+                        f"— ${impact:.2f}/year of new spend on a ${annual:.2f}/year plan."
+                    ),
+                    "suggested_fix": _price_creep_action(merch, getattr(r, "disposition", None), impact),
                 }
             )
     except Exception as e:
@@ -149,48 +169,25 @@ def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> lis
         active_service_count,
         combined_monthly_cost,
         combined_annual_cost,
+        consolidation_savings_monthly,
+        consolidation_savings_annual,
         active_services
     FROM `{project_id}.{dataset_id}.v_subscription_overlap`
-    ORDER BY combined_monthly_cost DESC
+    ORDER BY consolidation_savings_monthly DESC
     LIMIT 3;
     """
     try:
         rows = list(bq.query(sql).result())
         for r in rows:
-            # Safely resolve attributes, accounting for BigQuery rows, dicts, and test MagicMocks
-            domain_raw = None
-            for attr in ("domain_name", "functional_domain", "category_name"):
-                v = getattr(r, attr, None)
-                if v is not None and not str(type(v)).endswith("MagicMock'>"):
-                    domain_raw = str(v)
-                    break
-            if not domain_raw:
-                domain_raw = "Subscription"
-
+            domain_raw = str(getattr(r, "domain_name", None) or "Subscription")
             domain_title = domain_raw.replace("_", " ").title()
             key = f"overlap:{domain_raw.lower().strip().replace(' ', '_')}"
-
-            count = None
-            for attr in ("active_service_count", "active_subscriptions_count"):
-                v = getattr(r, attr, None)
-                if v is not None and not str(type(v)).endswith("MagicMock'>"):
-                    count = int(v)
-                    break
-            count = count if count is not None else 0
-
-            annual_cost = None
-            for attr in ("combined_annual_cost", "category_annual_run_rate"):
-                v = getattr(r, attr, None)
-                if v is not None and not str(type(v)).endswith("MagicMock'>"):
-                    annual_cost = float(v)
-                    break
-            annual_cost = annual_cost if annual_cost is not None else 0.0
-
-            monthly_cost = getattr(r, "combined_monthly_cost", None)
-            if monthly_cost is None or str(type(monthly_cost)).endswith("MagicMock'>"):
-                monthly_cost = 0.0
-            else:
-                monthly_cost = float(monthly_cost)
+            count = int(getattr(r, "active_service_count", 0) or 0)
+            annual_cost = float(getattr(r, "combined_annual_cost", 0) or 0)
+            monthly_cost = float(getattr(r, "combined_monthly_cost", 0) or 0)
+            # Savings from consolidating onto the largest plan. Quoting the whole domain
+            # total implies cancelling every service including the one being kept.
+            savings = float(getattr(r, "consolidation_savings_monthly", 0) or 0)
 
             alerts.append(
                 {
@@ -199,12 +196,68 @@ def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> lis
                     "alert_key": key,
                     "title": f"Subscription Overlap: {domain_title} ({count} active)",
                     "detail": f"Services: {r.active_services}. Combined cost: ${monthly_cost:.2f}/mo (${annual_cost:.2f}/yr).",
-                    "suggested_fix": f"Audit and rotate duplicate services in {domain_title} to liberate up to ${monthly_cost:.2f}/month.",
+                    "suggested_fix": (
+                        f"These {count} services cover the same need. Consolidating onto the one you use most "
+                        f"frees ${savings:.2f}/month (${savings * 12:.2f}/year)."
+                    ),
                 }
             )
     except Exception as e:
         logger.warning(f"Subscription overlap check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"Subscription overlap check failed: {e}"})
+    return alerts
+
+
+def check_utility_seasonal_spike(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
+    """Flags metered utility months that overshoot the same calendar month in prior years.
+
+    Utilities are excluded from the subscription corpus because they are regulated and have
+    no cancel action, so they need their own detector. The comparison is seasonal rather
+    than sequential: a winter heating bill is not a price hike over autumn.
+    """
+    alerts = []
+    sql = f"""
+    SELECT merchant, spend_month, month_total, seasonal_avg, seasonal_stddev,
+           years_observed, variance_vs_season, variance_pct
+    FROM `{project_id}.{dataset_id}.v_utility_seasonal_baseline`
+    WHERE variance_vs_season > 0
+      AND variance_pct >= 25.0
+      -- With only one prior year there is no spread to speak of, so the percentage gate
+      -- carries the decision alone; with more history require a genuine outlier too.
+      AND (years_observed < 2 OR variance_vs_season > 2 * COALESCE(seasonal_stddev, 0))
+    ORDER BY variance_vs_season DESC
+    LIMIT 2;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        for r in rows:
+            merch = getattr(r, "merchant", "Utility") or "Utility"
+            month = str(getattr(r, "spend_month", ""))[:7]
+            total = float(getattr(r, "month_total", 0) or 0)
+            norm = float(getattr(r, "seasonal_avg", 0) or 0)
+            over = float(getattr(r, "variance_vs_season", 0) or 0)
+            pct = float(getattr(r, "variance_pct", 0) or 0)
+            years = int(getattr(r, "years_observed", 0) or 0)
+            alerts.append(
+                {
+                    "type": "UTILITY_SEASONAL_SPIKE",
+                    "severity": "INFO",
+                    "alert_key": f"utility_season:{merch.lower().strip().replace(' ', '_')}:{month}",
+                    "title": f"Utility Above Seasonal Norm: {merch} (+{pct:.1f}%)",
+                    "detail": (
+                        f"{month} came in at ${total:.2f} against a ${norm:.2f} average for the same "
+                        f"month across {years} prior year(s) — ${over:.2f} above seasonal normal."
+                    ),
+                    "suggested_fix": (
+                        f"This is consumption or rate movement, not a cancellable plan. Compare the "
+                        f"rate schedule on the latest {merch} statement against the prior year and check "
+                        f"for a thermostat schedule or standing-load change."
+                    ),
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Utility seasonal check failed: {e}")
+        alerts.append({"type": "QUERY_ERROR", "detail": f"Utility seasonal check failed: {e}"})
     return alerts
 
 
@@ -469,13 +522,251 @@ def suppress_alert(
         return False
 
 
-def build_chat_card_v2(alerts: list[dict[str, Any]]) -> dict[str, Any]:
-    """Constructs Google Chat Card V2 representation of alerts with interactive snooze actions."""
-    widgets: list[dict[str, Any]] = []
+def generate_daily_brief_synopsis(
+    bq: Any,
+    project_id: str,
+    dataset_id: str,
+    alerts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Generates a daily FinSage morning brief and executive synopsis:
+    - Liquid checking reserves and coverage of fixed monthly obligations
+    - Active HELOC balance and daily interest overhead ($/day)
+    - Month-to-date spending total and daily burn rate pacing
+    - High-priority focus items on what to pay attention to today (synthesized from active alerts)
+    """
+    alerts = alerts or []
+    from datetime import date
+
+    today = date.today()
+    brief_date_str = today.strftime("%A, %b %-d, %Y")
+    day_of_month = today.day
+
+    liquid_balance = 0.0
+    fixed_burn = 0.0
+    heloc_name = "HELOC"
+    heloc_balance = 0.0
+    heloc_apr = 0.0
+    daily_interest_cost = 0.0
+    monthly_interest_cost = 0.0
+    mtd_spend = 0.0
+    mtd_count = 0
+
+    sql = f"""
+    WITH liquid AS (
+        SELECT COALESCE(ROUND(SUM(current_balance), 2), 0.0) AS liquid_balance
+        FROM `{project_id}.{dataset_id}.raw_accounts`
+        WHERE LOWER(COALESCE(type_name, '')) IN ('depository', 'checking')
+           OR LOWER(COALESCE(subtype_name, '')) IN ('checking', 'savings')
+    ),
+    fixed AS (
+        SELECT COALESCE(ROUND(SUM(avg_charge), 2), 0.0) AS fixed_burn
+        FROM `{project_id}.{dataset_id}.v_active_subscriptions`
+    ),
+    heloc AS (
+        SELECT
+            display_name AS account_name,
+            current_balance AS heloc_balance,
+            apr AS heloc_apr,
+            daily_interest_cost,
+            monthly_interest_cost
+        FROM `{project_id}.{dataset_id}.v_heloc_daily_cost`
+        LIMIT 1
+    ),
+    mtd AS (
+        SELECT
+            COALESCE(ROUND(SUM(ABS(amount)), 2), 0.0) AS mtd_spend,
+            COUNT(*) AS mtd_count
+        FROM `{project_id}.{dataset_id}.raw_transactions`
+        WHERE amount < 0
+          AND pending = FALSE
+          AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE())
+    )
+    SELECT
+        CURRENT_DATE() AS brief_date,
+        EXTRACT(DAY FROM CURRENT_DATE()) AS day_of_month,
+        l.liquid_balance,
+        f.fixed_burn,
+        h.account_name AS heloc_name,
+        h.heloc_balance,
+        h.heloc_apr,
+        h.daily_interest_cost,
+        h.monthly_interest_cost,
+        m.mtd_spend,
+        m.mtd_count
+    FROM liquid l
+    CROSS JOIN fixed f
+    LEFT JOIN heloc h ON TRUE
+    CROSS JOIN mtd m;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        if rows:
+            r = rows[0]
+            if getattr(r, "brief_date", None):
+                brief_date_str = str(r.brief_date)
+            if getattr(r, "day_of_month", None):
+                day_of_month = int(r.day_of_month)
+            liquid_balance = float(getattr(r, "liquid_balance", 0.0) or 0.0)
+            fixed_burn = float(getattr(r, "fixed_burn", 0.0) or 0.0)
+            heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
+            heloc_balance = float(getattr(r, "heloc_balance", 0.0) or 0.0)
+            heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
+            daily_interest_cost = float(getattr(r, "daily_interest_cost", 0.0) or 0.0)
+            monthly_interest_cost = float(getattr(r, "monthly_interest_cost", 0.0) or 0.0)
+            mtd_spend = float(getattr(r, "mtd_spend", 0.0) or 0.0)
+            mtd_count = int(getattr(r, "mtd_count", 0) or 0)
+    except Exception as e:
+        logger.warning(f"Failed to query posture stats for morning brief: {e}")
+
+    coverage_ratio = (liquid_balance / fixed_burn) if fixed_burn > 0 else 0.0
+    daily_burn_rate = (mtd_spend / day_of_month) if day_of_month > 0 else 0.0
+
+    posture_lines = []
+    if liquid_balance > 0:
+        buffer_str = f" ({coverage_ratio:.1f}x monthly buffer)" if coverage_ratio > 0 else ""
+        posture_lines.append(f"🏦 <b>Liquid Cash:</b> ${liquid_balance:,.2f}{buffer_str}")
+    if heloc_balance > 0:
+        posture_lines.append(
+            f"💳 <b>HELOC Carry:</b> ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) • Balance: ${heloc_balance:,.2f}"
+        )
+    if mtd_spend > 0:
+        posture_lines.append(
+            f"📊 <b>Month-to-Date Spend:</b> ${mtd_spend:,.2f} (Day {day_of_month} • ~${daily_burn_rate:,.2f}/day)"
+        )
+    if not posture_lines:
+        posture_lines.append("📊 <b>Account Posture:</b> Balances synchronized and active.")
+    posture_text = "<br>".join(posture_lines)
+
+    posture_md_lines = []
+    if liquid_balance > 0:
+        buffer_str = f" ({coverage_ratio:.1f}x monthly buffer)" if coverage_ratio > 0 else ""
+        posture_md_lines.append(f"• **Liquid Reserves**: ${liquid_balance:,.2f}{buffer_str}")
+    if heloc_balance > 0:
+        posture_md_lines.append(
+            f"• **HELOC Daily Carry**: ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) — Balance: ${heloc_balance:,.2f}"
+        )
+    if mtd_spend > 0:
+        posture_md_lines.append(
+            f"• **Month-to-Date Spend**: ${mtd_spend:,.2f} (Day {day_of_month} • ~${daily_burn_rate:,.2f}/day)"
+        )
+    if not posture_md_lines:
+        posture_md_lines.append("• **Account Posture**: Balances synchronized and active.")
+    posture_md = "\n".join(posture_md_lines)
+
+    focus_items = []
+    focus_items_md = []
+
+    price_alerts = [a for a in alerts if a.get("type") == "PRICE_CREEP"]
+    for pa in price_alerts[:2]:
+        t = pa.get("title", "").replace("Subscription Price Hike: ", "")
+        focus_items.append(f"🔍 <b>Price Hike:</b> {t} — {pa.get('detail', '')}. {pa.get('suggested_fix', '')}")
+        focus_items_md.append(f"**Price Hike**: {t} — {pa.get('detail', '')}. {pa.get('suggested_fix', '')}")
+
+    food_alerts = [a for a in alerts if a.get("type") == "FOOD_LEAKAGE"]
+    for fa in food_alerts[:1]:
+        focus_items.append(f"🍔 <b>Food Pacing:</b> {fa.get('title', '')}. {fa.get('suggested_fix', '')}")
+        focus_items_md.append(f"**Food Pacing**: {fa.get('title', '')}. {fa.get('suggested_fix', '')}")
+
+    overlap_alerts = [a for a in alerts if a.get("type") == "SUBSCRIPTION_OVERLAP"]
+    for oa in overlap_alerts[:1]:
+        focus_items.append(f"🔄 <b>Subscription Duplication:</b> {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
+        focus_items_md.append(f"**Subscription Duplication**: {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
+
+    budget_alerts = [a for a in alerts if a.get("type") in ("BUDGET_CAP_EXCEEDED", "BUDGET_CAP_PACING")]
+    for ba in budget_alerts[:1]:
+        focus_items.append(f"⚠️ <b>Budget Warning:</b> {ba.get('title', '')} ({ba.get('detail', '')})")
+        focus_items_md.append(f"**Budget Warning**: {ba.get('title', '')} ({ba.get('detail', '')})")
+
+    micro_alerts = [a for a in alerts if a.get("type") == "MICRO_TRANSACTION_LEAKAGE"]
+    for ma in micro_alerts[:1]:
+        focus_items.append(f"☕ <b>Convenience Leakage:</b> {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
+        focus_items_md.append(f"**Convenience Leakage**: {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
+
+    if daily_interest_cost >= 15.0:
+        focus_items.append(
+            f"💳 <b>HELOC Paydown:</b> Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
+        )
+        focus_items_md.append(
+            f"**HELOC Paydown**: Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
+        )
+
+    if not focus_items:
+        focus_items.append("✅ <b>All Systems Normal:</b> Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
+        focus_items_md.append("**All Systems Normal**: Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
+
+    return {
+        "date": brief_date_str,
+        "day_of_month": day_of_month,
+        "liquid_balance": liquid_balance,
+        "fixed_burn": fixed_burn,
+        "coverage_ratio": round(coverage_ratio, 2),
+        "heloc_name": heloc_name,
+        "heloc_balance": heloc_balance,
+        "heloc_apr": heloc_apr,
+        "daily_interest_cost": daily_interest_cost,
+        "monthly_interest_cost": monthly_interest_cost,
+        "mtd_spend": mtd_spend,
+        "mtd_count": mtd_count,
+        "daily_burn_rate": round(daily_burn_rate, 2),
+        "posture_text": posture_text,
+        "posture_md": posture_md,
+        "focus_items": focus_items,
+        "focus_items_md": focus_items_md,
+    }
+
+
+def build_chat_card_v2(
+    alerts: list[dict[str, Any]],
+    synopsis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Constructs Google Chat Card V2 representation of the daily morning brief synopsis
+    and spend optimization alerts with interactive snooze actions.
+    """
+    sections: list[dict[str, Any]] = []
+
+    # Section 1: Morning Financial Synopsis (if synopsis provided)
+    if synopsis:
+        synopsis_widgets: list[dict[str, Any]] = []
+        posture_text = synopsis.get("posture_text")
+        if posture_text:
+            synopsis_widgets.append(
+                {
+                    "decoratedText": {
+                        "topLabel": f"DAILY POSTURE SNAPSHOT • {synopsis.get('date', 'TODAY')}",
+                        "text": posture_text,
+                        "startIcon": {"knownIcon": "DOLLAR"},
+                        "wrapText": True,
+                    }
+                }
+            )
+        focus_items = synopsis.get("focus_items", [])
+        if focus_items:
+            synopsis_widgets.append(
+                {
+                    "decoratedText": {
+                        "topLabel": "WHAT TO PAY ATTENTION TO TODAY",
+                        "text": "<br>".join(focus_items),
+                        "startIcon": {"knownIcon": "DESCRIPTION"},
+                        "wrapText": True,
+                    }
+                }
+            )
+        if synopsis_widgets:
+            sections.append(
+                {
+                    "header": "🌅 Morning Financial Synopsis",
+                    "widgets": synopsis_widgets,
+                }
+            )
+
+    # Section 2: Daily Optimization Opportunities
+    alert_widgets: list[dict[str, Any]] = []
     for a in alerts:
         if not a.get("title"):
             continue
-        widgets.append(
+        alert_widgets.append(
             {
                 "decoratedText": {
                     "topLabel": a.get("type", "FINANCIAL ADVISORY").replace("_", " "),
@@ -485,7 +776,7 @@ def build_chat_card_v2(alerts: list[dict[str, Any]]) -> dict[str, Any]:
             }
         )
         if a.get("alert_key"):
-            widgets.append(
+            alert_widgets.append(
                 {
                     "buttonList": {
                         "buttons": [
@@ -508,8 +799,8 @@ def build_chat_card_v2(alerts: list[dict[str, Any]]) -> dict[str, Any]:
                 }
             )
 
-    if not widgets:
-        widgets.append(
+    if not alert_widgets:
+        alert_widgets.append(
             {
                 "decoratedText": {
                     "text": "✅ No active financial anomalies or spending leaks detected.",
@@ -518,24 +809,34 @@ def build_chat_card_v2(alerts: list[dict[str, Any]]) -> dict[str, Any]:
             }
         )
 
+    sections.append(
+        {
+            "header": "Daily Optimization Opportunities",
+            "widgets": alert_widgets,
+        }
+    )
+
+    card_header = {
+        "title": "FinSage",
+        "subtitle": "Daily Synopsis & Spend Advisory" if synopsis else "Daily Spend Optimization & Debt Advisory",
+        "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+        "imageType": "CIRCLE",
+    }
+
+    notification_text = (
+        "🌅 *FinSage*: Morning financial synopsis and daily advisory recommendations."
+        if synopsis
+        else "🔔 *FinSage*: Proactive Advisory Scan completed with new recommendations."
+    )
+
     return {
-        "text": "🔔 *FinSage*: Proactive Advisory Scan completed with new recommendations.",
+        "text": notification_text,
         "cardsV2": [
             {
                 "cardId": "financialAdvisorDailyAlert",
                 "card": {
-                    "header": {
-                        "title": "FinSage",
-                        "subtitle": "Daily Spend Optimization & Debt Advisory",
-                        "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
-                        "imageType": "CIRCLE",
-                    },
-                    "sections": [
-                        {
-                            "header": "Daily Optimization Opportunities",
-                            "widgets": widgets,
-                        }
-                    ],
+                    "header": card_header,
+                    "sections": sections,
                 },
             }
         ],
@@ -572,13 +873,32 @@ def build_snooze_success_card(alert_key: str, alert_type: str, days: int) -> dic
     }
 
 
-def build_markdown_fallback(alerts: list[dict[str, Any]]) -> str:
-    """Constructs plain text / Markdown fallback for Slack or Discord."""
-    lines = ["**🔔 Sage: Proactive Advisory Scan**\n"]
-    for a in alerts:
-        if a.get("title"):
-            lines.append(f"• **{a['title']}**\n  _{a['detail']}_\n  👉 **Action**: {a['suggested_fix']}\n")
+def build_markdown_fallback(
+    alerts: list[dict[str, Any]],
+    synopsis: dict[str, Any] | None = None,
+) -> str:
+    """Constructs plain text / Markdown fallback for Slack, Discord, or terminal/chat output."""
+    lines = []
+    if synopsis:
+        lines.append(f"**🌅 FinSage Morning Brief — {synopsis.get('date', '')}**\n")
+        if synopsis.get("posture_md"):
+            lines.append(f"**Daily Posture Snapshot:**\n{synopsis['posture_md']}\n")
+        if synopsis.get("focus_items_md"):
+            lines.append("**What to Pay Attention to Today:**")
+            for item in synopsis["focus_items_md"]:
+                lines.append(f"• {item}")
+            lines.append("")
+        lines.append("---\n")
+
+    lines.append("**🔔 Daily Optimization Opportunities**\n")
+    if not alerts or not any(a.get("title") for a in alerts):
+        lines.append("✅ No active financial anomalies or spending leaks detected.")
+    else:
+        for a in alerts:
+            if a.get("title"):
+                lines.append(f"• **{a['title']}**\n  _{a['detail']}_\n  👉 **Action**: {a['suggested_fix']}\n")
     return "\n".join(lines)
+
 
 
 def collect_all_alerts(
@@ -593,6 +913,7 @@ def collect_all_alerts(
     raw_alerts.extend(check_food_efficiency(bq, target_project, target_dataset))
     raw_alerts.extend(check_heloc_daily_cost(bq, target_project, target_dataset))
     raw_alerts.extend(check_subscription_overlap(bq, target_project, target_dataset))
+    raw_alerts.extend(check_utility_seasonal_spike(bq, target_project, target_dataset))
     raw_alerts.extend(check_micro_transaction_leakage(bq, target_project, target_dataset))
     raw_alerts.extend(check_memory_budget_limits(bq, target_project, target_dataset, user_email))
 
@@ -628,16 +949,17 @@ async def execute_alert_scan(
 
     # Offload blocking BigQuery queries to worker thread
     alerts = await asyncio.to_thread(collect_all_alerts, bq, target_project, target_dataset, user_email)
+    synopsis = await asyncio.to_thread(generate_daily_brief_synopsis, bq, target_project, target_dataset, alerts)
 
     # Dispatch to Webhook if configured (non-blocking)
     target_webhook = webhook_url or resolve_secret("alert-webhook-url", "ALERT_WEBHOOK_URL")
     webhook_sent = False
-    if target_webhook and alerts and requests:
+    if target_webhook and requests:
         try:
             if "chat.googleapis.com" in target_webhook:
-                payload = build_chat_card_v2(alerts)
+                payload = build_chat_card_v2(alerts, synopsis=synopsis)
             else:
-                msg = build_markdown_fallback(alerts)
+                msg = build_markdown_fallback(alerts, synopsis=synopsis)
                 payload = {"content": msg, "text": msg}
 
             resp = await asyncio.to_thread(requests.post, target_webhook, json=payload, timeout=10)
@@ -647,10 +969,36 @@ async def execute_alert_scan(
 
     return {
         "status": "success",
+        "brief_synopsis": synopsis,
         "alert_count": len([a for a in alerts if a.get("type") != "QUERY_ERROR"]),
         "alerts": alerts,
         "webhook_dispatched": webhook_sent,
     }
+
+
+def get_daily_morning_brief() -> str:
+    """
+    Retrieves the daily FinSage morning brief and executive synopsis,
+    including liquid cash reserves, monthly fixed burn coverage, HELOC carrying cost,
+    month-to-date spending pacing, and key focus items to pay attention to today.
+    """
+    target_project = BQ_PROJECT_ID
+    target_dataset = BQ_DATASET_ID
+    if not target_project:
+        return "Error: BQ_PROJECT_ID is not configured."
+
+    try:
+        if bigquery:
+            bq = bigquery.Client(project=target_project)
+        else:
+            return "BigQuery client is not available."
+    except Exception as e:
+        return f"Error initializing BigQuery client: {e}"
+
+    alerts = collect_all_alerts(bq, target_project, target_dataset)
+    synopsis = generate_daily_brief_synopsis(bq, target_project, target_dataset, alerts)
+    return build_markdown_fallback(alerts, synopsis=synopsis)
+
 
 
 def snooze_spend_alert(alert_key_or_name: str, days: int = 7) -> str:

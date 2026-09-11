@@ -18,8 +18,9 @@ Rather than sending vanity notifications, every alert in FinSage adheres to thre
 
 | Alert Key | Type | Trigger / Logic | BigQuery Source |
 | :--- | :--- | :--- | :--- |
-| `price_creep:{merchant}` | `PRICE_CREEP` | Recurring subscription increased > $1.00 vs minimum past charge | `v_active_subscriptions` |
-| `overlap:{category}` | `SUBSCRIPTION_OVERLAP` | 2+ concurrent subscriptions in same category (e.g. streaming, cloud) | `v_subscription_overlap` |
+| `price_creep:{merchant}` | `PRICE_CREEP` | Latest bill exceeds the mean of the prior 3 cycles by 3–40% and >$0.50, within 45 days, on a `CANCELLABLE` or `RESHOPPABLE` merchant | `v_subscription_price_creep` |
+| `overlap:{domain}` | `SUBSCRIPTION_OVERLAP` | Concurrently active, functionally substitutable services in one domain (3+ for video streaming, 2+ elsewhere) with combined run rate ≥ $15/mo | `v_subscription_overlap` |
+| `utility_season:{merchant}:{yyyy-mm}` | `UTILITY_SEASONAL_SPIKE` | Metered utility month ≥ 25% above the same calendar month in prior years (and >2σ where enough history exists) | `v_utility_seasonal_baseline` |
 | `micro:{merchant}` | `MICRO_TRANSACTION_LEAKAGE` | $\ge$ 4 sub-$35 convenience charges in 90 days with annualized run-rate | `v_micro_transaction_leakage` |
 | `food_leakage:{yyyy-mm}` | `FOOD_LEAKAGE` | Dining & delivery spend exceeds 40% of total food budget | `v_food_efficiency` |
 | `budget_cap:{cat}:{yyyy-mm}` | `BUDGET_CAP_EXCEEDED` | Spend exceeds user limit stored in Vertex AI Memory Bank | `raw_transactions` + Memory Bank |
@@ -72,8 +73,8 @@ flowchart TD
   ```sql
   CREATE OR REPLACE VIEW `family_finance.v_duplicate_charges` AS
   SELECT
-      t1.id AS primary_id,
-      t2.id AS duplicate_id,
+      t1.transaction_id AS primary_id,
+      t2.transaction_id AS duplicate_id,
       COALESCE(t1.clean_merchant_name, t1.merchant_name) AS merchant,
       t1.amount,
       t1.transaction_date AS original_date,
@@ -83,7 +84,7 @@ flowchart TD
   JOIN `family_finance.raw_transactions` t2
     ON COALESCE(t1.clean_merchant_name, t1.merchant_name) = COALESCE(t2.clean_merchant_name, t2.merchant_name)
    AND t1.amount = t2.amount
-   AND t1.id < t2.id
+   AND t1.transaction_id < t2.transaction_id
    AND t1.amount < 0
    AND t1.pending = FALSE AND t2.pending = FALSE
    AND t2.transaction_date BETWEEN t1.transaction_date AND DATE_ADD(t1.transaction_date, INTERVAL 3 DAY)
@@ -189,7 +190,7 @@ flowchart TD
   CREATE OR REPLACE VIEW `family_finance.v_paycheck_surplus_sweep` AS
   WITH latest_inflow AS (
       SELECT
-          id,
+          transaction_id,
           account_id,
           merchant_name,
           ABS(amount) AS inflow_amount,
@@ -204,12 +205,12 @@ flowchart TD
       SELECT
           SUM(current_balance) AS total_checking_balance
       FROM `family_finance.raw_accounts`
-      WHERE LOWER(type) IN ('depository', 'checking')
-        AND is_closed = FALSE
+      WHERE LOWER(type_name) IN ('depository', 'checking')
+        AND is_asset = TRUE
   ),
   monthly_fixed_overhead AS (
       SELECT
-          COALESCE(SUM(avg_charge), 4500.00) AS fixed_monthly_burn
+          COALESCE(SUM(monthly_run_rate), 4500.00) AS fixed_monthly_burn
       FROM `family_finance.v_active_subscriptions`
   )
   SELECT
@@ -258,9 +259,9 @@ flowchart TD
   ```sql
   CREATE OR REPLACE VIEW `family_finance.v_heloc_rate_history` AS
   SELECT
-      account_name,
+      display_name,
       current_balance,
-      current_apr,
+      apr,
       daily_interest_cost,
       monthly_interest_cost,
       ROUND(current_balance * 0.0025 / 365, 2) AS cost_per_quarter_point_hike_daily,
