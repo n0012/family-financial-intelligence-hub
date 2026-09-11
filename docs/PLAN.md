@@ -290,10 +290,6 @@ terraform apply
 * Persistent BigQuery audit log (`family_finance.mutation_audit_log`) recording user email, transaction ID, old category, new category, timestamp, and signature validation.
 * Rate-limiting mutations and idempotency key enforcement.
 
-### **PR 8: Dynamic Benchmark Rates & HELOC Intelligence (FRED / DPRIME)**
-* Ingest Federal Reserve Economic Data (FRED) / WSJ Prime benchmark rates (`DPRIME`) to track variable-rate debt dynamics.
-* Recalculate daily interest cost and payoff trajectories automatically upon rate adjustments.
-
 ### **PR 7a: Anomaly Scans — Duplicate Charges, Trial Intercept & Annual Radar**
 * **Duplicate Charge Radar (`DUPLICATE_CHARGE`)**: Self-join detecting duplicate charges within a 72-hour window.
 * **New Subscription Intercept (`NEW_SUBSCRIPTION_DETECTED`)**: Intercepts first-time charges in the past 35 days to halt unwanted trial conversions.
@@ -311,4 +307,7 @@ terraform apply
 
 ### **PR 12: Multi-Account Portfolio Drift & Net Worth Rebalancer**
 * Track asset allocation across 401(k), IRA, HSA, and brokerage accounts against target model portfolios.
+
+### **Backlog / Optional: Dynamic Benchmark Rates & HELOC Intelligence (FRED / DPRIME)**
+* Deprioritized: Ingest Federal Reserve Economic Data (FRED) / WSJ Prime benchmark rates (`DPRIME`) to track variable-rate debt dynamics if automated rate synchronization is desired later.
 
