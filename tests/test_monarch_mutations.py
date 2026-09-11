@@ -630,6 +630,106 @@ class TestMonarchMutations(unittest.TestCase):
         self.assertEqual(txn_data["date"], "2026-08-09")
         self.assertEqual(txn_data["category_name"], "Transfer")
 
+    @patch("app.monarch_service.get_bq_client")
+    @patch("app.monarch_service.get_monarch_client")
+    def test_get_live_transaction_bq_fallback(self, mock_get_client, mock_get_bq):
+        """Tests that BigQuery fallback is safely queried with ScalarQueryParameter when GraphQL metadata is missing."""
+        from app.monarch_service import get_live_transaction_async
+
+        # Mock monarch client returning incomplete info (missing merchant & 0 amount)
+        mock_client = MagicMock()
+        mock_client.get_transaction_details = AsyncMock(
+            return_value={
+                "getTransaction": {
+                    "id": "txn_fallback_1",
+                    "amount": 0.0,
+                    "date": None,
+                    "merchant": None,
+                    "category": None,
+                }
+            }
+        )
+        mock_get_client.return_value = mock_client
+
+        # Mock BigQuery client returning the fallback row
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.items.return_value = [
+            ("clean_merchant_name", "Safeway"),
+            ("amount", -45.50),
+            ("transaction_date", "2026-08-01"),
+            ("category_name", "Groceries"),
+        ]
+        mock_query_job = MagicMock()
+        mock_query_job.result.return_value = [mock_row]
+        mock_bq.query.return_value = mock_query_job
+        mock_get_bq.return_value = mock_bq
+
+        txn_data = asyncio.run(get_live_transaction_async("txn_fallback_1"))
+        self.assertTrue(txn_data["found"])
+        self.assertEqual(txn_data["merchant_name"], "Safeway")
+        self.assertEqual(txn_data["amount"], -45.50)
+        self.assertEqual(txn_data["category_name"], "Groceries")
+        mock_bq.query.assert_called_once()
+        # Verify query used parameterized job_config
+        call_kwargs = mock_bq.query.call_args[1]
+        self.assertIn("job_config", call_kwargs)
+
+    def test_card_html_escaping(self):
+        """Tests that merchant and category names are safely HTML escaped in confirmation cards."""
+        from app.monarch_service import build_recategorization_card
+
+        card = build_recategorization_card(
+            transaction_id="txn_test",
+            merchant_name="Ben & Jerry's <Ice Cream>",
+            amount=12.50,
+            txn_date="2026-08-01",
+            current_category="Food & Dining",
+            new_category="Treats & Sweets",
+            category_id="cat_123",
+            user_email="user@example.com",
+            timestamp=123456789,
+            signature="test_sig",
+        )
+        widgets = card["card"]["sections"][0]["widgets"]
+        merchant_widget_text = widgets[0]["decoratedText"]["text"]
+        self.assertIn("Ben &amp; Jerry&#x27;s &lt;Ice Cream&gt;", merchant_widget_text)
+        self.assertNotIn("<Ice Cream>", merchant_widget_text)
+
+    def test_cancel_action_patches_card(self):
+        """Tests that clicking cancel patches the original card and logs audit."""
+        payload = {
+            "commonEventObject": {
+                "userLocale": "en",
+                "hostApp": "CHAT",
+                "parameters": {
+                    "action": "cancel_recategorize",
+                    "transaction_id": "txn_to_cancel",
+                },
+            },
+            "chat": {
+                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "buttonClickedPayload": {
+                    "space": {"name": "spaces/spaceCancel"},
+                    "message": {
+                        "name": "spaces/spaceCancel/messages/msgCancel.1",
+                        "thread": {"name": "spaces/spaceCancel/threads/threadCancel"},
+                    },
+                },
+            },
+        }
+
+        with (
+            patch("app.main.patch_chat_card", return_value=True) as mock_patch,
+            patch("app.main.log_mutation_audit") as mock_audit,
+        ):
+            resp = asyncio.run(main.google_chat_webhook(payload))
+            mock_patch.assert_called_once()
+            self.assertEqual(mock_patch.call_args[0][0], "spaces/spaceCancel/messages/msgCancel.1")
+            self.assertEqual(mock_audit.call_args[1]["status"], "CANCELLED")
+            msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
+            self.assertIn("cancelled", msg["text"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

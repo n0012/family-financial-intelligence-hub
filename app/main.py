@@ -51,6 +51,7 @@ from app.memory_service import (
 from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
     CURRENT_USER_EMAIL,
+    build_recategorization_cancelled_card,
     build_recategorization_success_card,
     check_mutation_idempotency,
     check_mutation_rate_limit,
@@ -637,7 +638,7 @@ def post_to_chat_thread(
         return False
 
 
-def patch_chat_card(message_name: str, cards_v2: list) -> bool:
+def patch_chat_card(message_name: str, cards_v2: list, text: str | None = None) -> bool:
     """Updates the cards of an existing message in-place (e.g. replacing action buttons upon confirmation)."""
     if not message_name:
         return False
@@ -648,8 +649,11 @@ def patch_chat_card(message_name: str, cards_v2: list) -> bool:
             "Authorization": f"Bearer {creds.token}",
             "Content-Type": "application/json",
         }
-        url = f"https://chat.googleapis.com/v1/{message_name}?updateMask=cardsV2"
-        payload = {"cardsV2": cards_v2}
+        update_mask = "cardsV2,text" if text is not None else "cardsV2"
+        url = f"https://chat.googleapis.com/v1/{message_name}?updateMask={update_mask}"
+        payload: dict = {"cardsV2": cards_v2}
+        if text is not None:
+            payload["text"] = text
         resp = requests.patch(url, headers=headers, json=payload, timeout=10)
         logger.info(f"Google Chat API patch {message_name}: status={resp.status_code}")
         if resp.status_code != 200:
@@ -923,7 +927,10 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             cat_name = action_params.get("category_name", "Updated Category")
             merchant_name = action_params.get("merchant_name")
             raw_amount = action_params.get("amount")
-            amount_val = float(raw_amount) if raw_amount else None
+            try:
+                amount_val = float(raw_amount) if raw_amount else None
+            except (ValueError, TypeError):
+                amount_val = None
             ts_str = action_params.get("timestamp", "0")
             target_user = action_params.get("user_email", "unknown")
             sig = action_params.get("signature", "")
@@ -992,7 +999,8 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                     amount=amount_val,
                 )
                 if msg_name:
-                    patch_chat_card(msg_name, [success_card])
+                    patch_chat_card(msg_name, [success_card], text="✅ Transaction already reclassified.")
+                    return respond(f"✅ Transaction #{txn_id} was already reclassified to *{cat_name}*.")
                 return respond(
                     f"✅ Transaction #{txn_id} was already reclassified to *{cat_name}*.",
                     cards_v2=[success_card],
@@ -1023,7 +1031,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                     amount=amount_val,
                 )
                 if msg_name:
-                    patch_chat_card(msg_name, [success_card])
+                    patch_chat_card(msg_name, [success_card], text="✅ Transaction successfully updated.")
+                    success_msg = (
+                        f"✅ Transaction #{txn_id} was successfully reclassified to *{cat_name}* in Monarch Money."
+                    )
+                    return respond(success_msg)
                 success_msg = (
                     f"✅ Transaction #{txn_id} was successfully reclassified to *{cat_name}* in Monarch Money."
                 )
@@ -1050,6 +1062,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 status="CANCELLED",
                 details="User clicked Cancel on confirmation card",
             )
+            cancel_card = build_recategorization_cancelled_card(txn_id)
+            if msg_name:
+                patch_chat_card(msg_name, [cancel_card], text="🚫 Recategorization cancelled.")
             return respond(f"🚫 Recategorization for transaction #{txn_id} was cancelled. No changes were made.")
 
         elif action_name == "snooze_alert":
