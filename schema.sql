@@ -477,15 +477,25 @@ scored AS (
         CASE
             WHEN LOWER(a.subtype_name) IN ('heloc', 'home_equity', 'home_equity_line_of_credit') 
                  OR LOWER(a.display_name) LIKE '%heloc%' OR LOWER(a.display_name) LIKE '%home equity%' THEN 'HOME_EQUITY_LINE'
+            WHEN LOWER(a.subtype_name) IN ('mortgage') OR LOWER(a.display_name) LIKE '%mortgage%' THEN 'MORTGAGE'
             WHEN LOWER(a.subtype_name) IN ('credit_card', 'credit') OR LOWER(a.type_name) = 'credit' THEN 'CREDIT_CARD'
             WHEN LOWER(a.subtype_name) IN ('checking', 'savings', 'money_market') OR LOWER(a.type_name) = 'depository' THEN 'DEPOSITORY'
-            WHEN LOWER(a.subtype_name) IN ('mortgage', 'loan') OR LOWER(a.type_name) = 'loan' THEN 'TERM_LOAN'
+            WHEN LOWER(a.subtype_name) IN ('loan', 'student_loan', 'auto_loan', 'personal_loan') OR LOWER(a.type_name) = 'loan' THEN 'OTHER_LOAN'
             WHEN LOWER(a.subtype_name) IN ('brokerage', 'ira', 'roth', '401k', 'st_401k') OR LOWER(a.type_name) = 'investment' THEN 'INVESTMENT'
             ELSE 'OTHER'
         END AS account_class,
         ROUND(ABS(a.current_balance), 2) AS current_balance,
         ROUND(a.credit_limit, 2) AS credit_limit,
-        a.interest_rate AS apr,
+        COALESCE(
+            a.interest_rate,
+            CASE
+                WHEN LOWER(a.subtype_name) IN ('heloc', 'home_equity', 'home_equity_line_of_credit') 
+                     OR LOWER(a.display_name) LIKE '%heloc%' OR LOWER(a.display_name) LIKE '%home equity%' THEN 0.0675
+                WHEN LOWER(a.subtype_name) IN ('mortgage') OR LOWER(a.display_name) LIKE '%mortgage%' THEN 0.0350
+                WHEN LOWER(a.subtype_name) IN ('loan', 'student_loan', 'auto_loan', 'personal_loan') THEN 0.0750
+                ELSE NULL
+            END
+        ) AS apr,
         tx.last_tx_date,
         COALESCE(tx.tx_total, 0) AS tx_total,
         COALESCE(tx.tx_45d, 0) AS tx_45d,
@@ -536,16 +546,22 @@ SELECT
     updated_at
 FROM ranked;
 
--- VIEW C2: HELOC Debt Balance & Daily Interest Burden (Joined with Lifecycle Intelligence)
-CREATE OR REPLACE VIEW `family_finance.v_heloc_daily_cost` AS
+-- VIEW C2: Total Debt Balances & Daily Interest Burden (Mortgage + HELOC + Other Liabilities)
+CREATE OR REPLACE VIEW `family_finance.v_debt_daily_cost` AS
 SELECT
     account_id,
     display_name,
     institution_name,
+    CASE
+        WHEN account_class = 'MORTGAGE' THEN 'MORTGAGE'
+        WHEN account_class = 'HOME_EQUITY_LINE' THEN 'HELOC'
+        WHEN account_class = 'CREDIT_CARD' THEN 'CREDIT_CARD'
+        ELSE 'OTHER_LOAN'
+    END AS debt_type,
+    account_class,
     current_balance,
     credit_limit,
     ROUND(credit_limit - current_balance, 2) AS available_credit,
-    -- apr is synced from config file (rates block or account_overrides) or institution data
     apr,
     ROUND((current_balance * COALESCE(apr, 0.0)) / 365, 2) AS daily_interest_cost,
     ROUND((current_balance * COALESCE(apr, 0.0)) / 12, 2) AS monthly_interest_cost,
@@ -558,8 +574,40 @@ SELECT
     institution_tx_count,
     updated_at
 FROM `family_finance.v_account_lifecycle`
-WHERE account_class = 'HOME_EQUITY_LINE'
-ORDER BY is_primary_active DESC;
+WHERE account_class IN ('HOME_EQUITY_LINE', 'MORTGAGE', 'OTHER_LOAN', 'TERM_LOAN')
+   OR (account_class = 'CREDIT_CARD' AND current_balance > 0 AND apr > 0)
+ORDER BY 
+    CASE 
+        WHEN account_class = 'HOME_EQUITY_LINE' THEN 1 
+        WHEN account_class = 'MORTGAGE' THEN 2 
+        ELSE 3 
+    END,
+    current_balance DESC;
+
+-- VIEW C3: Executive Debt Summary & Daily Carrying Cost Breakdown
+CREATE OR REPLACE VIEW `family_finance.v_debt_summary` AS
+SELECT
+    ROUND(COALESCE(SUM(current_balance), 0.0), 2) AS total_debt_balance,
+    ROUND(COALESCE(SUM(daily_interest_cost), 0.0), 2) AS total_daily_interest_cost,
+    ROUND(COALESCE(SUM(monthly_interest_cost), 0.0), 2) AS total_monthly_interest_cost,
+    -- Mortgage breakdown
+    ROUND(COALESCE(SUM(CASE WHEN debt_type = 'MORTGAGE' THEN current_balance ELSE 0 END), 0.0), 2) AS mortgage_balance,
+    ROUND(COALESCE(SUM(CASE WHEN debt_type = 'MORTGAGE' THEN daily_interest_cost ELSE 0 END), 0.0), 2) AS mortgage_daily_interest_cost,
+    -- HELOC breakdown
+    ROUND(COALESCE(SUM(CASE WHEN debt_type = 'HELOC' THEN current_balance ELSE 0 END), 0.0), 2) AS heloc_balance,
+    ROUND(COALESCE(SUM(CASE WHEN debt_type = 'HELOC' THEN daily_interest_cost ELSE 0 END), 0.0), 2) AS heloc_daily_interest_cost,
+    -- Other debt breakdown (auto, student, other loans)
+    ROUND(COALESCE(SUM(CASE WHEN debt_type NOT IN ('MORTGAGE', 'HELOC') THEN current_balance ELSE 0 END), 0.0), 2) AS other_debt_balance,
+    ROUND(COALESCE(SUM(CASE WHEN debt_type NOT IN ('MORTGAGE', 'HELOC') THEN daily_interest_cost ELSE 0 END), 0.0), 2) AS other_debt_daily_interest_cost,
+    COUNT(DISTINCT account_id) AS total_debt_accounts
+FROM `family_finance.v_debt_daily_cost`
+WHERE is_primary_active = TRUE OR lifecycle_status = 'PRIMARY';
+
+-- Backward-compatibility view for legacy HELOC queries
+CREATE OR REPLACE VIEW `family_finance.v_heloc_daily_cost` AS
+SELECT * 
+FROM `family_finance.v_debt_daily_cost`
+WHERE debt_type = 'HELOC';
 
 -- ==============================================================================
 -- Optimization Views (Targeted Spend Reduction & Leakage Identification)
@@ -874,11 +922,11 @@ QUALIFY ROW_NUMBER() OVER (
 ) = 1
 ORDER BY days_until_renewal ASC;
 
--- VIEW J: Paycheck Surplus Sweep Engine (Debt Paydown Automation)
+-- VIEW J: Paycheck Surplus & Multi-Facility Debt Sweep Allocation Engine
 -- Identifies recent income deposits into checking accounts, models 30-day fixed
 -- overhead commitments with safety buffers, and calculates the exact safe-to-sweep
--- surplus cash to accelerate variable-rate debt (HELOC) paydown and reduce daily compounding interest.
-CREATE OR REPLACE VIEW `family_finance.v_paycheck_surplus_sweep` AS
+-- surplus cash to accelerate high-interest debt paydown across liabilities while reporting total carrying costs.
+CREATE OR REPLACE VIEW `family_finance.v_paycheck_surplus_allocation` AS
 WITH recent_income AS (
     SELECT
         t.transaction_id,
@@ -932,16 +980,31 @@ upcoming_bills AS (
     FROM `family_finance.v_annual_bill_radar`
     WHERE days_until_renewal BETWEEN 0 AND 30
 ),
-heloc_debt AS (
+target_sweep_debt AS (
     SELECT
-        display_name AS heloc_name,
-        current_balance AS heloc_balance,
-        apr AS heloc_apr,
+        display_name AS target_debt_name,
+        debt_type AS target_debt_type,
+        current_balance AS target_debt_balance,
+        apr AS target_debt_apr,
         daily_interest_cost,
         monthly_interest_cost
-    FROM `family_finance.v_heloc_daily_cost`
-    ORDER BY current_balance DESC
+    FROM `family_finance.v_debt_daily_cost`
+    WHERE (debt_type = 'HELOC' OR (debt_type IN ('CREDIT_CARD', 'OTHER_LOAN') AND apr > 0.05))
+      AND current_balance > 0
+    ORDER BY apr DESC, current_balance DESC
     LIMIT 1
+),
+debt_totals AS (
+    SELECT
+        COALESCE(total_debt_balance, 0.0) AS total_debt_balance,
+        COALESCE(total_daily_interest_cost, 0.0) AS total_daily_debt_cost,
+        COALESCE(mortgage_balance, 0.0) AS mortgage_balance,
+        COALESCE(mortgage_daily_interest_cost, 0.0) AS mortgage_daily_cost,
+        COALESCE(heloc_balance, 0.0) AS heloc_balance,
+        COALESCE(heloc_daily_interest_cost, 0.0) AS heloc_daily_cost,
+        COALESCE(other_debt_balance, 0.0) AS other_debt_balance,
+        COALESCE(other_debt_daily_interest_cost, 0.0) AS other_debt_daily_cost
+    FROM `family_finance.v_debt_summary`
 )
 SELECT
     CURRENT_DATE('America/New_York') AS evaluation_date,
@@ -956,28 +1019,40 @@ SELECT
     ROUND(GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums), 2) AS safe_reserve_buffer,
     -- Safe surplus: checking reserves minus safe reserve buffer
     ROUND(GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)), 2) AS safe_surplus,
-    -- HELOC metrics
-    COALESCE(hd.heloc_name, 'HELOC') AS heloc_name,
-    COALESCE(hd.heloc_balance, 0.0) AS heloc_balance,
-    COALESCE(hd.heloc_apr, 0.0) AS heloc_apr,
-    -- Recommended sweep amount: min(safe_surplus, heloc_balance)
+    -- Target debt metrics (highest APR variable debt)
+    COALESCE(td.target_debt_name, 'Home Equity Line of Credit') AS target_debt_name,
+    COALESCE(td.target_debt_balance, 0.0) AS target_debt_balance,
+    COALESCE(td.target_debt_apr, 0.0) AS target_debt_apr,
+    -- Backward-compatible HELOC aliases
+    COALESCE(td.target_debt_name, 'HELOC') AS heloc_name,
+    COALESCE(td.target_debt_balance, 0.0) AS heloc_balance,
+    COALESCE(td.target_debt_apr, 0.0) AS heloc_apr,
+    -- Total liabilities across Mortgage + HELOC + Other
+    COALESCE(dt.total_debt_balance, 0.0) AS total_debt_balance,
+    COALESCE(dt.total_daily_debt_cost, 0.0) AS total_daily_debt_cost,
+    COALESCE(dt.mortgage_balance, 0.0) AS mortgage_balance,
+    COALESCE(dt.mortgage_daily_cost, 0.0) AS mortgage_daily_cost,
+    COALESCE(dt.heloc_balance, 0.0) AS heloc_total_balance,
+    COALESCE(dt.heloc_daily_cost, 0.0) AS heloc_daily_cost,
+    COALESCE(dt.other_debt_balance, 0.0) AS other_debt_balance,
+    -- Recommended sweep amount: min(safe_surplus, target_debt_balance)
     ROUND(LEAST(
         GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
-        COALESCE(hd.heloc_balance, 0.0)
+        COALESCE(td.target_debt_balance, 0.0)
     ), 2) AS recommended_sweep_amount,
     -- Interest savings calculations
     ROUND(LEAST(
         GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
-        COALESCE(hd.heloc_balance, 0.0)
-    ) * (COALESCE(hd.heloc_apr, 0.0) / 365), 2) AS daily_interest_saved,
+        COALESCE(td.target_debt_balance, 0.0)
+    ) * (COALESCE(td.target_debt_apr, 0.0) / 365), 2) AS daily_interest_saved,
     ROUND(LEAST(
         GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
-        COALESCE(hd.heloc_balance, 0.0)
-    ) * (COALESCE(hd.heloc_apr, 0.0) / 12), 2) AS monthly_interest_saved,
+        COALESCE(td.target_debt_balance, 0.0)
+    ) * (COALESCE(td.target_debt_apr, 0.0) / 12), 2) AS monthly_interest_saved,
     ROUND(LEAST(
         GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
-        COALESCE(hd.heloc_balance, 0.0)
-    ) * COALESCE(hd.heloc_apr, 0.0), 2) AS annual_interest_saved,
+        COALESCE(td.target_debt_balance, 0.0)
+    ) * COALESCE(td.target_debt_apr, 0.0), 2) AS annual_interest_saved,
     -- Alert key for deduplication and snooze
     CONCAT(
         'paycheck_sweep:',
@@ -985,14 +1060,19 @@ SELECT
         ':',
         CAST(CAST(ROUND(LEAST(
             GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
-            COALESCE(hd.heloc_balance, 0.0)
+            COALESCE(td.target_debt_balance, 0.0)
         ), 0) AS INT64) AS STRING)
     ) AS alert_key
 FROM liquid_cash lc
 CROSS JOIN fixed_overhead fo
 CROSS JOIN upcoming_bills ub
 LEFT JOIN recent_income inc ON TRUE
-LEFT JOIN heloc_debt hd ON TRUE;
+LEFT JOIN target_sweep_debt td ON TRUE
+LEFT JOIN debt_totals dt ON TRUE;
+
+-- Backward-compatible view alias
+CREATE OR REPLACE VIEW `family_finance.v_paycheck_surplus_sweep` AS
+SELECT * FROM `family_finance.v_paycheck_surplus_allocation`;
 
 -- ============================================================================
 -- PR 9: RECEIPT & TAX DEDUCTIBILITY INGESTION

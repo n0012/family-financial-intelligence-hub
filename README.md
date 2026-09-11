@@ -24,8 +24,8 @@ Traditional personal finance tools (Monarch, Mint, YNAB) excel at aggregating tr
 
 This project transforms raw personal finance data into a continuous, intelligent financial advisor:
 
-* **Deterministic Arithmetic over Hallucination**: AI models are notoriously prone to arithmetic mistakes when performing math on financial figures. Here, all financial logic—daily compounding HELOC interest, subscription price creep, grocery-to-dining ratios, micro-transaction habit leakage, and paycheck surplus sweeps—is computed directly in BigQuery GoogleSQL analytical views. Gemini queries these views via live read-only tools to ground every recommendation in deterministic arithmetic.
-* **Paycheck Surplus Sweep & Debt Acceleration**: Automatically models 30-day non-negotiable fixed overhead burn baselines plus upcoming lump-sum bills from radar views. When payroll deposits land, FinSage calculates safe checking reserves and computes the exact debt sweep amount to pay down high-carry variable debt (e.g. HELOCs), reporting daily, monthly, and annual compound interest savings.
+* **Deterministic Arithmetic over Hallucination**: AI models are notoriously prone to arithmetic mistakes when performing math on financial figures. Here, all financial logic—daily compounding debt interest (mortgages, HELOCs, other loans), subscription price creep, grocery-to-dining ratios, micro-transaction habit leakage, and paycheck surplus sweeps—is computed directly in BigQuery GoogleSQL analytical views. Gemini queries these views via live read-only tools to ground every recommendation in deterministic arithmetic.
+* **Paycheck Surplus Sweep & Debt Acceleration**: Automatically models 30-day non-negotiable fixed overhead burn baselines plus upcoming lump-sum bills from radar views. When payroll deposits land, FinSage calculates safe checking reserves and computes the exact debt sweep amount to pay down high-carry variable debt (e.g. HELOCs), reporting daily, monthly, and annual compound interest savings alongside total liability carry.
 * **Multimodal Vision & Tax Ingestion**: Users paste receipts, invoices, or financial screenshots (`.png`, `.jpg`, `.jpeg`, `.webp`, `.pdf`) directly into Google Chat or upload via REST. Gemini Vision extracts itemized line items, deterministically scrubs sensitive PII (SSN, EIN, credit card PANs), evaluates IRS deductibility under IRC Sec. 162, 213(d), and 170, and asymmetrically matches against posted bank debits with restaurant pre-tip authorization handling.
 * **Guarded Mutations & Cryptographic Confirmation**: When proposing category modifications or sensitive updates, FinSage uses HMAC-SHA256 tokens with a 15-minute expiration window to render interactive **Google Chat Cards v2**. Updates require physical single-click confirmation, enforced by rate limiters and append-only BigQuery audit trails.
 * **Persistent Vertex AI Memory Bank**: FinSage remembers user-scoped financial targets, debt payoff dates, and dining/grocery budget ceilings across conversation threads, automatically consolidating preferences and resolving conflicting goals.
@@ -53,7 +53,7 @@ flowchart TD
 
     subgraph DataWarehouse ["Google BigQuery Data Warehouse"]
         RawTables["Tables:<br/>• raw_accounts<br/>• raw_transactions<br/>• raw_categories<br/>• staging_transactions<br/>• receipt_records<br/>• alert_suppression<br/>• mutation_audit_log"]
-        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Daily Compounding Debt)<br/>• v_merchant_domain (Functional Domain & Disposition)<br/>• v_subscription_charges (Recurring Tier, POS Removed)<br/>• v_active_subscriptions (Cadence Run-Rates)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_utility_seasonal_baseline (Same-Month Prior Years)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)<br/>• v_duplicate_charges (Duplicate Expense Detection)<br/>• v_new_subscriptions (Trial Conversions < 35d)<br/>• v_category_spend_baseline (Rolling StdDev Outliers)<br/>• v_annual_bill_radar (Upcoming Lump-Sum Bills)<br/>• v_paycheck_surplus_sweep (HELOC Sweep Engine)<br/>• v_tax_deductible_summary (Schedule C / HSA)"]
+        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_debt_daily_cost (Daily Compounding Debt by Facility)<br/>• v_debt_summary (Aggregated Liabilities & Carry)<br/>• v_heloc_daily_cost (Variable HELOC Facility)<br/>• v_merchant_domain (Functional Domain & Disposition)<br/>• v_subscription_charges (Recurring Tier, POS Removed)<br/>• v_active_subscriptions (Cadence Run-Rates)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_utility_seasonal_baseline (Same-Month Prior Years)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)<br/>• v_duplicate_charges (Duplicate Expense Detection)<br/>• v_new_subscriptions (Trial Conversions < 35d)<br/>• v_category_spend_baseline (Rolling StdDev Outliers)<br/>• v_annual_bill_radar (Upcoming Lump-Sum Bills)<br/>• v_paycheck_surplus_sweep (Multi-Debt Sweep Engine)<br/>• v_tax_deductible_summary (Schedule C / HSA)"]
     end
 
     subgraph ProactiveOutbound ["Proactive Outbound Alerts (Request/Response HTTPS)"]
@@ -128,7 +128,9 @@ The data warehouse decouples storage from analytical modeling, allowing queries 
 | **`alert_suppression`** | Active suppression table managing 7–30 day snoozes and alert deduplication. |
 | **`mutation_audit_log`** | Immutable audit trail tracking user email, mutation IDs, cryptographic validity, and target parameters. |
 | **`v_account_lifecycle`** | Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity recency, non-zero balance, and transaction count. Resolves duplicate accounts during bank mergers. |
-| **`v_heloc_daily_cost`** | Computes the exact daily compounding cost (`(balance * apr) / 365`) and monthly carrying cost of variable-rate debt, alongside payoff acceleration impacts. |
+| **`v_debt_daily_cost`** | Computes the exact daily compounding cost (`(balance * apr) / 365`) and monthly carrying cost across all liability facilities (Mortgage, HELOC, Loans, Credit Cards). |
+| **`v_debt_summary`** | Aggregates portfolio-wide liability metrics: total debt balance, total daily interest carry, total monthly interest carry, and mortgage vs HELOC breakdowns. |
+| **`v_heloc_daily_cost`** | Focused view of variable-rate HELOC debt carrying cost and payoff acceleration impacts. |
 | **`v_merchant_domain`** | Maps each merchant to the functional domain it competes in and a `disposition` that constrains the advice: `CANCELLABLE`, `RESHOPPABLE` (insurance, telecom — re-quote, never cancel), `ESSENTIAL_METERED` (regulated utilities — no cancel action exists), `NOT_A_SUBSCRIPTION`. |
 | **`v_subscription_charges`** | The cleaned recurring-charge ledger. Trusts the aggregator's recurrence flag where present, otherwise keeps only charges within 60–200% of the merchant's median, so an incidental cafe purchase at a gym never gets compared against the membership fee. |
 | **`v_active_subscriptions`** | One row per merchant (not per merchant/category, which fragmented a single service whenever the aggregator re-categorised it). Detects billing cadence and derives a cadence-normalised `estimated_annual_cost` and `monthly_run_rate`. |
@@ -142,7 +144,7 @@ The data warehouse decouples storage from analytical modeling, allowing queries 
 | **`v_new_subscriptions`** | Flags newly detected recurring subscriptions within the first 35 days to catch unwanted free-trial rollovers. |
 | **`v_category_spend_baseline`** | Computes 6-month statistical rolling mean and standard deviation per spending category to detect spend spikes exceeding $+2\sigma$. |
 | **`v_annual_bill_radar`** | Scans for periodic quarterly/annual lump-sum obligations due within the next 30 days to protect cash reserves. |
-| **`v_paycheck_surplus_sweep`** | Models 30-day fixed overhead burn and lump-sum reserves against liquid checking to compute safe surplus sweeps to variable HELOC debt. |
+| **`v_paycheck_surplus_sweep`** | Models 30-day fixed overhead burn and lump-sum reserves against liquid checking to compute safe surplus sweeps to high-interest variable debt (e.g. HELOC), while tracking total liability carry. |
 | **`v_tax_deductible_summary`** | Annual aggregations of verified deductible receipts across Schedule C, HSA/FSA, Charitable Donations, and Childcare. |
 
 ---
@@ -153,7 +155,7 @@ The microservice functions as a registered **Google Chat Bot** supporting 1:1 di
 
 ### 1. Conversational Queries & Multi-Turn Reasoning
 Ask complex financial questions in natural language. Gemini selects the appropriate analytical view, runs the query, and synthesizes actionable recommendations:
-* *"What is our daily interest cost on the HELOC right now?"*
+* *"What is our daily debt interest cost across mortgage and HELOC right now?"*
 * *"Which subscriptions increased in price over the last year?"*
 * *"How much did we spend on dining out vs groceries last month?"*
 * *"Where are our top micro-transaction leaks under $35?"*
@@ -162,14 +164,14 @@ Ask complex financial questions in natural language. Gemini selects the appropri
 
 ### 2. Daily Morning Financial Synopsis (`/brief`, `/alerts`)
 Each morning, FinSage posts an executive two-tier Card v2 brief:
-* **🌅 Morning Financial Synopsis**: Real-time checking liquidity, monthly fixed burn buffer, active HELOC balance with exact daily interest carry ($/day) and monthly carry, plus month-to-date spending pacing vs days elapsed.
+* **🌅 Morning Financial Synopsis**: Real-time checking liquidity, monthly fixed burn buffer, total debt balance and daily carry breakdown across Mortgage and HELOC ($/day and $/month), plus month-to-date spending pacing vs days elapsed.
 * **🎯 What to Pay Attention to Today**: High-priority focus bullets synthesized from cash sweeps, price hikes, dining efficiency, and habit leakage.
 * **Interactive Optimization Cards**: Advisory cards equipped with 7-day snooze buttons.
 
 You can also request this on demand at any time via natural language (*"What's today's morning brief?"*, *"Give me our daily financial synopsis"*) via the `get_daily_morning_brief()` Gemini tool, or query the `/advisor/morning-brief` API endpoint.
 
 ### 3. Paycheck Surplus Sweep Engine (`/sweep`)
-When paychecks arrive, `/sweep` evaluates current liquid checking reserves against baseline fixed burn and upcoming 30-day lump-sum bills. If a safe surplus exists, FinSage calculates the recommended sweep to your variable-rate credit line (e.g. HELOC) and displays the immediate interest savings.
+When paychecks arrive, `/sweep` evaluates current liquid checking reserves against baseline fixed burn and upcoming 30-day lump-sum bills. If a safe surplus exists, FinSage calculates the recommended sweep to your highest-rate debt (e.g. variable HELOC) and displays the immediate interest savings alongside total debt posture.
 
 ### 4. Multimodal Receipt & Tax Deductibility Ingestion (`/receipt`, `/tax`)
 Paste receipts or invoices directly into chat (or upload via REST):
@@ -182,7 +184,7 @@ Paste receipts or invoices directly into chat (or upload via REST):
 On-demand weekly or monthly executive summaries:
 * Net worth trajectory and month-over-month cash flow deltas.
 * Fixed overhead vs discretionary burn rate comparisons.
-* HELOC debt paydown progress and interest savings.
+* Debt paydown progress across Mortgage and HELOC with immediate interest savings.
 
 ### 6. Guarded Categorization Mutations
 When recategorizing transactions, FinSage presents an interactive Card v2 confirmation widget with HMAC-SHA256 signature verification. No mutation executes without explicit user confirmation, rate limiting, and BigQuery audit logging.
@@ -192,7 +194,7 @@ When recategorizing transactions, FinSage presents an interactive Card v2 confir
 | Command | Action |
 | :--- | :--- |
 | **`/brief`** or **`/alerts`** | Runs on-demand morning financial synopsis and proactive spend scans. |
-| **`/sweep`** | Computes safe paycheck surplus to sweep to HELOC debt. |
+| **`/sweep`** | Computes safe paycheck surplus to sweep to high-rate variable debt (HELOC). |
 | **`/tax [YYYY]`** | Displays annual tax deductibility summary (Schedule C, HSA, Charities). |
 | **`/digest [weekly\|monthly]`** | Generates an executive CFO performance briefing. |
 | **`/sync`** | Triggers immediate Monarch Money ingestion into BigQuery. |
@@ -277,7 +279,7 @@ excluded_institutions:
   - "defunct_bank"                   # Institution keywords to filter out
 ```
 
-During ingestion, the microservice automatically applies these rates and synchronizes them directly into BigQuery `raw_accounts.interest_rate`, powering the daily compounding cost calculations in `v_heloc_daily_cost`.
+During ingestion, the microservice automatically applies these rates and synchronizes them directly into BigQuery `raw_accounts.interest_rate`, powering the daily compounding cost calculations in `v_debt_daily_cost`, `v_debt_summary`, and `v_heloc_daily_cost`.
 
 ---
 

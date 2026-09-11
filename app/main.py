@@ -384,12 +384,18 @@ def ask_gemini_brain(
         system_instruction = (
             "You are FinSage, an expert personal financial advisor and spend optimization strategist for a family. "
             f"Your single source of truth is Monarch Money synchronized into Google BigQuery dataset `{BQ_PROJECT_ID}.{BQ_DATASET_ID}`.\n\n"
-            "CORE MISSION: Help the family optimize spending, eliminate waste, establish budget discipline, and aggressively pay down HELOC debt.\n\n"
+            "CORE MISSION: Help the family optimize spending, eliminate waste, establish budget discipline, track liabilities across mortgage, HELOC, and other loans, and aggressively optimize debt carrying costs and paydown.\n\n"
             "ANALYTICAL VIEWS AND COLUMN SCHEMAS:\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_account_lifecycle`:\n"
             "   Columns: account_id, display_name, institution_name, account_class, type_name, subtype_name, current_balance, credit_limit, apr, lifecycle_status, is_primary_active, last_tx_date, tx_total, tx_45d, tx_90d, institution_latest_tx_date, institution_tx_count, updated_at\n"
+            f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_debt_daily_cost`:\n"
+            "   Columns: account_id, display_name, institution_name, debt_type, account_class, current_balance, credit_limit, available_credit, apr, daily_interest_cost, monthly_interest_cost, annual_interest_saved_per_500_monthly_reduction, is_apr_estimated, lifecycle_status, is_primary_active, last_tx_date, institution_latest_tx_date, institution_tx_count, updated_at\n"
+            f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_debt_summary`:\n"
+            "   Columns: total_debt_balance, total_daily_interest_cost, total_monthly_interest_cost, mortgage_balance, mortgage_daily_interest_cost, heloc_balance, heloc_daily_interest_cost, other_debt_balance, other_debt_daily_interest_cost, total_debt_accounts\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_heloc_daily_cost`:\n"
             "   Columns: account_id, display_name, institution_name, current_balance, credit_limit, available_credit, apr, daily_interest_cost, monthly_interest_cost, annual_interest_saved_per_500_monthly_reduction, is_apr_estimated, lifecycle_status, is_primary_active, last_tx_date, institution_latest_tx_date, institution_tx_count, updated_at\n"
+            f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_paycheck_surplus_sweep`:\n"
+            "   Columns: target_debt_name, target_debt_balance, target_debt_apr, recommended_sweep_amount, daily_interest_saved, monthly_interest_saved, annual_interest_saved, heloc_name, heloc_balance, heloc_apr, total_debt_balance, total_daily_debt_cost, mortgage_balance, alert_key\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_active_subscriptions`:\n"
             "   Columns: merchant, category_name, functional_domain, disposition, is_overlap_eligible, overlap_min_count, charge_count, typical_charge, avg_charge, min_charge, max_charge, charge_variability, billing_cadence, estimated_annual_cost, monthly_run_rate, first_seen, last_seen, avg_cadence_days, days_since_last_charge, is_currently_active\n"
             "   Note: one row per merchant, incidental point-of-sale purchases already removed. Use typical_charge (the recurring tier) not avg_charge when quoting a subscription's price, and monthly_run_rate when summing across mixed billing cadences.\n"
@@ -417,7 +423,7 @@ def ask_gemini_brain(
             "2. NEVER query INFORMATION_SCHEMA. All schemas are explicitly provided above; you must use the exact column names specified.\n"
             "3. If the user's message is brief, conversational, or a topic continuation (e.g. 'how do i fix my cash flow deficit', 'what about HELOC?', 'show more details', 'try again'), refer to the prior conversation history and run the single most relevant analytical view immediately.\n"
             "4. Always call `run_readonly_sql` to fetch exact figures. Never guess, estimate, or hallucinate numbers.\n"
-            "5. For every dollar of recommended savings, calculate the exact debt acceleration impact: daily and annual interest eliminated on the HELOC and months shaved off payoff.\n"
+            "5. For every dollar of recommended savings, calculate the exact debt acceleration impact: daily and annual interest eliminated across liabilities (prioritizing high-interest variable debt like HELOC) and months shaved off payoff.\n"
             "5b. Respect `disposition` before recommending any action on a recurring charge. CANCELLABLE may be cancelled, downgraded or rotated. RESHOPPABLE (insurance, telecom, broadband, monitored security) is contractual: recommend re-quoting or negotiating the renewal, never 'cancel to save'. ESSENTIAL_METERED (electric, gas, water) is a regulated monopoly with no substitute: only ever discuss consumption or rate schedules, and compare against v_utility_seasonal_baseline rather than against the previous month, because heating and cooling swings are seasonal, not price rises. UNKNOWN means unclassified: describe the charge, do not advise cancelling it.\n"
             "5c. Never present a subscription's total run rate as the saving from a price increase. The recoverable amount is the increase itself (`annual_impact`), and for an overlap it is `consolidation_savings_monthly`, which already assumes one service is kept.\n"
             "6. Dynamic Account & Migration Intelligence (Zero Hardcoding): When answering questions about an account category (e.g. 'HELOC', 'mortgage', 'checking', 'credit card') where multiple accounts exist:\n"
@@ -433,7 +439,7 @@ def ask_gemini_brain(
             "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions.\n"
             "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
-            "15. Daily Morning Brief & Synopsis: You are equipped with `get_daily_morning_brief()` to retrieve the executive morning synopsis (liquid cash reserves, monthly fixed burn buffer, HELOC daily carry, MTD spend pacing, and high-priority items to pay attention to today). Call this whenever the user asks for the morning brief, daily financial synopsis, or daily overview.\n"
+            "15. Daily Morning Brief & Synopsis: You are equipped with `get_daily_morning_brief()` to retrieve the executive morning synopsis (liquid cash reserves, monthly fixed burn buffer, debt daily carry across Mortgage and HELOC, MTD spend pacing, and high-priority items to pay attention to today). Call this whenever the user asks for the morning brief, daily financial synopsis, or daily overview.\n"
             "16. Tax Deductibility & Receipts: You are equipped with `get_tax_deduction_analysis(tax_year)` to retrieve annual tax-deductible expense summaries (Schedule C business expenses, HSA/FSA medical expenses, 501(c)(3) charitable contributions, and childcare/dependent care). Call this whenever the user asks about tax deductions, write-offs, HSA spending, or annual tax summaries.\n"
             f"{memory_block}"
         )
@@ -1131,14 +1137,14 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     if not clean_text or clean_text.lower() in ("help", "/help"):
         help_text = (
             f"Hi {sender_name}! Here are some questions you can ask me:\n"
-            "• _What is our daily HELOC interest burden?_\n"
+            "• _What is our daily debt interest burden across mortgage and HELOC?_\n"
             "• _What subscriptions had price increases recently?_\n"
             "• _How much did we spend on dining out last month?_\n"
             "• _What frequent small purchases are we making?_\n"
             "• `/sync` to pull latest transactions\n"
             "• `/alerts` to run proactive spend scan\n"
             "• `/digest` for weekly or monthly executive CFO brief\n"
-            "• `/sweep` to calculate safe surplus cash to pay down HELOC\n"
+            "• `/sweep` to calculate safe surplus cash to pay down variable debt (HELOC)\n"
             "• `/tax` to review annual tax-deductible expense summaries\n"
             "• *You can also paste receipts, invoices, or financial documents!*"
         )
@@ -1149,7 +1155,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     if clean_text.lower().rstrip("?!. ") in greeting_patterns:
         greet_text = (
             f"👋 Yes {sender_name}, I'm here! I'm connected to your Monarch Money and BigQuery financial database.\n\n"
-            'Ask me any question about your spending, subscriptions, or HELOC debt paydown (e.g. *"What is our daily HELOC interest cost?"*).'
+            'Ask me any question about your spending, subscriptions, or debt carry across mortgage and HELOC (e.g. *"What is our daily debt interest cost?"*).'
         )
         return respond(greet_text)
 
