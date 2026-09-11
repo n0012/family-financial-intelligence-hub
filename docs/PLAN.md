@@ -253,16 +253,62 @@ terraform apply
 * **Gemini AFC Tool (`snooze_spend_alert`)**: Equips conversational agent to snooze alerts conversationally (e.g., *"Snooze Netflix alerts for 30 days"*).
 * **Full Unit Test Coverage ([`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py))**: Added 13 new unit tests covering overlap detection, micro-leakage, dining and grocery budget caps, active suppression queries, Card v2 snooze clicks, and AFC tool calls, expanding the test suite to **75 passing unit tests**.
 
-### **App Rebranding: FinSage**
-* Rebranded assistant persona from "Sage" to **FinSage** across all conversational prompts, Google Chat Card v2 headers, notification strings, and system instructions.
-* Added support for both `@FinSage` and legacy `@Sage` mention triggers.
-* Added groceries budget cap enforcement to `check_memory_budget_limits` in `alerts.py` (identified during Claude Code strategy collaboration).
+### **PR 6.5: Correctness, Security & Hardening Pass (Completed)**
+* **BigQuery Synopsis Error Handling**:
+  * Fixed `generate_daily_brief_synopsis` so query failures never emit a false "All Systems Normal" message; explicitly marks `is_error=True`, flags "Data Degraded" in focus items, and warns the user in posture text.
+  * Card v2 renders a dedicated degraded warning header (`⚠️ Morning Financial Synopsis (Data Degraded)`) with error icons.
+* **Runway & Fixed Burn Calculation Hardening**:
+  * Evaluates fixed burn from `v_spend_classification` (`FIXED_OVERHEAD` trailing 3-month average) rather than raw subscription sums.
+  * Restricts active subscriptions to `is_currently_active = TRUE` and normalizes annualized cadences (`monthly_run_rate`).
+  * Filters liquid depository reserves strictly to asset accounts (`is_asset = TRUE`).
+  * Deterministic HELOC resolution (`ORDER BY current_balance DESC LIMIT 1`).
+  * Excludes internal transfers, credit card payments, and debt principal reductions from month-to-date spending pacing.
+* **Budget Cap Parsing Hardening (`extract_budget_caps`)**:
+  * Supports comma-formatted amounts (`$9,000`).
+  * Normalizes annual budgets to monthly limits (`$12,000 per year` -> `$1,000/mo`).
+  * Enforces strict budget context keywords (`budget`, `cap`, `limit`, `ceiling`, `target`, `allowance`, `max`) to eliminate false matches on incidental figures.
+* **SQL Timezone & Data Integrity**:
+  * Anchored all BigQuery date operations to `CURRENT_DATE('America/New_York')` to eliminate month-end UTC timezone drift.
+  * Replaced `pending = FALSE` with `NOT COALESCE(pending, FALSE)` across SQL views and queries to prevent Monarch null pending fields from dropping posted transactions.
+  * Expanded `FORBIDDEN_SQL_PATTERN` to block `export data`, `call`, `execute immediate`, `declare`.
+  * Candidate search resolution for `schema.sql` at repository root.
+* **Cryptographic Card Action Security**:
+  * Added HMAC-SHA256 signing (`generate_snooze_signature`) and constant-time verification (`verify_snooze_signature`) to interactive snooze actions.
+  * Enforced strict snooze day clamping (`1 <= days <= 90`).
+  * Hardened Google Chat OIDC bearer verification to fail closed if `chat_audience` cannot be determined.
+  * Offloaded FastAPI `/advisor/morning-brief` route to `asyncio.to_thread` to preserve event-loop responsiveness.
+* **Full Unit Test Coverage**: Added 7 new comprehensive unit tests in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py) and [`tests/test_bq_service.py`](tests/test_bq_service.py), bringing the test suite to **90 passing unit tests**.
 
-### **PR 7 Roadmap: Claude Code Collaborative Anomaly Alerting & Debt Acceleration**
-* Comprehensive strategy documented in [`docs/ALERTS_STRATEGY.md`](docs/ALERTS_STRATEGY.md).
-* **Alert 1: `v_duplicate_charges` (`DUPLICATE_CHARGE`)**: Self-join detecting double charges within 72h for immediate merchant refunds.
-* **Alert 2: `v_new_subscriptions` (`NEW_SUBSCRIPTION_DETECTED`)**: Flags first-time charges in past 35 days to intercept unwanted free trial conversions.
-* **Alert 3: `v_category_spend_baseline` (`CATEGORY_SPEND_SPIKE`)**: Adaptive z-score outlier detection vs 6-month trailing category medians.
-* **Alert 4: `v_paycheck_surplus_sweep` (`PAYCHECK_SURPLUS_SWEEP`)**: Calculates safe-to-sweep surplus on income deposits to immediately reduce high-interest variable debt and credit lines.
-* **Alert 5: `v_annual_bill_radar` (`ANNUAL_BILL_RADAR`)**: Pre-warns 30 days ahead of large annual/semi-annual lump-sum debits.
-* **Alert 6: `v_heloc_rate_history` (`INTEREST_RATE_SHIFT`)**: Tracks benchmark rate changes and recomputes exact daily carry impact on milestone payoff targets.
+---
+
+## 8. Sequenced Implementation Roadmap
+
+*Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
+
+### **PR 10: Conversational Guardrails, Audit Log & Mutation Protection**
+* Enforce strict write-safety guardrails across conversational tools.
+* Persistent BigQuery audit log (`family_finance.mutation_audit_log`) recording user email, transaction ID, old category, new category, timestamp, and signature validation.
+* Rate-limiting mutations and idempotency key enforcement.
+
+### **PR 8: Dynamic Benchmark Rates & HELOC Intelligence (FRED / DPRIME)**
+* Ingest Federal Reserve Economic Data (FRED) / WSJ Prime benchmark rates (`DPRIME`) to track variable-rate debt dynamics.
+* Recalculate daily interest cost and payoff trajectories automatically upon rate adjustments.
+
+### **PR 7a: Anomaly Scans — Duplicate Charges, Trial Intercept & Annual Radar**
+* **Duplicate Charge Radar (`DUPLICATE_CHARGE`)**: Self-join detecting duplicate charges within a 72-hour window.
+* **New Subscription Intercept (`NEW_SUBSCRIPTION_DETECTED`)**: Intercepts first-time charges in the past 35 days to halt unwanted trial conversions.
+* **Annual Bill Radar (`ANNUAL_BILL_RADAR`)**: Pre-warns 30 days ahead of recurring semi-annual and annual lump sums.
+
+### **PR 11: Executive CFO Briefing Card & Digest**
+* Multi-section Google Chat card with visual emoji KPIs, burn pacing thermometer, and categorized optimization action items.
+* Weekly / monthly family executive digest.
+
+### **PR 7b: Debt Paydown Automation — Paycheck Surplus Sweep Engine**
+* **Paycheck Surplus Sweep (`PAYCHECK_SURPLUS_SWEEP`)**: Detects income deposits and computes safe-to-sweep surplus cash to immediately pay down variable-rate debt without jeopardizing 30-day fixed overhead.
+
+### **PR 9: Receipt & Tax Deductibility Ingestion (Document AI / Gemini Vision)**
+* Upload receipts and statements directly to Google Chat for Gemini Vision extraction and Schedule C / HSA deductibility classification.
+
+### **PR 12: Multi-Account Portfolio Drift & Net Worth Rebalancer**
+* Track asset allocation across 401(k), IRA, HSA, and brokerage accounts against target model portfolios.
+

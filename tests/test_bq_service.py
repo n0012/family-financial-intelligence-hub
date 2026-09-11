@@ -27,6 +27,10 @@ class TestRunReadonlySql(unittest.TestCase):
             "MERGE INTO `family_finance.raw_transactions` USING staging ON 1=1 WHEN MATCHED THEN UPDATE SET pending=false",
             "GRANT `roles/bigquery.admin` ON DATASET `family_finance` TO 'user@example.com'",
             "REVOKE `roles/bigquery.dataViewer` ON DATASET `family_finance` FROM 'user@example.com'",
+            "EXPORT DATA OPTIONS(uri='gs://bucket/*.csv', format='CSV') AS SELECT 1",
+            "CALL my_procedure()",
+            "EXECUTE IMMEDIATE 'SELECT 1'",
+            "DECLARE x INT64 DEFAULT 10;",
         ]
         for query in forbidden_queries:
             result = bq_service.run_readonly_sql(query, client=self.mock_client)
@@ -193,6 +197,15 @@ class TestApplyBigQuerySchema(unittest.TestCase):
         res = bq_service.apply_bigquery_schema(schema_file_path=tmp_path, client=self.mock_client)
         self.assertEqual(res["status"], "success")
         self.mock_client.query.assert_called_once_with("CREATE TABLE IF NOT EXISTS `family_finance.test` (id STRING);")
+        mock_job.result.assert_called_once()
+
+    def test_schema_file_default_resolves_repo_root(self):
+        mock_job = MagicMock()
+        self.mock_client.query.return_value = mock_job
+
+        res = bq_service.apply_bigquery_schema(schema_file_path=None, client=self.mock_client)
+        self.assertEqual(res["status"], "success")
+        self.mock_client.query.assert_called_once()
         mock_job.result.assert_called_once()
 
 

@@ -16,7 +16,9 @@ from google.cloud import bigquery
 
 logger = logging.getLogger("monarch-gemini.bq")
 
-FORBIDDEN_SQL_PATTERN = r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke)\b"
+FORBIDDEN_SQL_PATTERN = (
+    r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke|export\s+data|call|execute\s+immediate|declare)\b"
+)
 
 _bq_client: bigquery.Client | None = None
 
@@ -241,9 +243,19 @@ def apply_bigquery_schema(
     Applies DDL statements and analytical views from schema.sql to the target project dataset.
     """
     target_project = get_target_project(project_id)
-    path = schema_file_path or os.path.join(os.path.dirname(__file__), "schema.sql")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Schema file not found at {path}")
+    if schema_file_path:
+        if not os.path.exists(schema_file_path):
+            raise FileNotFoundError(f"Schema file not found at {schema_file_path}")
+        path = schema_file_path
+    else:
+        candidate_paths = [
+            os.path.join(os.path.dirname(__file__), "..", "schema.sql"),
+            os.path.join(os.path.dirname(__file__), "schema.sql"),
+            "schema.sql",
+        ]
+        path = next((p for p in candidate_paths if p and os.path.exists(p)), None)
+        if not path:
+            raise FileNotFoundError(f"Schema file not found at any candidate paths: {candidate_paths}")
 
     with open(path, encoding="utf-8") as f:
         sql_content = f.read()
