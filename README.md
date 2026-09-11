@@ -372,15 +372,44 @@ The architecture runs comfortably within Google Cloud's **Always Free Tier**:
 
 ---
 
+## Strategic Roadmap & Planned Expansion
+
+FinSage continues to evolve from daily transaction aggregation into an autonomous family chief financial officer. The roadmap integrates mathematical modeling and policy structures:
+
+* **PR 7: Autonomous Anomaly Detection & Cash Sweeps**
+  * Immediate cash recovery via duplicate transaction detection (`v_duplicate_charges`).
+  * Free trial conversion monitoring (`v_new_subscriptions`) within the first 35 days.
+  * Adaptive category outlier alerting (`v_category_spend_baseline`) using 6-month statistical rolling standard deviations.
+  * Paycheck surplus detection (`v_paycheck_surplus_sweep`) to calculate instant debt sweeps above safe operating buffers.
+  * Sinking fund radar (`v_annual_bill_radar`) pre-warning 30 days before major annual/quarterly bills.
+* **PR 8: Macro-Economic Context & Rate Benchmarking (FRED Integration)**
+  * Automated Federal Reserve Economic Data ingestion (`FRED` series: `DFF` Fed Funds, `MORTGAGE30US`) into BigQuery.
+  * Real-time benchmark synchronization for variable-rate credit facilities (e.g. Prime rate shifts on active HELOC balances).
+* **PR 9: Multimodal Vision IRS Tax Document Parsing**
+  * Automated extraction and staging of IRS tax documents (Form 1040, W-2, 1099-INT, 1099-DIV, Schedule A) pasted directly into Google Chat.
+  * Pre-fills annual tax projections and monitors itemized deduction pacing (SALT & mortgage interest caps).
+* **PR 10: 3-Tier Policy Guardrail System**
+  * Formalized action approval taxonomy across all advisor mutations:
+    * `none`: Passive anomaly scans, read-only analytical queries, and background syncs.
+    * `user`: Side-effecting operations requiring interactive Google Chat Card v2 confirmation (Snooze alerts, budget category modifications).
+    * `advisor`: Hard safety blocks on destructive actions (account unlinking, bulk transaction deletions).
+* **PR 11: Periodic Executive Family CFO Briefing**
+  * Scheduled weekly (Sunday) and monthly macro rollups in Google Chat: net worth delta ($\Delta$), fixed overhead vs discretionary burn rate, and debt acceleration milestone progress.
+* **PR 12: Investment Allocation & Portfolio Drift Monitoring**
+  * BigQuery analytical view tracking asset allocation across Equities, Fixed Income, Cash, and Real Estate to detect cash drag and target portfolio drift.
+
+---
+
 ## Acknowledgments
 
-The idea and approach for this project originated and took inspiration from:
+The idea, architecture, and design patterns for this project took inspiration from:
 * [Concept and Architecture Reference](https://chatgpt.com/share/69f7d4a5-a8e4-83ea-b6e2-78fb8eb79339)
-* [`hammem/monarchmoney`](https://github.com/hammem/monarchmoney)
-
+* [`hammem/monarchmoney`](https://github.com/hammem/monarchmoney) — Python client library and authentication flow for Monarch Money.
+* [`6missedcalls/personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) — Inspiration for multi-tier policy guardrails (`none`, `user`, `advisor`), macro-economic benchmark grounding (FRED API series), deterministic financial brief formatting, and structured IRS tax form parsing schemas.
 
 ---
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
