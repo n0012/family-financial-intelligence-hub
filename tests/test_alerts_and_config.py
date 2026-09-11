@@ -73,6 +73,7 @@ class TestChatAuth(unittest.TestCase):
                     verify_chat_origin(authorization=None, x_api_key=None)
                 self.assertEqual(ctx.exception.status_code, 401)
 
+    @patch.dict(os.environ, {"CHAT_AUDIENCE": "https://chat-service.a.run.app"})
     @patch("app.main.id_token.verify_oauth2_token")
     def test_valid_google_chat_bearer_token(self, mock_verify):
         mock_verify.return_value = {
@@ -82,6 +83,7 @@ class TestChatAuth(unittest.TestCase):
         res = verify_chat_origin(authorization="Bearer valid-chat-token", x_api_key=None)
         self.assertTrue(res)
 
+    @patch.dict(os.environ, {"CHAT_AUDIENCE": "https://chat-service.a.run.app"})
     @patch("app.main.id_token.verify_oauth2_token")
     def test_rejected_unauthorized_service_account(self, mock_verify):
         mock_verify.return_value = {
@@ -93,6 +95,7 @@ class TestChatAuth(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("Unauthorized caller service account", ctx.exception.detail)
 
+    @patch.dict(os.environ, {"CHAT_AUDIENCE": "https://chat-service.a.run.app"})
     @patch("app.main.id_token.verify_oauth2_token")
     def test_rejected_invalid_issuer(self, mock_verify):
         mock_verify.return_value = {
@@ -103,6 +106,14 @@ class TestChatAuth(unittest.TestCase):
             verify_chat_origin(authorization="Bearer spoofed-token", x_api_key=None)
         self.assertEqual(ctx.exception.status_code, 401)
         self.assertIn("Invalid Google Chat token issuer", ctx.exception.detail)
+
+    def test_bearer_token_missing_chat_audience_fails_closed(self):
+        with patch.dict(os.environ, {"CHAT_AUDIENCE": "", "CLOUD_RUN_URL": ""}, clear=True):
+            with patch("app.main.resolve_secret", return_value=None):
+                with self.assertRaises(HTTPException) as ctx:
+                    verify_chat_origin(authorization="Bearer any-token", x_api_key=None)
+                self.assertEqual(ctx.exception.status_code, 401)
+                self.assertIn("Chat audience configuration missing", ctx.exception.detail)
 
     def test_missing_credentials_rejected(self):
         with patch("app.main.IS_PROD", True):
@@ -587,6 +598,155 @@ class TestAlerts(unittest.TestCase):
                 self.assertIn("FinSage Morning Brief", res)
                 self.assertIn("Daily Posture Snapshot", res)
                 self.assertIn("$10,000.00", res)
+
+    def test_extract_budget_caps_hardening(self):
+        # 1. Comma formatted and annual conversion
+        memories = [
+            "Our food budget is $9,000 per year for dining and groceries.",
+            "Annual grocery budget is $12,000.",
+        ]
+        caps = alerts.extract_budget_caps(memories)
+        self.assertEqual(caps.get("dining"), 750.0)
+        self.assertEqual(caps.get("groceries"), 1000.0)
+
+        # 2. Monthly limits with commas and decimals
+        memories2 = [
+            "Dining cap is $850.00/month",
+            "Supermarket grocery limit: $1,250",
+        ]
+        caps2 = alerts.extract_budget_caps(memories2)
+        self.assertEqual(caps2.get("dining"), 850.0)
+        self.assertEqual(caps2.get("groceries"), 1250.0)
+
+        # 3. Incidental numbers without budget context should NOT match
+        memories3 = [
+            "We put $2,500 on the HELOC and ate some food yesterday.",
+            "Bought groceries for $45.20 at the store.",
+        ]
+        caps3 = alerts.extract_budget_caps(memories3)
+        self.assertEqual(caps3, {})
+
+    def test_generate_daily_brief_synopsis_error_handling(self):
+        mock_bq = MagicMock()
+        mock_bq.query.side_effect = RuntimeError("BigQuery connection reset")
+
+        synopsis = alerts.generate_daily_brief_synopsis(mock_bq, "test-proj", "test-ds", alerts=[])
+        self.assertTrue(synopsis["is_error"])
+        self.assertIn("BigQuery live data unavailable", synopsis["posture_text"])
+        self.assertIn("Data Degraded", synopsis["focus_items"][0])
+        # Never swallow error into "All Systems Normal"
+        self.assertNotIn("All Systems Normal", synopsis["focus_items"][0])
+
+    def test_generate_daily_brief_synopsis_negative_checking_and_early_month_burn(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.brief_date = "2026-09-02"
+        mock_row.day_of_month = 2  # Early month: Day 2 <= 3
+        mock_row.liquid_balance = -450.25  # Negative checking
+        mock_row.fixed_burn = 4000.00
+        mock_row.heloc_name = "HELOC"
+        mock_row.heloc_balance = 50000.00
+        mock_row.heloc_apr = 0.08
+        mock_row.daily_interest_cost = 10.96
+        mock_row.monthly_interest_cost = 333.33
+        mock_row.mtd_spend = 120.00
+        mock_row.mtd_count = 3
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        synopsis = alerts.generate_daily_brief_synopsis(mock_bq, "test-proj", "test-ds", alerts=[])
+        self.assertFalse(synopsis["is_error"])
+        # Check negative liquid warning
+        self.assertIn("OVERDRAWN", synopsis["posture_text"])
+        self.assertIn("Overdrawn Checking", " ".join(synopsis["focus_items"]))
+        # Early-month burn rate pacing
+        self.assertIn("pacing calibrating", synopsis["posture_text"])
+
+    def test_snooze_spend_alert_clamping(self):
+        mock_bq = MagicMock()
+        with patch("app.alerts.bigquery.Client", return_value=mock_bq):
+            with patch("app.alerts.suppress_alert", return_value=True) as mock_suppress:
+                # Test upper clamping (99999 -> 90)
+                res_high = alerts.snooze_spend_alert("price_creep:netflix", days=99999)
+                self.assertIn("snoozed alert 'price_creep:netflix' for 90 days", res_high)
+                mock_suppress.assert_called_with(
+                    bq=mock_bq,
+                    project_id=config.BQ_PROJECT_ID,
+                    dataset_id=config.BQ_DATASET_ID,
+                    alert_key="price_creep:netflix",
+                    alert_type="USER_REQUESTED",
+                    days=90,
+                    reason="Snoozed by user request via Gemini chat for 90 days",
+                )
+
+                # Test lower clamping (-5 -> 1)
+                res_low = alerts.snooze_spend_alert("price_creep:netflix", days=-5)
+                self.assertIn("snoozed alert 'price_creep:netflix' for 1 days", res_low)
+
+    def test_snooze_signature_cryptographic_verification(self):
+        import time
+
+        from app.monarch_service import generate_snooze_signature, verify_snooze_signature
+
+        alert_key = "price_creep:club_greenwood"
+        days = 7
+        now_ts = int(time.time())
+
+        sig = generate_snooze_signature(alert_key, days, now_ts)
+        self.assertTrue(len(sig) == 64)
+
+        # 1. Valid signature
+        is_valid, msg = verify_snooze_signature(alert_key, days, now_ts, sig)
+        self.assertTrue(is_valid)
+        self.assertEqual(msg, "Valid")
+
+        # 2. Tampered alert key
+        is_valid, msg = verify_snooze_signature("price_creep:other_vendor", days, now_ts, sig)
+        self.assertFalse(is_valid)
+        self.assertIn("signature mismatch", msg)
+
+        # 3. Tampered days
+        is_valid, msg = verify_snooze_signature(alert_key, 14, now_ts, sig)
+        self.assertFalse(is_valid)
+        self.assertIn("signature mismatch", msg)
+
+        # 4. Expired signature (e.g. 10 days old when limit is 7 days)
+        old_ts = now_ts - (86400 * 10)
+        old_sig = generate_snooze_signature(alert_key, days, old_ts)
+        is_valid, msg = verify_snooze_signature(alert_key, days, old_ts, old_sig)
+        self.assertFalse(is_valid)
+        self.assertIn("expired", msg)
+
+    def test_build_chat_card_v2_degraded_state_and_snooze_hmac(self):
+        mock_alerts = [
+            {
+                "type": "PRICE_CREEP",
+                "severity": "WARNING",
+                "alert_key": "price_creep:xcel",
+                "title": "Subscription Price Hike: Xcel Energy",
+                "detail": "Increased from $229.61 to $420.07",
+                "suggested_fix": "Audit usage",
+            }
+        ]
+        mock_synopsis = {
+            "date": "2026-09-11",
+            "is_error": True,
+            "posture_text": "⚠️ <b>Account Posture:</b> BigQuery live data unavailable.",
+            "focus_items": ["⚠️ <b>Data Degraded:</b> Live BigQuery posture query failed."],
+        }
+
+        payload = alerts.build_chat_card_v2(mock_alerts, synopsis=mock_synopsis)
+        sections = payload["cardsV2"][0]["card"]["sections"]
+        self.assertEqual(sections[0]["header"], "⚠️ Morning Financial Synopsis (Data Degraded)")
+        self.assertEqual(sections[0]["widgets"][0]["decoratedText"]["startIcon"]["knownIcon"], "ERROR")
+
+        # Verify snooze button parameters include HMAC signature
+        snooze_btn_params = sections[1]["widgets"][1]["buttonList"]["buttons"][0]["onClick"]["action"]["parameters"]
+        param_dict = {p["key"]: p["value"] for p in snooze_btn_params}
+        self.assertEqual(param_dict["alert_key"], "price_creep:xcel")
+        self.assertEqual(param_dict["days"], "7")
+        self.assertIn("ts", param_dict)
+        self.assertIn("sig", param_dict)
+        self.assertEqual(len(param_dict["sig"]), 64)
 
 
 

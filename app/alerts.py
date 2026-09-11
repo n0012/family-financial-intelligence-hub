@@ -8,6 +8,7 @@ and formats/posts Google Chat Card V2 notifications with smart suppression.
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 try:
@@ -292,26 +293,49 @@ def check_micro_transaction_leakage(bq: Any, project_id: str, dataset_id: str) -
 
 
 def extract_budget_caps(memories: list[str]) -> dict[str, float]:
-    """Extracts category spend ceilings (dining, groceries) from memory bank facts."""
+    """
+    Extracts category spend ceilings (dining, groceries) from memory bank facts.
+    Robustly parses comma-formatted numbers ($9,000), normalizes annual budgets to monthly ($12,000/yr -> $1,000/mo),
+    and strictly requires budget/cap context keywords to prevent accidental number matches.
+    """
     caps: dict[str, float] = {}
+
+    def _parse_amount(amt_str: str, text: str) -> float:
+        val = float(amt_str.replace(",", ""))
+        # If explicitly annual / per year, convert to monthly equivalent
+        if re.search(r"\b(per year|annually|annual|/\s*yr)\b", text, re.IGNORECASE):
+            return round(val / 12.0, 2)
+        return round(val, 2)
+
+    budget_kw = r"(?:budget|cap|limit|ceiling|target|allowance|max)"
+    amt_pattern = r"\$([\d,]+(?:\.\d{2})?)"
+
     for mem in memories:
-        # Dining / Restaurants / Delivery
+        if not re.search(budget_kw, mem, re.IGNORECASE):
+            continue
+
+        # Dining / Restaurants / Food Delivery
         if "dining" not in caps:
-            m1 = re.search(r"(?:dining|restaurants?|food|delivery)[^\$]*\$(\d+(?:\.\d{2})?)", mem, re.IGNORECASE)
-            m2 = re.search(r"\$(\d+(?:\.\d{2})?)[^\$]*(?:dining|restaurants?|food|delivery)", mem, re.IGNORECASE)
-            if m1:
-                caps["dining"] = float(m1.group(1))
-            elif m2:
-                caps["dining"] = float(m2.group(1))
+            dining_kw = r"(?:dining|restaurants?|takeout|food delivery|food)"
+            m1 = re.search(rf"{dining_kw}[^$.\n]{{0,35}}?{budget_kw}[^$.\n]{{0,25}}?{amt_pattern}", mem, re.IGNORECASE)
+            m2 = re.search(rf"{budget_kw}[^$.\n]{{0,35}}?{dining_kw}[^$.\n]{{0,25}}?{amt_pattern}", mem, re.IGNORECASE)
+            m3 = re.search(rf"{amt_pattern}[^$.\n]{{0,25}}?{dining_kw}[^$.\n]{{0,25}}?{budget_kw}", mem, re.IGNORECASE)
+            m4 = re.search(rf"{amt_pattern}[^$.\n]{{0,25}}?{budget_kw}[^$.\n]{{0,25}}?{dining_kw}", mem, re.IGNORECASE)
+            m = m1 or m2 or m3 or m4
+            if m:
+                caps["dining"] = _parse_amount(m.group(1), mem)
 
         # Groceries
         if "groceries" not in caps:
-            m1 = re.search(r"(?:grocer(?:y|ies))[^\$]*\$(\d+(?:\.\d{2})?)", mem, re.IGNORECASE)
-            m2 = re.search(r"\$(\d+(?:\.\d{2})?)[^\$]*(?:grocer(?:y|ies))", mem, re.IGNORECASE)
-            if m1:
-                caps["groceries"] = float(m1.group(1))
-            elif m2:
-                caps["groceries"] = float(m2.group(1))
+            grocery_kw = r"(?:grocer(?:y|ies)|supermarkets?)"
+            m1 = re.search(rf"{grocery_kw}[^$.\n]{{0,35}}?{budget_kw}[^$.\n]{{0,25}}?{amt_pattern}", mem, re.IGNORECASE)
+            m2 = re.search(rf"{budget_kw}[^$.\n]{{0,35}}?{grocery_kw}[^$.\n]{{0,25}}?{amt_pattern}", mem, re.IGNORECASE)
+            m3 = re.search(rf"{amt_pattern}[^$.\n]{{0,25}}?{grocery_kw}[^$.\n]{{0,25}}?{budget_kw}", mem, re.IGNORECASE)
+            m4 = re.search(rf"{amt_pattern}[^$.\n]{{0,25}}?{budget_kw}[^$.\n]{{0,25}}?{grocery_kw}", mem, re.IGNORECASE)
+            m = m1 or m2 or m3 or m4
+            if m:
+                caps["groceries"] = _parse_amount(m.group(1), mem)
+
     return caps
 
 
@@ -340,7 +364,7 @@ def check_memory_budget_limits(
         cap = caps["dining"]
         dining_sql = f"""
         SELECT
-            FORMAT_DATE('%Y-%m', CURRENT_DATE()) AS current_month,
+            FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York')) AS current_month,
             COALESCE(ROUND(SUM(ABS(amount)), 2), 0.0) AS current_month_dining
         FROM `{project_id}.{dataset_id}.raw_transactions`
         WHERE (
@@ -350,8 +374,8 @@ def check_memory_budget_limits(
             OR LOWER(merchant_name) LIKE '%grubhub%'
         )
         AND amount < 0
-        AND pending = FALSE
-        AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE());
+        AND NOT COALESCE(pending, FALSE)
+        AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'));
         """
         try:
             rows = list(bq.query(dining_sql).result())
@@ -392,7 +416,7 @@ def check_memory_budget_limits(
         cap = caps["groceries"]
         groceries_sql = f"""
         SELECT
-            FORMAT_DATE('%Y-%m', CURRENT_DATE()) AS current_month,
+            FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York')) AS current_month,
             COALESCE(ROUND(SUM(ABS(amount)), 2), 0.0) AS current_month_groceries
         FROM `{project_id}.{dataset_id}.raw_transactions`
         WHERE (
@@ -406,8 +430,8 @@ def check_memory_budget_limits(
             OR LOWER(merchant_name) LIKE '%sprouts%'
         )
         AND amount < 0
-        AND pending = FALSE
-        AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE());
+        AND NOT COALESCE(pending, FALSE)
+        AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'));
         """
         try:
             rows = list(bq.query(groceries_sql).result())
@@ -556,12 +580,28 @@ def generate_daily_brief_synopsis(
     WITH liquid AS (
         SELECT COALESCE(ROUND(SUM(current_balance), 2), 0.0) AS liquid_balance
         FROM `{project_id}.{dataset_id}.raw_accounts`
-        WHERE LOWER(COALESCE(type_name, '')) IN ('depository', 'checking')
-           OR LOWER(COALESCE(subtype_name, '')) IN ('checking', 'savings')
+        WHERE (
+            LOWER(COALESCE(type_name, '')) IN ('depository', 'checking')
+            OR LOWER(COALESCE(subtype_name, '')) IN ('checking', 'savings', 'money_market')
+        )
+        AND is_asset = TRUE
     ),
     fixed AS (
-        SELECT COALESCE(ROUND(SUM(avg_charge), 2), 0.0) AS fixed_burn
-        FROM `{project_id}.{dataset_id}.v_active_subscriptions`
+        SELECT COALESCE(
+            (
+                SELECT ROUND(AVG(total_amount), 2)
+                FROM `{project_id}.{dataset_id}.v_spend_classification`
+                WHERE spend_type = 'FIXED_OVERHEAD'
+                  AND month >= FORMAT_DATE('%Y-%m', DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 3 MONTH))
+                  AND month < FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'))
+            ),
+            (
+                SELECT COALESCE(ROUND(SUM(monthly_run_rate), 2), 0.0)
+                FROM `{project_id}.{dataset_id}.v_active_subscriptions`
+                WHERE is_currently_active = TRUE
+            ),
+            0.0
+        ) AS fixed_burn
     ),
     heloc AS (
         SELECT
@@ -571,6 +611,7 @@ def generate_daily_brief_synopsis(
             daily_interest_cost,
             monthly_interest_cost
         FROM `{project_id}.{dataset_id}.v_heloc_daily_cost`
+        ORDER BY current_balance DESC
         LIMIT 1
     ),
     mtd AS (
@@ -579,12 +620,16 @@ def generate_daily_brief_synopsis(
             COUNT(*) AS mtd_count
         FROM `{project_id}.{dataset_id}.raw_transactions`
         WHERE amount < 0
-          AND pending = FALSE
-          AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE())
+          AND NOT COALESCE(pending, FALSE)
+          AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'))
+          AND LOWER(COALESCE(category_name, '')) NOT IN (
+              'transfer', 'credit card payment', 'balance transfer',
+              'loan payment', 'investment', 'savings'
+          )
     )
     SELECT
-        CURRENT_DATE() AS brief_date,
-        EXTRACT(DAY FROM CURRENT_DATE()) AS day_of_month,
+        CURRENT_DATE('America/New_York') AS brief_date,
+        EXTRACT(DAY FROM CURRENT_DATE('America/New_York')) AS day_of_month,
         l.liquid_balance,
         f.fixed_burn,
         h.account_name AS heloc_name,
@@ -599,6 +644,7 @@ def generate_daily_brief_synopsis(
     LEFT JOIN heloc h ON TRUE
     CROSS JOIN mtd m;
     """
+    query_failed = False
     try:
         rows = list(bq.query(sql).result())
         if rows:
@@ -616,84 +662,100 @@ def generate_daily_brief_synopsis(
             monthly_interest_cost = float(getattr(r, "monthly_interest_cost", 0.0) or 0.0)
             mtd_spend = float(getattr(r, "mtd_spend", 0.0) or 0.0)
             mtd_count = int(getattr(r, "mtd_count", 0) or 0)
+        else:
+            query_failed = True
     except Exception as e:
         logger.warning(f"Failed to query posture stats for morning brief: {e}")
+        query_failed = True
 
     coverage_ratio = (liquid_balance / fixed_burn) if fixed_burn > 0 else 0.0
     daily_burn_rate = (mtd_spend / day_of_month) if day_of_month > 0 else 0.0
+    pacing_desc = f"~${daily_burn_rate:,.2f}/day" if day_of_month > 3 else "pacing calibrating"
 
     posture_lines = []
-    if liquid_balance > 0:
-        buffer_str = f" ({coverage_ratio:.1f}x monthly buffer)" if coverage_ratio > 0 else ""
-        posture_lines.append(f"🏦 <b>Liquid Cash:</b> ${liquid_balance:,.2f}{buffer_str}")
-    if heloc_balance > 0:
-        posture_lines.append(
-            f"💳 <b>HELOC Carry:</b> ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) • Balance: ${heloc_balance:,.2f}"
-        )
-    if mtd_spend > 0:
-        posture_lines.append(
-            f"📊 <b>Month-to-Date Spend:</b> ${mtd_spend:,.2f} (Day {day_of_month} • ~${daily_burn_rate:,.2f}/day)"
-        )
-    if not posture_lines:
-        posture_lines.append("📊 <b>Account Posture:</b> Balances synchronized and active.")
-    posture_text = "<br>".join(posture_lines)
-
     posture_md_lines = []
-    if liquid_balance > 0:
-        buffer_str = f" ({coverage_ratio:.1f}x monthly buffer)" if coverage_ratio > 0 else ""
-        posture_md_lines.append(f"• **Liquid Reserves**: ${liquid_balance:,.2f}{buffer_str}")
-    if heloc_balance > 0:
-        posture_md_lines.append(
-            f"• **HELOC Daily Carry**: ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) — Balance: ${heloc_balance:,.2f}"
-        )
-    if mtd_spend > 0:
-        posture_md_lines.append(
-            f"• **Month-to-Date Spend**: ${mtd_spend:,.2f} (Day {day_of_month} • ~${daily_burn_rate:,.2f}/day)"
-        )
-    if not posture_md_lines:
-        posture_md_lines.append("• **Account Posture**: Balances synchronized and active.")
+
+    if query_failed:
+        posture_lines.append("⚠️ <b>Account Posture:</b> BigQuery live data unavailable (query error).")
+        posture_md_lines.append("• ⚠️ **Account Posture**: BigQuery live data unavailable (query error).")
+    else:
+        if liquid_balance < 0:
+            posture_lines.append(f"🏦 <b>Liquid Cash:</b> -${abs(liquid_balance):,.2f} ⚠️ (OVERDRAWN)")
+            posture_md_lines.append(f"• ⚠️ **Liquid Reserves**: -${abs(liquid_balance):,.2f} (OVERDRAWN)")
+        elif liquid_balance > 0:
+            buffer_str = f" ({coverage_ratio:.1f}x monthly buffer)" if coverage_ratio > 0 else ""
+            posture_lines.append(f"🏦 <b>Liquid Cash:</b> ${liquid_balance:,.2f}{buffer_str}")
+            posture_md_lines.append(f"• **Liquid Reserves**: ${liquid_balance:,.2f}{buffer_str}")
+        else:
+            posture_lines.append("🏦 <b>Liquid Cash:</b> $0.00")
+            posture_md_lines.append("• **Liquid Reserves**: $0.00")
+
+        if heloc_balance > 0:
+            posture_lines.append(
+                f"💳 <b>HELOC Carry:</b> ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) • Balance: ${heloc_balance:,.2f}"
+            )
+            posture_md_lines.append(
+                f"• **HELOC Daily Carry**: ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) — Balance: ${heloc_balance:,.2f}"
+            )
+        if mtd_spend > 0:
+            posture_lines.append(
+                f"📊 <b>Month-to-Date Spend:</b> ${mtd_spend:,.2f} (Day {day_of_month} • {pacing_desc})"
+            )
+            posture_md_lines.append(
+                f"• **Month-to-Date Spend**: ${mtd_spend:,.2f} (Day {day_of_month} • {pacing_desc})"
+            )
+
+    posture_text = "<br>".join(posture_lines)
     posture_md = "\n".join(posture_md_lines)
 
     focus_items = []
     focus_items_md = []
 
-    price_alerts = [a for a in alerts if a.get("type") == "PRICE_CREEP"]
-    for pa in price_alerts[:2]:
-        t = pa.get("title", "").replace("Subscription Price Hike: ", "")
-        focus_items.append(f"🔍 <b>Price Hike:</b> {t} — {pa.get('detail', '')}. {pa.get('suggested_fix', '')}")
-        focus_items_md.append(f"**Price Hike**: {t} — {pa.get('detail', '')}. {pa.get('suggested_fix', '')}")
+    if query_failed:
+        focus_items.append("⚠️ <b>Data Degraded:</b> Live BigQuery posture query failed. Check credentials and dataset views.")
+        focus_items_md.append("⚠️ **Data Degraded**: Live BigQuery posture query failed. Check credentials and dataset views.")
+    else:
+        if liquid_balance < 0:
+            focus_items.append(f"🚨 <b>Overdrawn Checking:</b> Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately.")
+            focus_items_md.append(f"🚨 **Overdrawn Checking**: Liquid balance is negative (-${abs(liquid_balance):,.2f}). Replenish immediately.")
 
-    food_alerts = [a for a in alerts if a.get("type") == "FOOD_LEAKAGE"]
-    for fa in food_alerts[:1]:
-        focus_items.append(f"🍔 <b>Food Pacing:</b> {fa.get('title', '')}. {fa.get('suggested_fix', '')}")
-        focus_items_md.append(f"**Food Pacing**: {fa.get('title', '')}. {fa.get('suggested_fix', '')}")
+        price_alerts = [a for a in alerts if a.get("type") == "PRICE_CREEP"]
+        for pa in price_alerts[:2]:
+            t = pa.get("title", "").replace("Subscription Price Hike: ", "")
+            focus_items.append(f"🔍 <b>Price Hike:</b> {t} — {pa.get('detail', '')}. {pa.get('suggested_fix', '')}")
+            focus_items_md.append(f"**Price Hike**: {t} — {pa.get('detail', '')}. {pa.get('suggested_fix', '')}")
 
-    overlap_alerts = [a for a in alerts if a.get("type") == "SUBSCRIPTION_OVERLAP"]
-    for oa in overlap_alerts[:1]:
-        focus_items.append(f"🔄 <b>Subscription Duplication:</b> {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
-        focus_items_md.append(f"**Subscription Duplication**: {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
+        food_alerts = [a for a in alerts if a.get("type") == "FOOD_LEAKAGE"]
+        for fa in food_alerts[:1]:
+            focus_items.append(f"🍔 <b>Food Pacing:</b> {fa.get('title', '')}. {fa.get('suggested_fix', '')}")
+            focus_items_md.append(f"**Food Pacing**: {fa.get('title', '')}. {fa.get('suggested_fix', '')}")
 
-    budget_alerts = [a for a in alerts if a.get("type") in ("BUDGET_CAP_EXCEEDED", "BUDGET_CAP_PACING")]
-    for ba in budget_alerts[:1]:
-        focus_items.append(f"⚠️ <b>Budget Warning:</b> {ba.get('title', '')} ({ba.get('detail', '')})")
-        focus_items_md.append(f"**Budget Warning**: {ba.get('title', '')} ({ba.get('detail', '')})")
+        overlap_alerts = [a for a in alerts if a.get("type") == "SUBSCRIPTION_OVERLAP"]
+        for oa in overlap_alerts[:1]:
+            focus_items.append(f"🔄 <b>Subscription Duplication:</b> {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
+            focus_items_md.append(f"**Subscription Duplication**: {oa.get('title', '')}. {oa.get('suggested_fix', '')}")
 
-    micro_alerts = [a for a in alerts if a.get("type") == "MICRO_TRANSACTION_LEAKAGE"]
-    for ma in micro_alerts[:1]:
-        focus_items.append(f"☕ <b>Convenience Leakage:</b> {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
-        focus_items_md.append(f"**Convenience Leakage**: {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
+        budget_alerts = [a for a in alerts if a.get("type") in ("BUDGET_CAP_EXCEEDED", "BUDGET_CAP_PACING")]
+        for ba in budget_alerts[:1]:
+            focus_items.append(f"⚠️ <b>Budget Warning:</b> {ba.get('title', '')} ({ba.get('detail', '')})")
+            focus_items_md.append(f"**Budget Warning**: {ba.get('title', '')} ({ba.get('detail', '')})")
 
-    if daily_interest_cost >= 15.0:
-        focus_items.append(
-            f"💳 <b>HELOC Paydown:</b> Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
-        )
-        focus_items_md.append(
-            f"**HELOC Paydown**: Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
-        )
+        micro_alerts = [a for a in alerts if a.get("type") == "MICRO_TRANSACTION_LEAKAGE"]
+        for ma in micro_alerts[:1]:
+            focus_items.append(f"☕ <b>Convenience Leakage:</b> {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
+            focus_items_md.append(f"**Convenience Leakage**: {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
 
-    if not focus_items:
-        focus_items.append("✅ <b>All Systems Normal:</b> Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
-        focus_items_md.append("**All Systems Normal**: Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
+        if daily_interest_cost >= 15.0:
+            focus_items.append(
+                f"💳 <b>HELOC Paydown:</b> Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
+            )
+            focus_items_md.append(
+                f"**HELOC Paydown**: Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
+            )
+
+        if not focus_items:
+            focus_items.append("✅ <b>All Systems Normal:</b> Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
+            focus_items_md.append("**All Systems Normal**: Spend is tracking normally and no recurring charge spikes or anomalies were detected today.")
 
     return {
         "date": brief_date_str,
@@ -713,6 +775,7 @@ def generate_daily_brief_synopsis(
         "posture_md": posture_md,
         "focus_items": focus_items,
         "focus_items_md": focus_items_md,
+        "is_error": query_failed,
     }
 
 
@@ -730,13 +793,17 @@ def build_chat_card_v2(
     if synopsis:
         synopsis_widgets: list[dict[str, Any]] = []
         posture_text = synopsis.get("posture_text")
+        is_error = bool(synopsis.get("is_error"))
+        header_text = "⚠️ Morning Financial Synopsis (Data Degraded)" if is_error else "🌅 Morning Financial Synopsis"
+        posture_icon = "ERROR" if is_error else "DOLLAR"
+
         if posture_text:
             synopsis_widgets.append(
                 {
                     "decoratedText": {
                         "topLabel": f"DAILY POSTURE SNAPSHOT • {synopsis.get('date', 'TODAY')}",
                         "text": posture_text,
-                        "startIcon": {"knownIcon": "DOLLAR"},
+                        "startIcon": {"knownIcon": posture_icon},
                         "wrapText": True,
                     }
                 }
@@ -756,7 +823,7 @@ def build_chat_card_v2(
         if synopsis_widgets:
             sections.append(
                 {
-                    "header": "🌅 Morning Financial Synopsis",
+                    "header": header_text,
                     "widgets": synopsis_widgets,
                 }
             )
@@ -776,6 +843,15 @@ def build_chat_card_v2(
             }
         )
         if a.get("alert_key"):
+            snooze_key = str(a["alert_key"])
+            snooze_days = 7
+            snooze_ts = int(time.time())
+            try:
+                from app.monarch_service import generate_snooze_signature
+                snooze_sig = generate_snooze_signature(snooze_key, snooze_days, snooze_ts)
+            except Exception:
+                snooze_sig = ""
+
             alert_widgets.append(
                 {
                     "buttonList": {
@@ -787,9 +863,11 @@ def build_chat_card_v2(
                                         "function": "snooze_alert",
                                         "parameters": [
                                             {"key": "action", "value": "snooze_alert"},
-                                            {"key": "alert_key", "value": str(a["alert_key"])},
+                                            {"key": "alert_key", "value": snooze_key},
                                             {"key": "alert_type", "value": str(a.get("type", "GENERAL"))},
-                                            {"key": "days", "value": "7"},
+                                            {"key": "days", "value": str(snooze_days)},
+                                            {"key": "ts", "value": str(snooze_ts)},
+                                            {"key": "sig", "value": snooze_sig},
                                         ],
                                     }
                                 },
@@ -1014,6 +1092,11 @@ def snooze_spend_alert(alert_key_or_name: str, days: int = 7) -> str:
     if not alert_key_or_name or not str(alert_key_or_name).strip():
         return "Please specify an alert key or merchant name to snooze."
 
+    try:
+        clamped_days = max(1, min(int(days), 90))
+    except (ValueError, TypeError):
+        clamped_days = 7
+
     clean_key = str(alert_key_or_name).strip().lower().replace(" ", "_")
     target_project = BQ_PROJECT_ID
     target_dataset = BQ_DATASET_ID
@@ -1029,11 +1112,11 @@ def snooze_spend_alert(alert_key_or_name: str, days: int = 7) -> str:
         dataset_id=target_dataset,
         alert_key=clean_key,
         alert_type="USER_REQUESTED",
-        days=days,
-        reason=f"Snoozed by user request via Gemini chat for {days} days",
+        days=clamped_days,
+        reason=f"Snoozed by user request via Gemini chat for {clamped_days} days",
     )
 
     if success:
-        return f"Successfully snoozed alert '{clean_key}' for {days} days."
+        return f"Successfully snoozed alert '{clean_key}' for {clamped_days} days."
     else:
         return f"Failed to snooze alert '{clean_key}'. Please check logs."

@@ -690,6 +690,40 @@ def verify_mutation_signature(
     return True, "Valid"
 
 
+def generate_snooze_signature(
+    alert_key: str,
+    days: int,
+    timestamp: int,
+) -> str:
+    """Generates a SHA-256 HMAC signature tying alert_key, days, and timestamp."""
+    key = get_mutation_hmac_secret().encode("utf-8")
+    payload = f"snooze:{alert_key.strip().lower()}:{days}:{timestamp}".encode()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def verify_snooze_signature(
+    alert_key: str,
+    days: int,
+    timestamp: int,
+    signature: str,
+    max_age_seconds: int = 86400 * 7,  # Card action valid up to 7 days
+) -> tuple[bool, str]:
+    """Validates snooze signature authenticity and freshness."""
+    if not signature:
+        return False, "Missing cryptographic signature for snooze action."
+    now = int(datetime.now(UTC).timestamp())
+    age = abs(now - timestamp)
+    if age > max_age_seconds:
+        return (
+            False,
+            f"Snooze confirmation expired (card age: {age}s > limit: {max_age_seconds}s).",
+        )
+    expected = generate_snooze_signature(alert_key, days, timestamp)
+    if not secrets.compare_digest(expected, signature):
+        return False, "Cryptographic signature mismatch on snooze action."
+    return True, "Valid"
+
+
 async def get_cached_categories(client: MonarchMoney | None = None, force_refresh: bool = False) -> dict[str, Any]:
     """Fetches and caches categories indexed by ID and normalized name."""
     global _CATEGORY_CACHE

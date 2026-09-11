@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS `family_finance.raw_transactions` (
     transaction_id STRING NOT NULL,
     account_id STRING NOT NULL,
     transaction_date DATE NOT NULL,
-    amount NUMERIC NOT NULL,   -- Positive = expense / debit, Negative = income / credit
+    amount NUMERIC NOT NULL,   -- Negative = expense / debit, Positive = income / credit (Monarch standard)
     merchant_name STRING,
     clean_merchant_name STRING,
     category_id STRING,
@@ -427,7 +427,7 @@ SELECT
     ROUND(SUM(ABS(amount)), 2) AS total_amount,
     COUNT(*) AS transaction_count
 FROM `family_finance.raw_transactions`
-WHERE pending = FALSE
+WHERE NOT COALESCE(pending, FALSE)
 GROUP BY 1, 2, 3;
 
 -- VIEW C1: Account Classification & Lifecycle Intelligence (Dynamic Resolution)

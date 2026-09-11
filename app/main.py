@@ -233,8 +233,8 @@ async def morning_brief():
     HELOC daily carry, month-to-date spending pacing, and what to pay attention to today.
     """
     bq = get_bq_client()
-    alerts = collect_all_alerts(bq, BQ_PROJECT_ID, BQ_DATASET_ID)
-    return generate_daily_brief_synopsis(bq, BQ_PROJECT_ID, BQ_DATASET_ID, alerts)
+    alerts = await asyncio.to_thread(collect_all_alerts, bq, BQ_PROJECT_ID, BQ_DATASET_ID)
+    return await asyncio.to_thread(generate_daily_brief_synopsis, bq, BQ_PROJECT_ID, BQ_DATASET_ID, alerts)
 
 
 
@@ -608,10 +608,13 @@ def verify_chat_origin(
         token = authorization.split("Bearer ", 1)[1].strip()
         try:
             chat_audience = resolve_secret("chat-audience", "CHAT_AUDIENCE") or os.getenv("CLOUD_RUN_URL")
+            if not chat_audience:
+                logger.error("Chat audience is not configured; refusing to verify token without audience")
+                raise HTTPException(status_code=401, detail="Chat audience configuration missing")
             claims = id_token.verify_oauth2_token(
                 token,
                 google_requests.Request(),
-                audience=chat_audience if chat_audience else None,
+                audience=chat_audience,
             )
             email = claims.get("email")
             iss = claims.get("iss", "")
@@ -814,10 +817,27 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             alert_key = action_params.get("alert_key", "")
             alert_type = action_params.get("alert_type", "GENERAL")
             days_str = action_params.get("days", "7")
+            ts_str = action_params.get("ts", "")
+            sig = action_params.get("sig", "")
             try:
                 days = int(days_str)
             except ValueError:
                 days = 7
+            # Clamp days strictly between 1 and 90
+            days = max(1, min(days, 90))
+
+            # Cryptographically verify snooze action if signature parameters are provided
+            if sig and ts_str:
+                try:
+                    ts = int(ts_str)
+                    from app.monarch_service import verify_snooze_signature
+
+                    is_valid, reason = verify_snooze_signature(alert_key, days, ts, sig)
+                    if not is_valid:
+                        logger.warning(f"Snooze signature rejected: {reason} (key={alert_key})")
+                        return respond(f"⛔ Snooze rejected: {reason}")
+                except (ValueError, TypeError):
+                    return respond("⛔ Invalid timestamp in snooze action.")
 
             logger.info(
                 f"Snoozing alert from Card v2: key={alert_key}, type={alert_type}, days={days}, user={user_email}"
