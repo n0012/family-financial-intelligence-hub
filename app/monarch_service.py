@@ -16,6 +16,7 @@ import concurrent.futures
 import contextvars
 import hashlib
 import hmac
+import html
 import json
 import logging
 import re
@@ -560,15 +561,20 @@ async def get_live_transaction_async(transaction_id: str) -> dict:
         # Fallback to BigQuery raw_transactions if live metadata is missing or incomplete
         if not merchant_name or amount_val == 0.0 or not txn_date or not category_name:
             try:
-                from app.bq_service import run_query
-
-                bq_rows = run_query(
+                bq_client = get_bq_client(BQ_PROJECT_ID)
+                query = (
                     f"SELECT merchant_name, clean_merchant_name, amount, transaction_date, category_name "
-                    f"FROM `{BQ_PROJECT_ID}.family_finance.raw_transactions` "
-                    f"WHERE transaction_id = '{transaction_id}' LIMIT 1"
+                    f"FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions` "
+                    f"WHERE transaction_id = @txn_id LIMIT 1"
                 )
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("txn_id", "STRING", str(transaction_id))
+                    ]
+                )
+                bq_rows = list(bq_client.query(query, job_config=job_config).result(max_results=1))
                 if bq_rows:
-                    row = bq_rows[0]
+                    row = dict(bq_rows[0].items())
                     if not merchant_name:
                         merchant_name = row.get("clean_merchant_name") or row.get("merchant_name")
                     if amount_val == 0.0 and row.get("amount") is not None:
@@ -578,7 +584,7 @@ async def get_live_transaction_async(transaction_id: str) -> dict:
                     if not category_name and row.get("category_name"):
                         category_name = str(row.get("category_name"))
             except Exception as bq_err:
-                logger.debug(f"BigQuery fallback lookup skipped for txn {transaction_id}: {bq_err}")
+                logger.warning(f"BigQuery fallback lookup failed for txn {transaction_id}: {bq_err}")
 
         return {
             "found": True,
@@ -1015,6 +1021,9 @@ def build_recategorization_card(
     cancel_action = get_chat_action_target("cancel_recategorize")
     amount_clean = abs(float(amount or 0.0))
     date_display = f"{txn_date} " if txn_date else ""
+    esc_merchant = html.escape(str(merchant_name or "Merchant"))
+    esc_current = html.escape(str(current_category or "Uncategorized"))
+    esc_proposed = html.escape(str(new_category or ""))
     return {
         "cardId": f"recat_{transaction_id}_{timestamp}",
         "card": {
@@ -1031,7 +1040,7 @@ def build_recategorization_card(
                         {
                             "decoratedText": {
                                 "topLabel": "Merchant & Amount",
-                                "text": f"<b>{merchant_name}</b> • <b>${amount_clean:,.2f}</b>",
+                                "text": f"<b>{esc_merchant}</b> • <b>${amount_clean:,.2f}</b>",
                                 "startIcon": {"knownIcon": "STORE"},
                             }
                         },
@@ -1045,7 +1054,7 @@ def build_recategorization_card(
                         {
                             "decoratedText": {
                                 "topLabel": "Category Reclassification",
-                                "text": f"Current: <i>{current_category}</i> → Proposed: <b>{new_category}</b>",
+                                "text": f"Current: <i>{esc_current}</i> → Proposed: <b>{esc_proposed}</b>",
                                 "startIcon": {"knownIcon": "CONFIRMATION_NUMBER_ICON"},
                             }
                         },
@@ -1101,17 +1110,19 @@ def build_recategorization_success_card(
     amount: float | None = None,
 ) -> dict:
     """Builds a confirmation Card v2 acknowledging successful recategorization in Monarch."""
+    esc_cat = html.escape(str(category_name))
     details = f"Transaction #{transaction_id}"
     if merchant_name:
+        esc_merch = html.escape(str(merchant_name))
         amt_str = f" (${abs(amount):,.2f})" if amount is not None else ""
-        details = f"<b>{merchant_name}</b>{amt_str} (ID: {transaction_id})"
+        details = f"<b>{esc_merch}</b>{amt_str} (ID: {transaction_id})"
 
     return {
         "cardId": f"recat_success_{transaction_id}",
         "card": {
             "header": {
                 "title": "Category Successfully Updated",
-                "subtitle": f"Reclassified to {category_name}",
+                "subtitle": f"Reclassified to {esc_cat}",
                 "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                 "imageType": "CIRCLE",
             },
@@ -1121,8 +1132,36 @@ def build_recategorization_success_card(
                         {
                             "decoratedText": {
                                 "topLabel": "Monarch Money Status",
-                                "text": f"✅ {details} was successfully reclassified to <b>{category_name}</b>.",
+                                "text": f"✅ {details} was successfully reclassified to <b>{esc_cat}</b>.",
                                 "startIcon": {"knownIcon": "BOOKMARK"},
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+
+
+def build_recategorization_cancelled_card(transaction_id: str) -> dict:
+    """Builds a confirmation Card v2 acknowledging user cancellation with buttons deactivated."""
+    return {
+        "cardId": f"recat_cancel_{transaction_id}",
+        "card": {
+            "header": {
+                "title": "Recategorization Cancelled",
+                "subtitle": f"Transaction #{transaction_id}",
+                "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                "imageType": "CIRCLE",
+            },
+            "sections": [
+                {
+                    "widgets": [
+                        {
+                            "decoratedText": {
+                                "topLabel": "Monarch Money Status",
+                                "text": f"🚫 Proposal for transaction #{transaction_id} was cancelled. Action buttons deactivated.",
+                                "startIcon": {"knownIcon": "DESCRIPTION"},
                             }
                         }
                     ]
