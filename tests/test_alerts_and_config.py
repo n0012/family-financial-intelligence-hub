@@ -1,6 +1,7 @@
 import asyncio
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
@@ -161,17 +162,23 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(res["alert_count"], 0)
         self.assertFalse(res["webhook_dispatched"])
 
+    # BigQuery Row objects raise AttributeError for absent columns. SimpleNamespace does
+    # too, so getattr() defaults in the alert checks are actually exercised. A bare
+    # MagicMock auto-creates every attribute, which silently defeats those defaults.
     def test_check_subscription_price_creep(self):
         mock_bq = MagicMock()
-        mock_row = MagicMock()
-        mock_row.merchant = "CloudStream"
-        mock_row.latest_charge = 19.99
-        mock_row.prior_charge = 15.99
-        mock_row.price_increase_amount = 4.00
-        mock_row.pct_increase = 25.0
-        mock_row.estimated_annual_cost = 239.88
-        mock_row.effective_date = "2026-09-01"
-        mock_bq.query.return_value.result.return_value = [mock_row]
+        row = SimpleNamespace(
+            merchant="CloudStream",
+            disposition="CANCELLABLE",
+            latest_charge=19.99,
+            prior_charge=15.99,
+            price_increase_amount=4.00,
+            pct_increase=25.0,
+            annual_impact=48.00,
+            estimated_annual_cost=239.88,
+            effective_date="2026-09-01",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
 
         found = alerts.check_subscription_price_creep(mock_bq, "proj", "ds")
         self.assertEqual(len(found), 1)
@@ -182,17 +189,42 @@ class TestAlerts(unittest.TestCase):
         self.assertIn("+25.0%", a["title"])
         self.assertIn("$15.99 to $19.99", a["detail"])
         self.assertIn("2026-09-01", a["detail"])
+        # Savings must be the annualised increase, not the full plan cost.
+        self.assertIn("$48.00", a["suggested_fix"])
+        self.assertNotIn("239.88", a["suggested_fix"])
+
+    def test_price_creep_reshoppable_avoids_cancel_advice(self):
+        mock_bq = MagicMock()
+        row = SimpleNamespace(
+            merchant="Example Mutual",
+            disposition="RESHOPPABLE",
+            latest_charge=536.70,
+            prior_charge=500.00,
+            price_increase_amount=36.70,
+            pct_increase=7.3,
+            annual_impact=440.40,
+            estimated_annual_cost=6440.40,
+            effective_date="2026-09-01",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
+
+        a = alerts.check_subscription_price_creep(mock_bq, "proj", "ds")[0]
+        fix = a["suggested_fix"].lower()
+        self.assertNotIn("cancel/rotate", fix)
+        self.assertIn("quotes", fix)
 
     def test_check_subscription_overlap(self):
         mock_bq = MagicMock()
-        mock_row = MagicMock()
-        mock_row.domain_name = "VIDEO_STREAMING"
-        mock_row.functional_domain = "VIDEO_STREAMING"
-        mock_row.active_service_count = 3
-        mock_row.combined_annual_cost = 540.0
-        mock_row.combined_monthly_cost = 45.0
-        mock_row.active_services = "StreamA, StreamB, StreamC"
-        mock_bq.query.return_value.result.return_value = [mock_row]
+        row = SimpleNamespace(
+            domain_name="VIDEO_STREAMING",
+            active_service_count=3,
+            combined_annual_cost=540.0,
+            combined_monthly_cost=45.0,
+            consolidation_savings_monthly=25.0,
+            consolidation_savings_annual=300.0,
+            active_services="StreamA, StreamB, StreamC",
+        )
+        mock_bq.query.return_value.result.return_value = [row]
 
         found = alerts.check_subscription_overlap(mock_bq, "proj", "ds")
         self.assertEqual(len(found), 1)
@@ -203,6 +235,34 @@ class TestAlerts(unittest.TestCase):
         self.assertIn("Video Streaming", a["title"])
         self.assertIn("StreamA, StreamB, StreamC", a["detail"])
         self.assertIn("$45.00/mo", a["detail"])
+        # Recoverable amount keeps one service, so it is never the whole domain total.
+        self.assertIn("$25.00/month", a["suggested_fix"])
+        self.assertNotIn("$45.00/month", a["suggested_fix"])
+
+    def test_check_utility_seasonal_spike(self):
+        mock_bq = MagicMock()
+        row = SimpleNamespace(
+            merchant="Example Energy",
+            spend_month="2026-08-01",
+            month_total=420.07,
+            seasonal_avg=300.00,
+            seasonal_stddev=30.00,
+            years_observed=3,
+            variance_vs_season=120.07,
+            variance_pct=40.0,
+        )
+        mock_bq.query.return_value.result.return_value = [row]
+
+        found = alerts.check_utility_seasonal_spike(mock_bq, "proj", "ds")
+        self.assertEqual(len(found), 1)
+        a = found[0]
+        self.assertEqual(a["type"], "UTILITY_SEASONAL_SPIKE")
+        self.assertEqual(a["alert_key"], "utility_season:example_energy:2026-08")
+        self.assertIn("seasonal", a["detail"].lower())
+        # A regulated utility must never be handed a cancel-to-save recommendation.
+        fix = a["suggested_fix"].lower()
+        self.assertNotIn("cancel/rotate", fix)
+        self.assertIn("not a cancellable plan", fix)
 
     def test_check_micro_transaction_leakage(self):
         mock_bq = MagicMock()
@@ -376,6 +436,158 @@ class TestAlerts(unittest.TestCase):
             self.assertIn("cardsV2", res)
             self.assertIn("Price Creep", res.get("text", ""))
             mock_suppress.assert_called_once()
+
+    def test_generate_daily_brief_synopsis(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.brief_date = "2026-09-11"
+        mock_row.day_of_month = 11
+        mock_row.liquid_balance = 14250.00
+        mock_row.fixed_burn = 4120.00
+        mock_row.heloc_name = "Primary HELOC"
+        mock_row.heloc_balance = 325096.16
+        mock_row.heloc_apr = 0.0675
+        mock_row.daily_interest_cost = 60.12
+        mock_row.monthly_interest_cost = 1828.67
+        mock_row.mtd_spend = 1420.50
+        mock_row.mtd_count = 18
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        mock_alerts = [
+            {
+                "type": "PRICE_CREEP",
+                "severity": "WARNING",
+                "alert_key": "price_creep:xcel",
+                "title": "Subscription Price Hike: Xcel Energy",
+                "detail": "Increased from $229.61 to $420.07",
+                "suggested_fix": "Audit usage",
+            },
+            {
+                "type": "FOOD_LEAKAGE",
+                "severity": "WARNING",
+                "alert_key": "food_leakage:2026-09",
+                "title": "High Dining/Delivery Ratio (68.4% of food budget)",
+                "detail": "Dining accounted for $249.39",
+                "suggested_fix": "Cook at home",
+            },
+        ]
+
+        synopsis = alerts.generate_daily_brief_synopsis(mock_bq, "proj", "ds", mock_alerts)
+        self.assertEqual(synopsis["date"], "2026-09-11")
+        self.assertEqual(synopsis["day_of_month"], 11)
+        self.assertEqual(synopsis["liquid_balance"], 14250.00)
+        self.assertEqual(synopsis["fixed_burn"], 4120.00)
+        self.assertEqual(synopsis["coverage_ratio"], 3.46)
+        self.assertEqual(synopsis["heloc_balance"], 325096.16)
+        self.assertEqual(synopsis["daily_interest_cost"], 60.12)
+        self.assertEqual(synopsis["monthly_interest_cost"], 1828.67)
+        self.assertEqual(synopsis["mtd_spend"], 1420.50)
+        self.assertEqual(synopsis["daily_burn_rate"], 129.14)
+
+        self.assertIn("Liquid Cash", synopsis["posture_text"])
+        self.assertIn("$14,250.00", synopsis["posture_text"])
+        self.assertIn("HELOC Carry", synopsis["posture_text"])
+        self.assertIn("$60.12/day", synopsis["posture_text"])
+        self.assertIn("Month-to-Date Spend", synopsis["posture_text"])
+
+        # Check focus attention items
+        focus_str = " ".join(synopsis["focus_items"])
+        self.assertIn("Price Hike", focus_str)
+        self.assertIn("Xcel Energy", focus_str)
+        self.assertIn("Food Pacing", focus_str)
+        self.assertIn("HELOC Paydown", focus_str)
+
+    def test_build_chat_card_v2_with_synopsis(self):
+        mock_alerts = [
+            {
+                "type": "PRICE_CREEP",
+                "severity": "WARNING",
+                "alert_key": "price_creep:xcel",
+                "title": "Subscription Price Hike: Xcel Energy",
+                "detail": "Increased from $229.61 to $420.07",
+                "suggested_fix": "Audit usage",
+            }
+        ]
+        mock_synopsis = {
+            "date": "2026-09-11",
+            "posture_text": "🏦 <b>Liquid Cash:</b> $14,250.00<br>💳 <b>HELOC Carry:</b> $60.12/day",
+            "focus_items": [
+                "🔍 <b>Price Hike:</b> Xcel Energy increased +82.9%. Audit usage.",
+                "💳 <b>HELOC Paydown:</b> Running at $60.12/day. Sweep checking surplus.",
+            ],
+        }
+
+        payload = alerts.build_chat_card_v2(mock_alerts, synopsis=mock_synopsis)
+        self.assertIn("cardsV2", payload)
+        card = payload["cardsV2"][0]["card"]
+        self.assertEqual(card["header"]["title"], "FinSage")
+        self.assertEqual(card["header"]["subtitle"], "Daily Synopsis & Spend Advisory")
+
+        sections = card["sections"]
+        self.assertEqual(len(sections), 2)
+        self.assertEqual(sections[0]["header"], "🌅 Morning Financial Synopsis")
+        self.assertEqual(sections[1]["header"], "Daily Optimization Opportunities")
+
+        synopsis_widgets = sections[0]["widgets"]
+        self.assertEqual(len(synopsis_widgets), 2)
+        self.assertEqual(synopsis_widgets[0]["decoratedText"]["topLabel"], "DAILY POSTURE SNAPSHOT • 2026-09-11")
+        self.assertIn("Liquid Cash", synopsis_widgets[0]["decoratedText"]["text"])
+        self.assertEqual(synopsis_widgets[1]["decoratedText"]["topLabel"], "WHAT TO PAY ATTENTION TO TODAY")
+        self.assertIn("Xcel Energy", synopsis_widgets[1]["decoratedText"]["text"])
+
+        alert_widgets = sections[1]["widgets"]
+        self.assertEqual(len(alert_widgets), 2)  # text + snooze button
+        self.assertIn("Xcel Energy", alert_widgets[0]["decoratedText"]["text"])
+
+    def test_build_markdown_fallback_with_synopsis(self):
+        mock_alerts = [
+            {
+                "type": "PRICE_CREEP",
+                "title": "Subscription Price Hike: Xcel Energy",
+                "detail": "Increased from $229.61 to $420.07",
+                "suggested_fix": "Audit usage",
+            }
+        ]
+        mock_synopsis = {
+            "date": "2026-09-11",
+            "posture_md": "• **Liquid Reserves**: $14,250.00\n• **HELOC Daily Carry**: $60.12/day",
+            "focus_items_md": [
+                "**Price Hike**: Xcel Energy. Audit usage.",
+                "**HELOC Paydown**: Running at $60.12/day.",
+            ],
+        }
+
+        md = alerts.build_markdown_fallback(mock_alerts, synopsis=mock_synopsis)
+        self.assertIn("🌅 FinSage Morning Brief — 2026-09-11", md)
+        self.assertIn("Daily Posture Snapshot:", md)
+        self.assertIn("$14,250.00", md)
+        self.assertIn("What to Pay Attention to Today:", md)
+        self.assertIn("Xcel Energy", md)
+        self.assertIn("Daily Optimization Opportunities", md)
+
+    def test_get_daily_morning_brief_tool(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.brief_date = "2026-09-11"
+        mock_row.day_of_month = 11
+        mock_row.liquid_balance = 10000.00
+        mock_row.fixed_burn = 3000.00
+        mock_row.heloc_name = "HELOC"
+        mock_row.heloc_balance = 100000.00
+        mock_row.heloc_apr = 0.07
+        mock_row.daily_interest_cost = 19.18
+        mock_row.monthly_interest_cost = 583.33
+        mock_row.mtd_spend = 800.00
+        mock_row.mtd_count = 10
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        with patch("app.alerts.collect_all_alerts", return_value=[]):
+            with patch("app.alerts.bigquery.Client", return_value=mock_bq):
+                res = alerts.get_daily_morning_brief()
+                self.assertIn("FinSage Morning Brief", res)
+                self.assertIn("Daily Posture Snapshot", res)
+                self.assertIn("$10,000.00", res)
+
 
 
 class TestJobCLI(unittest.TestCase):

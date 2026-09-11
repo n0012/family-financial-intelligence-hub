@@ -50,11 +50,11 @@ flowchart TD
 
     subgraph DataWarehouse ["Google BigQuery Data Warehouse"]
         RawTables["Raw Tables:<br/>• raw_accounts<br/>• raw_transactions<br/>• raw_categories<br/>• staging_transactions"]
-        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Daily Compounding Debt)<br/>• v_active_subscriptions (Cadence Run-Rates)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
+        Views["Analytical Optimization Views:<br/>• v_account_lifecycle (Active vs Superseded)<br/>• v_heloc_daily_cost (Daily Compounding Debt)<br/>• v_merchant_domain (Functional Domain & Disposition)<br/>• v_subscription_charges (Recurring Tier, POS Removed)<br/>• v_active_subscriptions (Cadence Run-Rates)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_utility_seasonal_baseline (Same-Month Prior Years)<br/>• v_food_efficiency (Groceries vs Dining/Delivery)<br/>• v_micro_transaction_leakage (Sub-$35 Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)"]
     end
 
-    subgraph ProactiveOutbound ["Proactive Outbound Alerts (Direct Webhook)"]
-        Webhook["Google Chat Incoming Webhook<br/>chat.googleapis.com/v1/spaces/..."]
+    subgraph ProactiveOutbound ["Proactive Outbound Alerts (Request/Response HTTPS)"]
+        Webhook["Google Chat Incoming Webhook<br/>chat.googleapis.com/v1/spaces/...<br/>(Pub/Sub has no Chat sink -- a space is<br/>only reachable by an authenticated HTTPS call)"]
     end
 
     subgraph PrivateIngestion ["Private Inbound Chat Integration (Zero Inbound Ports)"]
@@ -99,6 +99,17 @@ flowchart TD
     GeminiFlash -->|"Async REST Reply (chat.googleapis.com)"| GoogleChat
 ```
 
+### Why inbound uses Pub/Sub and outbound does not
+
+The two Chat paths are deliberately asymmetric, and the asymmetry is a property of the Google Chat API rather than a design choice:
+
+* **Inbound (Chat → FinSage) is event-driven.** Google Chat is the *publisher*; it writes user message events into `monarch-chat-incoming`. FinSage subscribes with an outbound streaming pull, which is what buys the zero-ingress posture — the app opens a connection outward and never listens on a port.
+* **Outbound (FinSage → Chat) is request/response.** Pub/Sub has no Google Chat sink. A subscription can only deliver to a pull client or push to an HTTPS endpoint you own — it cannot deposit a message into a space, and Chat is not subscribed to that topic. The only way a card reaches a space is an authenticated HTTPS call to `chat.googleapis.com`, either an incoming-webhook URL or `spaces.messages.create` with a service-account token.
+
+So publishing alerts to Pub/Sub would not deliver anything on its own: it would still require a permanently running subscriber whose sole job is to make the same HTTPS call, adding a hop and an always-on component. It would also buy nothing in security terms, because the Cloud Run Job already makes that call **outbound** and exposes no ingress. Pub/Sub earns its place on the inbound path (where it removes a public listener) and would only add latency and a failure mode on the outbound one.
+
+Pub/Sub would become the right answer outbound if the alert fan-out grew several independent consumers (Chat plus email plus a mobile push), or if alert delivery needed durable retry and replay independent of the job's lifetime. At one destination, once a day, it does not.
+
 ---
 
 ## BigQuery Data Model & Analytical Views
@@ -112,9 +123,12 @@ The data warehouse decouples storage from analytical modeling, allowing queries 
 | **`raw_categories`** | Budget envelopes grouped into Fixed Overhead, Discretionary, Debt, and Income. |
 | **`v_account_lifecycle`** | Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity recency, non-zero balance, and transaction count. Resolves duplicate accounts during bank mergers. |
 | **`v_heloc_daily_cost`** | Computes the exact daily compounding cost (`(balance * apr) / 365`) and monthly carrying cost of variable-rate debt, alongside payoff acceleration impacts. |
-| **`v_active_subscriptions`** | Autodetects recurring billing cadences (monthly, quarterly, annual) and projects annual run-rates while filtering out incidental retail micro-transactions (<60% of baseline tier) and variable utility bills. |
-| **`v_subscription_price_creep`** | Compares the latest recurring charge against the immediately preceding charge via `LAG()` windowing to detect authentic price hikes in the last 45 days (+3% to +40%, $\ge \$1.00$). |
-| **`v_subscription_overlap`** | Clusters active subscriptions into functional domains (Video Streaming, AI Productivity, Cloud Storage, Audio, News, Security) to flag genuine service redundancies. |
+| **`v_merchant_domain`** | Maps each merchant to the functional domain it competes in and a `disposition` that constrains the advice: `CANCELLABLE`, `RESHOPPABLE` (insurance, telecom — re-quote, never cancel), `ESSENTIAL_METERED` (regulated utilities — no cancel action exists), `NOT_A_SUBSCRIPTION`. |
+| **`v_subscription_charges`** | The cleaned recurring-charge ledger. Trusts the aggregator's recurrence flag where present, otherwise keeps only charges within 60–200% of the merchant's median, so an incidental cafe purchase at a gym never gets compared against the membership fee. |
+| **`v_active_subscriptions`** | One row per merchant (not per merchant/category, which fragmented a single service whenever the aggregator re-categorised it). Detects billing cadence and derives a cadence-normalised `estimated_annual_cost` and `monthly_run_rate`. |
+| **`v_subscription_price_creep`** | Compares the latest bill against the mean of the preceding three cycles via `LAG()`/window framing. Requires recency within 45 days, a +3% to +40% move, and >$0.50, so a change from a year ago stops firing and a single anomalous cycle cannot fabricate one. Reports `annual_impact` (the annualised increase), not the whole plan cost. |
+| **`v_subscription_overlap`** | Groups only *concurrently active*, functionally substitutable services by domain, with a per-domain threshold (3 for video streaming, 2 elsewhere). Reports `consolidation_savings_monthly` — the total minus the largest plan — rather than implying every service can be cancelled. |
+| **`v_utility_seasonal_baseline`** | Compares each metered utility month against the **same calendar month in prior years**, so heating and cooling swings are measured against their own season instead of against the previous month. |
 | **`v_food_efficiency`** | Calculates the monthly ratio between grocery purchases and dining out / food delivery markups (DoorDash, UberEats, Grubhub). |
 | **`v_micro_transaction_leakage`** | Flags frequent sub-$35 convenience transactions (coffee shops, convenience stores, app purchases) and calculates their annualized drain. |
 | **`v_spend_classification`** | Classifies all monthly outflows into Fixed Overhead vs Discretionary spend to evaluate baseline burn rate. |
@@ -141,12 +155,17 @@ Paste images directly into Google Chat:
 ### 3. Persistent User Preferences & Long-Term Memory
 Powered by Google Cloud's **Vertex AI Agent Platform Reasoning Engine Memory Bank**, FinSage remembers your family's financial targets, payoff milestones, and budget ceilings across conversation threads. It automatically consolidates preferences and resolves conflicting goals without database schema bloat.
 
-### 4. Interactive Transaction Recategorization (Card v2)
-When asking FinSage to recategorize a transaction, it verifies the transaction state, checks category taxonomies, and generates an interactive **Card v2** widget with "Confirm Update" and "Cancel" buttons secured by 15-minute expiring HMAC-SHA256 cryptographic signatures.
+### 5. Daily Morning Brief & Executive Financial Synopsis
+Each morning, Cloud Run Job scans account posture and spend pacing, posting a comprehensive two-tier Card v2 message to Google Chat:
+* **🌅 Morning Financial Synopsis**: Executive snapshot detailing current liquid checking reserves (with monthly fixed burn coverage buffer), active HELOC balance with exact daily interest carry ($/day) and monthly carry, plus month-to-date spending pacing vs days elapsed.
+* **🎯 What to Pay Attention to Today**: High-priority focus bullets synthesized directly from posture and active alerts (e.g. price hikes, dining out ratio, debt sweep opportunities, micro-spend habits, or an "all systems normal" confirmation).
+* **Daily Optimization Opportunities**: Proactive spend advisory cards featuring interactive 7-day snooze buttons.
 
-### 5. Chat Commands & Shortcuts
+You can also request this on demand at any time via natural language (*"What's today's morning brief?"*, *"Give me our daily financial synopsis"*) via the `get_daily_morning_brief()` Gemini tool, or query the `/advisor/morning-brief` API endpoint.
+
+### 6. Chat Commands & Shortcuts
 * `/sync` — Pulls latest transactions from Monarch Money into BigQuery immediately.
-* `/alerts` — Triggers an on-demand scan across all BigQuery optimization views and posts the alert summary with snooze actions.
+* `/brief` / `/alerts` — Triggers an on-demand scan across all BigQuery optimization views and posts the morning synopsis and alert summary with snooze actions.
 * `/help` — Displays quick reference guides and sample prompts.
 
 ---

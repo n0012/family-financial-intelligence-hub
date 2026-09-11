@@ -18,7 +18,10 @@ from google.oauth2 import id_token
 from app.alerts import (
     build_chat_card_v2,
     build_snooze_success_card,
+    collect_all_alerts,
     execute_alert_scan,
+    generate_daily_brief_synopsis,
+    get_daily_morning_brief,
     snooze_spend_alert,
     suppress_alert,
 )
@@ -223,11 +226,24 @@ async def scan_alerts():
     return await execute_alert_scan()
 
 
+@app.get("/advisor/morning-brief", dependencies=[Depends(verify_api_key)], tags=["Spend Optimization Advisor"])
+async def morning_brief():
+    """
+    Retrieves the executive FinSage morning synopsis: liquid reserves, monthly fixed burn buffer,
+    HELOC daily carry, month-to-date spending pacing, and what to pay attention to today.
+    """
+    bq = get_bq_client()
+    alerts = collect_all_alerts(bq, BQ_PROJECT_ID, BQ_DATASET_ID)
+    return generate_daily_brief_synopsis(bq, BQ_PROJECT_ID, BQ_DATASET_ID, alerts)
+
+
+
 def run_readonly_sql_tool(sql_query: str) -> str:
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
-    (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_overlap,
-    v_food_efficiency, v_micro_transaction_leakage, raw_accounts, raw_transactions).
+    (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_price_creep,
+    v_subscription_overlap, v_utility_seasonal_baseline, v_food_efficiency,
+    v_micro_transaction_leakage, raw_accounts, raw_transactions).
 
     Args:
         sql_query: The GoogleSQL SELECT query to execute.
@@ -286,9 +302,15 @@ def ask_gemini_brain(
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_heloc_daily_cost`:\n"
             "   Columns: account_id, display_name, institution_name, current_balance, credit_limit, available_credit, apr, daily_interest_cost, monthly_interest_cost, annual_interest_saved_per_500_monthly_reduction, is_apr_estimated, lifecycle_status, is_primary_active, last_tx_date, institution_latest_tx_date, institution_tx_count, updated_at\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_active_subscriptions`:\n"
-            "   Columns: merchant, category_name, charge_count, avg_charge, min_charge, max_charge, has_price_increased, billing_cadence, estimated_annual_cost, first_seen, last_seen, avg_cadence_days\n"
+            "   Columns: merchant, category_name, functional_domain, disposition, is_overlap_eligible, overlap_min_count, charge_count, typical_charge, avg_charge, min_charge, max_charge, charge_variability, billing_cadence, estimated_annual_cost, monthly_run_rate, first_seen, last_seen, avg_cadence_days, days_since_last_charge, is_currently_active\n"
+            "   Note: one row per merchant, incidental point-of-sale purchases already removed. Use typical_charge (the recurring tier) not avg_charge when quoting a subscription's price, and monthly_run_rate when summing across mixed billing cadences.\n"
+            f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_subscription_price_creep`:\n"
+            "   Columns: merchant, category_name, functional_domain, disposition, billing_cadence, latest_charge, prior_charge, price_increase_amount, pct_increase, annual_impact, estimated_annual_cost, effective_date, days_since_prior_charge\n"
+            "   Note: annual_impact is the annualised cost of the INCREASE. estimated_annual_cost is the whole plan. Never quote the plan cost as the saving from a price rise.\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_subscription_overlap`:\n"
-            "   Columns: category_name, active_subscriptions_count, category_annual_run_rate, combined_monthly_cost, active_services\n"
+            "   Columns: functional_domain, active_service_count, combined_monthly_cost, combined_annual_cost, consolidation_savings_monthly, consolidation_savings_annual, active_services\n"
+            f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_utility_seasonal_baseline`:\n"
+            "   Columns: merchant, spend_month, month_total, seasonal_avg, seasonal_stddev, years_observed, variance_vs_season, variance_pct\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_food_efficiency`:\n"
             "   Columns: month, grocery_spend, dining_delivery_spend, total_food_spend, dining_percentage_of_food_budget\n"
             f"- `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.v_micro_transaction_leakage`:\n"
@@ -307,6 +329,8 @@ def ask_gemini_brain(
             "3. If the user's message is brief, conversational, or a topic continuation (e.g. 'how do i fix my cash flow deficit', 'what about HELOC?', 'show more details', 'try again'), refer to the prior conversation history and run the single most relevant analytical view immediately.\n"
             "4. Always call `run_readonly_sql` to fetch exact figures. Never guess, estimate, or hallucinate numbers.\n"
             "5. For every dollar of recommended savings, calculate the exact debt acceleration impact: daily and annual interest eliminated on the HELOC and months shaved off payoff.\n"
+            "5b. Respect `disposition` before recommending any action on a recurring charge. CANCELLABLE may be cancelled, downgraded or rotated. RESHOPPABLE (insurance, telecom, broadband, monitored security) is contractual: recommend re-quoting or negotiating the renewal, never 'cancel to save'. ESSENTIAL_METERED (electric, gas, water) is a regulated monopoly with no substitute: only ever discuss consumption or rate schedules, and compare against v_utility_seasonal_baseline rather than against the previous month, because heating and cooling swings are seasonal, not price rises. UNKNOWN means unclassified: describe the charge, do not advise cancelling it.\n"
+            "5c. Never present a subscription's total run rate as the saving from a price increase. The recoverable amount is the increase itself (`annual_impact`), and for an overlap it is `consolidation_savings_monthly`, which already assumes one service is kept.\n"
             "6. Dynamic Account & Migration Intelligence (Zero Hardcoding): When answering questions about an account category (e.g. 'HELOC', 'mortgage', 'checking', 'credit card') where multiple accounts exist:\n"
             "   a. Inspect `is_primary_active` in the analytical views or evaluate transaction recency, active balance, and linking timestamps.\n"
             "   b. Focus your calculations and advice on the account flagged `is_primary_active = TRUE`.\n"
@@ -320,6 +344,7 @@ def ask_gemini_brain(
             "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions.\n"
             "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
+            "15. Daily Morning Brief & Synopsis: You are equipped with `get_daily_morning_brief()` to retrieve the executive morning synopsis (liquid cash reserves, monthly fixed burn buffer, HELOC daily carry, MTD spend pacing, and high-priority items to pay attention to today). Call this whenever the user asks for the morning brief, daily financial synopsis, or daily overview.\n"
             f"{memory_block}"
         )
 
@@ -345,6 +370,7 @@ def ask_gemini_brain(
                     propose_transaction_recategorization,
                     store_user_preference,
                     snooze_spend_alert,
+                    get_daily_morning_brief,
                 ],
             ),
         )

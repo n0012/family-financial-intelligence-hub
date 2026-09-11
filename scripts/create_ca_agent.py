@@ -61,11 +61,13 @@ TABLES = [
     "raw_transactions",
     "raw_categories",
     "v_active_subscriptions",
+    "v_subscription_price_creep",
     "v_spend_classification",
     "v_heloc_daily_cost",
     "v_food_efficiency",
     "v_micro_transaction_leakage",
     "v_subscription_overlap",
+    "v_utility_seasonal_baseline",
 ]
 
 SYSTEM_INSTRUCTION = (
@@ -77,8 +79,9 @@ SYSTEM_INSTRUCTION = (
     "1. TIER 1 - PAINLESS CUTS (Zero Lifestyle Impact): "
     "   - Query v_subscription_overlap and v_active_subscriptions. "
     "   - Flag duplicate streaming/cloud services (e.g., multiple media apps active simultaneously, redundant cloud storage). "
-    "   - Call out subscriptions with has_price_increased = TRUE and subscriptions > $100/yr. "
+    "   - Query v_subscription_price_creep for recent price rises; quote annual_impact (the annualised increase) as the recoverable amount, never estimated_annual_cost (the whole plan). "
     "   - Suggest rotation strategies (e.g. keep 1 streaming service active per season instead of 4 at once). "
+    "   - Honour the `disposition` column before advising: CANCELLABLE can be cancelled or rotated; RESHOPPABLE (insurance, telecom, broadband, security monitoring) must be re-quoted or renegotiated at renewal, never cancelled; ESSENTIAL_METERED (electric, gas, water) is a regulated monopoly with no cancel action, so compare it against v_utility_seasonal_baseline (same calendar month, prior years) and discuss consumption or rate schedules only. "
     "2. TIER 2 - HIGH-LEVERAGE HABIT OPTIMIZATION: "
     "   - Query v_food_efficiency. If dining_percentage_of_food_budget > 30%, identify delivery markups (DoorDash, UberEats). "
     "   - Propose concrete shifts (e.g., 'Moving 2 delivery meals/month to home cooking frees $220/month'). "
