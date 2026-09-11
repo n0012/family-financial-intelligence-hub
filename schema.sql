@@ -874,3 +874,124 @@ QUALIFY ROW_NUMBER() OVER (
 ) = 1
 ORDER BY days_until_renewal ASC;
 
+-- VIEW J: Paycheck Surplus Sweep Engine (Debt Paydown Automation)
+-- Identifies recent income deposits into checking accounts, models 30-day fixed
+-- overhead commitments with safety buffers, and calculates the exact safe-to-sweep
+-- surplus cash to accelerate variable-rate debt (HELOC) paydown and reduce daily compounding interest.
+CREATE OR REPLACE VIEW `family_finance.v_paycheck_surplus_sweep` AS
+WITH recent_income AS (
+    SELECT
+        t.transaction_id,
+        t.transaction_date,
+        t.account_id,
+        COALESCE(t.clean_merchant_name, t.merchant_name, 'Paycheck / Income') AS employer_or_source,
+        t.category_name,
+        ROUND(t.amount, 2) AS income_amount
+    FROM `family_finance.raw_transactions` t
+    WHERE t.amount > 0
+      AND NOT COALESCE(t.pending, FALSE)
+      AND t.transaction_date >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 14 DAY)
+      AND (
+          LOWER(COALESCE(t.category_name, '')) IN ('income', 'paycheck', 'bonus', 'salary', 'wages')
+          OR REGEXP_CONTAINS(LOWER(COALESCE(t.clean_merchant_name, t.merchant_name, '')), r'(payroll|adp|gusto|paychex|workday|direct dep|treasury|dfas|salary)')
+      )
+    QUALIFY ROW_NUMBER() OVER (
+        ORDER BY t.transaction_date DESC, t.amount DESC
+    ) = 1
+),
+liquid_cash AS (
+    SELECT
+        COALESCE(ROUND(SUM(current_balance), 2), 0.0) AS liquid_balance,
+        COUNT(*) AS checking_account_count
+    FROM `family_finance.raw_accounts`
+    WHERE (
+        LOWER(COALESCE(type_name, '')) IN ('depository', 'checking')
+        OR LOWER(COALESCE(subtype_name, '')) IN ('checking', 'savings', 'money_market')
+    )
+    AND is_asset = TRUE
+),
+fixed_overhead AS (
+    SELECT COALESCE(
+        (
+            SELECT ROUND(AVG(total_amount), 2)
+            FROM `family_finance.v_spend_classification`
+            WHERE spend_type = 'FIXED_OVERHEAD'
+              AND month >= FORMAT_DATE('%Y-%m', DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 3 MONTH))
+              AND month < FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'))
+        ),
+        (
+            SELECT COALESCE(ROUND(SUM(monthly_run_rate), 2), 0.0)
+            FROM `family_finance.v_active_subscriptions`
+            WHERE is_currently_active = TRUE
+        ),
+        2500.00
+    ) AS monthly_fixed_burn
+),
+upcoming_bills AS (
+    SELECT COALESCE(ROUND(SUM(prior_charge_amount), 2), 0.0) AS upcoming_30d_lump_sums
+    FROM `family_finance.v_annual_bill_radar`
+    WHERE days_until_renewal BETWEEN 0 AND 30
+),
+heloc_debt AS (
+    SELECT
+        display_name AS heloc_name,
+        current_balance AS heloc_balance,
+        apr AS heloc_apr,
+        daily_interest_cost,
+        monthly_interest_cost
+    FROM `family_finance.v_heloc_daily_cost`
+    ORDER BY current_balance DESC
+    LIMIT 1
+)
+SELECT
+    CURRENT_DATE('America/New_York') AS evaluation_date,
+    inc.transaction_id AS latest_income_id,
+    inc.transaction_date AS latest_income_date,
+    inc.employer_or_source,
+    inc.income_amount AS latest_income_amount,
+    lc.liquid_balance,
+    fo.monthly_fixed_burn,
+    ub.upcoming_30d_lump_sums,
+    -- Safe reserve requirement: 1.15x of monthly fixed overhead + upcoming 30d bills, with a $2,000 floor
+    ROUND(GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums), 2) AS safe_reserve_buffer,
+    -- Safe surplus: checking reserves minus safe reserve buffer
+    ROUND(GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)), 2) AS safe_surplus,
+    -- HELOC metrics
+    COALESCE(hd.heloc_name, 'HELOC') AS heloc_name,
+    COALESCE(hd.heloc_balance, 0.0) AS heloc_balance,
+    COALESCE(hd.heloc_apr, 0.0) AS heloc_apr,
+    -- Recommended sweep amount: min(safe_surplus, heloc_balance)
+    ROUND(LEAST(
+        GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
+        COALESCE(hd.heloc_balance, 0.0)
+    ), 2) AS recommended_sweep_amount,
+    -- Interest savings calculations
+    ROUND(LEAST(
+        GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
+        COALESCE(hd.heloc_balance, 0.0)
+    ) * (COALESCE(hd.heloc_apr, 0.0) / 365), 2) AS daily_interest_saved,
+    ROUND(LEAST(
+        GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
+        COALESCE(hd.heloc_balance, 0.0)
+    ) * (COALESCE(hd.heloc_apr, 0.0) / 12), 2) AS monthly_interest_saved,
+    ROUND(LEAST(
+        GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
+        COALESCE(hd.heloc_balance, 0.0)
+    ) * COALESCE(hd.heloc_apr, 0.0), 2) AS annual_interest_saved,
+    -- Alert key for deduplication and snooze
+    CONCAT(
+        'paycheck_sweep:',
+        COALESCE(CAST(inc.transaction_date AS STRING), FORMAT_DATE('%Y-%m-%d', CURRENT_DATE('America/New_York'))),
+        ':',
+        CAST(CAST(ROUND(LEAST(
+            GREATEST(0.0, lc.liquid_balance - GREATEST(2000.00, (fo.monthly_fixed_burn * 1.15) + ub.upcoming_30d_lump_sums)),
+            COALESCE(hd.heloc_balance, 0.0)
+        ), 0) AS INT64) AS STRING)
+    ) AS alert_key
+FROM liquid_cash lc
+CROSS JOIN fixed_overhead fo
+CROSS JOIN upcoming_bills ub
+LEFT JOIN recent_income inc ON TRUE
+LEFT JOIN heloc_debt hd ON TRUE;
+
+

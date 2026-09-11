@@ -305,6 +305,98 @@ def check_heloc_daily_cost(bq: Any, project_id: str, dataset_id: str) -> list[di
     return alerts
 
 
+def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
+    """
+    Evaluates v_paycheck_surplus_sweep to detect recent paycheck deposits and
+    computes safe-to-sweep surplus cash to immediately pay down variable-rate debt (HELOC)
+    without jeopardizing the 30-day fixed overhead buffer or upcoming bill obligations.
+    """
+    alerts = []
+    sql = f"""
+    SELECT
+        evaluation_date,
+        latest_income_id,
+        latest_income_date,
+        employer_or_source,
+        latest_income_amount,
+        liquid_balance,
+        monthly_fixed_burn,
+        upcoming_30d_lump_sums,
+        safe_reserve_buffer,
+        safe_surplus,
+        heloc_name,
+        heloc_balance,
+        heloc_apr,
+        recommended_sweep_amount,
+        daily_interest_saved,
+        monthly_interest_saved,
+        annual_interest_saved,
+        alert_key
+    FROM `{project_id}.{dataset_id}.v_paycheck_surplus_sweep`
+    LIMIT 1;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        if not rows:
+            return alerts
+
+        r = rows[0]
+        recommended_sweep = float(getattr(r, "recommended_sweep_amount", 0.0) or 0.0)
+        heloc_bal = float(getattr(r, "heloc_balance", 0.0) or 0.0)
+        heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
+        liquid_bal = float(getattr(r, "liquid_balance", 0.0) or 0.0)
+        safe_buffer = float(getattr(r, "safe_reserve_buffer", 0.0) or 0.0)
+        daily_saved = float(getattr(r, "daily_interest_saved", 0.0) or 0.0)
+        monthly_saved = float(getattr(r, "monthly_interest_saved", 0.0) or 0.0)
+        annual_saved = float(getattr(r, "annual_interest_saved", 0.0) or 0.0)
+        heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
+        alert_key = str(getattr(r, "alert_key", "") or f"paycheck_sweep:{recommended_sweep:.0f}")
+
+        # Minimum threshold of $250 to avoid nuisance notifications and debt carry required
+        if recommended_sweep >= 250.00 and heloc_bal > 0:
+            income_amount = getattr(r, "latest_income_amount", None)
+            income_date = getattr(r, "latest_income_date", None)
+            employer = getattr(r, "employer_or_source", None)
+
+            if income_amount and float(income_amount) > 0:
+                inc_text = f"Following recent ${float(income_amount):,.2f} deposit from {employer} on {income_date}, "
+            else:
+                inc_text = "Based on current liquid checking reserves, "
+
+            detail = (
+                f"{inc_text}checking balances total ${liquid_bal:,.2f} against a 30-day fixed reserve buffer of ${safe_buffer:,.2f}. "
+                f"You have ${recommended_sweep:,.2f} in safe surplus cash that can be deployed to your {heloc_name} (${heloc_bal:,.2f} at {heloc_apr * 100:.2f}% APR)."
+            )
+            suggested_fix = (
+                f"Transfer ${recommended_sweep:,.2f} from Checking to {heloc_name}. "
+                f"Immediately slashes interest burden by ${daily_saved:.2f}/day (${monthly_saved:.2f}/mo, ${annual_saved:,.2f}/yr guaranteed risk-free return)."
+            )
+
+            alerts.append(
+                {
+                    "type": "PAYCHECK_SURPLUS_SWEEP",
+                    "severity": "ACTION_REQUIRED",
+                    "alert_key": alert_key,
+                    "title": f"⚡ Paycheck Sweep Opportunity: Transfer ${recommended_sweep:,.2f} to {heloc_name}",
+                    "detail": detail,
+                    "suggested_fix": suggested_fix,
+                    "recommended_sweep_amount": recommended_sweep,
+                    "daily_interest_saved": daily_saved,
+                    "monthly_interest_saved": monthly_saved,
+                    "annual_interest_saved": annual_saved,
+                    "liquid_balance": liquid_bal,
+                    "safe_reserve_buffer": safe_buffer,
+                    "heloc_balance": heloc_bal,
+                    "heloc_apr": heloc_apr,
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Paycheck surplus sweep check failed: {e}")
+        alerts.append({"type": "QUERY_ERROR", "detail": f"Paycheck sweep check failed: {e}"})
+
+    return alerts
+
+
 def check_subscription_overlap(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """Checks for redundant concurrent subscriptions in functional domains."""
     alerts = []
@@ -926,6 +1018,12 @@ def generate_daily_brief_synopsis(
             focus_items.append(f"⚡ <b>Duplicate Charge:</b> {da.get('title', '')} — {da.get('detail', '')}")
             focus_items_md.append(f"**Duplicate Charge**: {da.get('title', '')} — {da.get('detail', '')}")
 
+        sweep_alerts = [a for a in alerts if a.get("type") == "PAYCHECK_SURPLUS_SWEEP"]
+        for sa in sweep_alerts[:1]:
+            t = sa.get("title", "").replace("⚡ Paycheck Sweep Opportunity: ", "")
+            focus_items.append(f"⚡ <b>Paycheck Sweep:</b> {t}. {sa.get('suggested_fix', '')}")
+            focus_items_md.append(f"**Paycheck Sweep**: {t}. {sa.get('suggested_fix', '')}")
+
         new_sub_alerts = [a for a in alerts if a.get("type") == "NEW_SUBSCRIPTION_DETECTED"]
         for nsa in new_sub_alerts[:1]:
             focus_items.append(f"🆕 <b>New Recurring Plan:</b> {nsa.get('title', '')}. {nsa.get('suggested_fix', '')}")
@@ -1013,6 +1111,7 @@ def generate_daily_brief_synopsis(
 def get_alert_category_label(alert_type: str) -> str:
     """Returns a formatted category badge for Google Chat card topLabel."""
     category_map = {
+        "PAYCHECK_SURPLUS_SWEEP": "⚡ DEBT & CARRY • PAYCHECK SURPLUS SWEEP",
         "DUPLICATE_CHARGE": "⚡ URGENT ANOMALY • DUPLICATE CHARGE",
         "NEW_SUBSCRIPTION_DETECTED": "🆕 URGENT ANOMALY • TRIAL INTERCEPT",
         "PRICE_CREEP": "🔄 RECURRING SPEND • PRICE HIKE",
@@ -1032,16 +1131,17 @@ def get_alert_category_label(alert_type: str) -> str:
 def get_alert_sort_priority(alert_type: str) -> int:
     """Returns sort priority integer so high-impact anomalies appear first."""
     priority_order = {
-        "DUPLICATE_CHARGE": 1,
-        "NEW_SUBSCRIPTION_DETECTED": 2,
-        "BUDGET_CAP_EXCEEDED": 3,
-        "PRICE_CREEP": 4,
-        "SUBSCRIPTION_OVERLAP": 5,
-        "ANNUAL_BILL_RADAR": 6,
-        "FOOD_LEAKAGE": 7,
-        "MICRO_TRANSACTION_LEAKAGE": 8,
-        "HELOC_DAILY_COST": 9,
-        "UTILITY_SEASONAL_SPIKE": 10,
+        "PAYCHECK_SURPLUS_SWEEP": 1,
+        "DUPLICATE_CHARGE": 2,
+        "NEW_SUBSCRIPTION_DETECTED": 3,
+        "BUDGET_CAP_EXCEEDED": 4,
+        "PRICE_CREEP": 5,
+        "SUBSCRIPTION_OVERLAP": 6,
+        "ANNUAL_BILL_RADAR": 7,
+        "FOOD_LEAKAGE": 8,
+        "MICRO_TRANSACTION_LEAKAGE": 9,
+        "HELOC_DAILY_COST": 10,
+        "UTILITY_SEASONAL_SPIKE": 11,
     }
     return priority_order.get(alert_type, 99)
 
@@ -1279,6 +1379,7 @@ def collect_all_alerts(
     raw_alerts.extend(check_annual_bill_radar(bq, target_project, target_dataset))
     raw_alerts.extend(check_food_efficiency(bq, target_project, target_dataset))
     raw_alerts.extend(check_heloc_daily_cost(bq, target_project, target_dataset))
+    raw_alerts.extend(check_paycheck_surplus_sweep(bq, target_project, target_dataset))
     raw_alerts.extend(check_subscription_overlap(bq, target_project, target_dataset))
     raw_alerts.extend(check_utility_seasonal_spike(bq, target_project, target_dataset))
     raw_alerts.extend(check_micro_transaction_leakage(bq, target_project, target_dataset))
@@ -1932,3 +2033,138 @@ def get_executive_cfo_digest(period: str = "weekly") -> str:
 
     digest = generate_executive_digest(bq, target_project, target_dataset, period=period)
     return build_executive_digest_markdown(digest)
+
+
+def get_paycheck_surplus_analysis(
+    bq: Any | None = None,
+    project_id: str | None = None,
+    dataset_id: str | None = None,
+) -> str:
+    """
+    Evaluates whether the family has safe surplus cash following recent paycheck deposits
+    to sweep into variable-rate debt (HELOC), protecting 30-day fixed overhead reserves
+    and computing exact daily, monthly, and annual interest savings.
+
+    Use this tool whenever the user asks:
+    - 'Can I pay down the HELOC?'
+    - 'Did my paycheck arrive / how much surplus do we have?'
+    - 'What is our safe surplus to sweep?'
+    - 'How much interest would I save if I pay down the HELOC?'
+    """
+    target_project = project_id or BQ_PROJECT_ID
+    target_dataset = dataset_id or BQ_DATASET_ID
+    if not target_project:
+        return "Error: BQ_PROJECT_ID is not configured."
+
+    if bq is None:
+        try:
+            if bigquery:
+                bq = bigquery.Client(project=target_project)
+            else:
+                return "BigQuery client is not available."
+        except Exception as e:
+            return f"Error initializing BigQuery client: {e}"
+
+    sql = f"""
+    SELECT
+        evaluation_date,
+        latest_income_id,
+        latest_income_date,
+        employer_or_source,
+        latest_income_amount,
+        liquid_balance,
+        monthly_fixed_burn,
+        upcoming_30d_lump_sums,
+        safe_reserve_buffer,
+        safe_surplus,
+        heloc_name,
+        heloc_balance,
+        heloc_apr,
+        recommended_sweep_amount,
+        daily_interest_saved,
+        monthly_interest_saved,
+        annual_interest_saved
+    FROM `{target_project}.{target_dataset}.v_paycheck_surplus_sweep`
+    LIMIT 1;
+    """
+    try:
+        rows = list(bq.query(sql).result())
+        if not rows:
+            return "No liquidity or debt data available to calculate paycheck surplus sweep."
+
+        r = rows[0]
+        liquid_bal = float(getattr(r, "liquid_balance", 0.0) or 0.0)
+        fixed_burn = float(getattr(r, "monthly_fixed_burn", 0.0) or 0.0)
+        upcoming_bills = float(getattr(r, "upcoming_30d_lump_sums", 0.0) or 0.0)
+        safe_buffer = float(getattr(r, "safe_reserve_buffer", 0.0) or 0.0)
+        surplus = float(getattr(r, "safe_surplus", 0.0) or 0.0)
+        recommended_sweep = float(getattr(r, "recommended_sweep_amount", 0.0) or 0.0)
+        heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
+        heloc_bal = float(getattr(r, "heloc_balance", 0.0) or 0.0)
+        heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
+        daily_saved = float(getattr(r, "daily_interest_saved", 0.0) or 0.0)
+        monthly_saved = float(getattr(r, "monthly_interest_saved", 0.0) or 0.0)
+        annual_saved = float(getattr(r, "annual_interest_saved", 0.0) or 0.0)
+
+        income_amount = getattr(r, "latest_income_amount", None)
+        income_date = getattr(r, "latest_income_date", None)
+        employer = getattr(r, "employer_or_source", None)
+
+        lines = [
+            "### ⚡ Paycheck Surplus Sweep & Debt Paydown Analysis",
+            "",
+            "**1. Liquid Cash Posture**",
+            f"• **Current Checking Balance**: ${liquid_bal:,.2f}",
+        ]
+        if income_amount and float(income_amount) > 0:
+            lines.append(
+                f"• **Recent Paycheck Deposit**: ${float(income_amount):,.2f} from {employer} on {income_date}"
+            )
+
+        lines.extend(
+            [
+                "",
+                "**2. Safety Reserve Model (Non-Negotiable Buffer)**",
+                f"• **30-Day Fixed Baseline Burn**: ${fixed_burn:,.2f}/mo",
+                f"• **Upcoming 30-Day Lump-Sum Bills**: ${upcoming_bills:,.2f}",
+                f"• **Required Reserve Buffer**: ${safe_buffer:,.2f} (1.15x fixed burn + scheduled bills, $2,000 floor)",
+                f"• **Safe Checking Surplus**: ${surplus:,.2f}",
+                "",
+                f"**3. Debt Acceleration Strategy ({heloc_name})**",
+                f"• **Current Debt Balance**: ${heloc_bal:,.2f} at {heloc_apr * 100:.2f}% APR",
+            ]
+        )
+
+        if recommended_sweep >= 250.00 and heloc_bal > 0:
+            lines.extend(
+                [
+                    f"• **Recommended Principal Sweep**: **${recommended_sweep:,.2f}**",
+                    "",
+                    "**4. Guaranteed Risk-Free Return**",
+                    f"• **Daily Interest Reduced**: **-${daily_saved:.2f}/day**",
+                    f"• **Monthly Interest Saved**: **-${monthly_saved:.2f}/month**",
+                    f"• **Annual Interest Saved**: **-${annual_saved:,.2f}/year**",
+                    f"• **Effective Return**: Guaranteed **{heloc_apr * 100:.2f}% APR** risk-free return on capital.",
+                    "",
+                    f"💡 **Recommendation**: Initiate a transfer of **${recommended_sweep:,.2f}** from Checking to {heloc_name} to stop compounding interest immediately.",
+                ]
+            )
+        elif heloc_bal <= 0:
+            lines.extend(
+                [
+                    "• **Debt Status**: ✅ Your HELOC balance is $0.00! No high-interest debt carry.",
+                    f"• **Recommendation**: Liquid surplus of ${surplus:,.2f} can remain in high-yield cash reserves or be deployed to investments.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"• **Surplus Available**: ${surplus:,.2f} (below the $250.00 sweep threshold).",
+                    f"• **Recommendation**: Hold all funds in Checking to protect your 30-day fixed overhead buffer (${safe_buffer:,.2f}).",
+                ]
+            )
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Paycheck surplus analysis failed: {e}")
+        return f"Error computing paycheck surplus sweep: {e}"

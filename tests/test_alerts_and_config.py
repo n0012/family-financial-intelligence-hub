@@ -1355,6 +1355,234 @@ class TestChatWorker(unittest.TestCase):
                         self.assertTrue(res["webhook_dispatched"])
                         mock_post.assert_called_once()
 
+    def test_check_paycheck_surplus_sweep_opportunity_detected(self):
+        from app.alerts import check_paycheck_surplus_sweep
+
+        mock_bq = MagicMock()
+        mock_row = MagicMock(
+            evaluation_date="2026-09-10",
+            latest_income_id="tx_123",
+            latest_income_date="2026-09-08",
+            employer_or_source="Acme Corp Payroll",
+            latest_income_amount=4500.00,
+            liquid_balance=12000.00,
+            monthly_fixed_burn=3500.00,
+            upcoming_30d_lump_sums=500.00,
+            safe_reserve_buffer=4525.00,
+            safe_surplus=7475.00,
+            heloc_name="First Tech HELOC",
+            heloc_balance=45000.00,
+            heloc_apr=0.0825,
+            recommended_sweep_amount=7475.00,
+            daily_interest_saved=1.69,
+            monthly_interest_saved=51.39,
+            annual_interest_saved=616.69,
+            alert_key="paycheck_sweep:2026-09-08:7475",
+        )
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        alerts = check_paycheck_surplus_sweep(mock_bq, "test-p", "test-d")
+        self.assertEqual(len(alerts), 1)
+        a = alerts[0]
+        self.assertEqual(a["type"], "PAYCHECK_SURPLUS_SWEEP")
+        self.assertEqual(a["severity"], "ACTION_REQUIRED")
+        self.assertIn("Transfer $7,475.00 to First Tech HELOC", a["title"])
+        self.assertIn("Acme Corp Payroll", a["detail"])
+        self.assertIn("First Tech HELOC ($45,000.00 at 8.25% APR)", a["detail"])
+        self.assertIn("$1.69/day ($51.39/mo, $616.69/yr guaranteed risk-free return)", a["suggested_fix"])
+
+    def test_check_paycheck_surplus_sweep_no_alert_when_under_threshold(self):
+        from app.alerts import check_paycheck_surplus_sweep
+
+        mock_bq = MagicMock()
+        mock_row = MagicMock(
+            evaluation_date="2026-09-10",
+            latest_income_id="tx_123",
+            latest_income_date="2026-09-08",
+            employer_or_source="Acme Corp Payroll",
+            latest_income_amount=1000.00,
+            liquid_balance=4000.00,
+            monthly_fixed_burn=3500.00,
+            upcoming_30d_lump_sums=0.0,
+            safe_reserve_buffer=4025.00,
+            safe_surplus=150.00,
+            heloc_name="First Tech HELOC",
+            heloc_balance=45000.00,
+            heloc_apr=0.0825,
+            recommended_sweep_amount=150.00,  # Below $250 floor
+            daily_interest_saved=0.03,
+            monthly_interest_saved=1.03,
+            annual_interest_saved=12.38,
+            alert_key="paycheck_sweep:2026-09-08:150",
+        )
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        alerts = check_paycheck_surplus_sweep(mock_bq, "test-p", "test-d")
+        self.assertEqual(len(alerts), 0)
+
+    def test_check_paycheck_surplus_sweep_no_alert_when_heloc_zero(self):
+        from app.alerts import check_paycheck_surplus_sweep
+
+        mock_bq = MagicMock()
+        mock_row = MagicMock(
+            evaluation_date="2026-09-10",
+            latest_income_id="tx_123",
+            latest_income_date="2026-09-08",
+            employer_or_source="Acme Corp Payroll",
+            latest_income_amount=5000.00,
+            liquid_balance=15000.00,
+            monthly_fixed_burn=3500.00,
+            upcoming_30d_lump_sums=0.0,
+            safe_reserve_buffer=4025.00,
+            safe_surplus=10975.00,
+            heloc_name="First Tech HELOC",
+            heloc_balance=0.0,  # No debt to pay down
+            heloc_apr=0.0825,
+            recommended_sweep_amount=0.0,
+            daily_interest_saved=0.0,
+            monthly_interest_saved=0.0,
+            annual_interest_saved=0.0,
+            alert_key="paycheck_sweep:2026-09-08:0",
+        )
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        alerts = check_paycheck_surplus_sweep(mock_bq, "test-p", "test-d")
+        self.assertEqual(len(alerts), 0)
+
+    def test_get_paycheck_surplus_analysis_markdown(self):
+        from app.alerts import get_paycheck_surplus_analysis
+
+        mock_bq = MagicMock()
+        mock_row = MagicMock(
+            evaluation_date="2026-09-10",
+            latest_income_id="tx_123",
+            latest_income_date="2026-09-08",
+            employer_or_source="Acme Corp Payroll",
+            latest_income_amount=4500.00,
+            liquid_balance=12000.00,
+            monthly_fixed_burn=3500.00,
+            upcoming_30d_lump_sums=500.00,
+            safe_reserve_buffer=4525.00,
+            safe_surplus=7475.00,
+            heloc_name="First Tech HELOC",
+            heloc_balance=45000.00,
+            heloc_apr=0.0825,
+            recommended_sweep_amount=7475.00,
+            daily_interest_saved=1.69,
+            monthly_interest_saved=51.39,
+            annual_interest_saved=616.69,
+        )
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        md = get_paycheck_surplus_analysis(mock_bq, "test-p", "test-d")
+        self.assertIn("### ⚡ Paycheck Surplus Sweep & Debt Paydown Analysis", md)
+        self.assertIn("Current Checking Balance**: $12,000.00", md)
+        self.assertIn("Recent Paycheck Deposit**: $4,500.00 from Acme Corp Payroll", md)
+        self.assertIn("Required Reserve Buffer**: $4,525.00", md)
+        self.assertIn("Recommended Principal Sweep**: **$7,475.00**", md)
+        self.assertIn("Effective Return**: Guaranteed **8.25% APR**", md)
+
+    def test_daily_synopsis_includes_paycheck_sweep_focus_item(self):
+        from app.alerts import generate_daily_brief_synopsis
+
+        mock_bq = MagicMock()
+        mock_row = MagicMock(
+            brief_date="2026-09-12",
+            day_of_month=12,
+            liquid_balance=12000.00,
+            fixed_burn=3500.00,
+            heloc_name="HELOC",
+            heloc_balance=50000.00,
+            heloc_apr=0.08,
+            daily_interest_cost=10.96,
+            monthly_interest_cost=333.33,
+            mtd_spend=1000.00,
+            mtd_count=10,
+        )
+        mock_bq.query.return_value.result.return_value = [mock_row]
+        alerts = [
+            {
+                "type": "PAYCHECK_SURPLUS_SWEEP",
+                "title": "⚡ Paycheck Sweep Opportunity: Transfer $7,475.00 to First Tech HELOC",
+                "detail": "Safe checking surplus detected.",
+                "suggested_fix": "Transfer $7,475.00 from Checking to First Tech HELOC to save $1.69/day.",
+            }
+        ]
+
+        synopsis = generate_daily_brief_synopsis(mock_bq, "test-p", "test-d", alerts=alerts)
+        focus_items_str = " ".join(synopsis["focus_items"])
+        self.assertIn("Paycheck Sweep", focus_items_str)
+        self.assertIn("Transfer $7,475.00 to First Tech HELOC", focus_items_str)
+
+    def test_fastapi_advisor_surplus_sweep_endpoint(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app, verify_api_key
+
+        client = TestClient(app)
+        app.dependency_overrides[verify_api_key] = lambda: "test-key"
+
+        mock_alert = {
+            "type": "PAYCHECK_SURPLUS_SWEEP",
+            "title": "⚡ Paycheck Sweep Opportunity: Transfer $5,000.00 to HELOC",
+            "detail": "Surplus detected",
+            "suggested_fix": "Transfer to HELOC",
+        }
+
+        try:
+            with patch("app.main.check_paycheck_surplus_sweep", return_value=[mock_alert]):
+                with patch("app.main.get_bq_client", return_value=MagicMock()):
+                    resp = client.get("/advisor/surplus-sweep", headers={"X-API-Key": "test-key"})
+                    self.assertEqual(resp.status_code, 200)
+                    data = resp.json()
+                    self.assertEqual(data["status"], "success")
+                    self.assertTrue(data["has_sweep_opportunity"])
+                    self.assertEqual(len(data["alerts"]), 1)
+        finally:
+            app.dependency_overrides.pop(verify_api_key, None)
+
+    def test_chat_webhook_sweep_command(self):
+        from app.main import google_chat_webhook
+
+        sample_event = {
+            "type": "MESSAGE",
+            "space": {"name": "spaces/test_space", "type": "DM"},
+            "message": {
+                "name": "spaces/test_space/messages/msg_sweep",
+                "text": "/sweep",
+                "sender": {"displayName": "FinSage User", "email": "user@example.com"},
+            },
+        }
+
+        with patch(
+            "app.main.get_paycheck_surplus_analysis", return_value="### ⚡ Paycheck Surplus Sweep\nSweep $5,000"
+        ):
+            with patch("app.main.get_bq_client", return_value=MagicMock()):
+                res = asyncio.run(google_chat_webhook(sample_event))
+                self.assertIn("text", res)
+                self.assertIn("Paycheck Surplus Sweep", res["text"])
+
+    def test_job_run_sweep(self):
+        from app import job
+
+        mock_alert = {
+            "type": "PAYCHECK_SURPLUS_SWEEP",
+            "title": "⚡ Paycheck Sweep Opportunity",
+            "detail": "Surplus detected",
+            "suggested_fix": "Sweep $2,500 to HELOC",
+        }
+
+        with patch("app.alerts.check_paycheck_surplus_sweep", return_value=[mock_alert]):
+            with patch("app.alerts.resolve_secret", return_value="https://chat.googleapis.com/v1/spaces/XYZ/messages"):
+                with patch("app.bq_service.get_bq_client", return_value=MagicMock()):
+                    with patch("requests.post") as mock_post:
+                        mock_post.return_value.status_code = 200
+                        res = asyncio.run(job.run_sweep())
+                        self.assertEqual(res["status"], "success")
+                        self.assertTrue(res["has_sweep_opportunity"])
+                        self.assertTrue(res["webhook_dispatched"])
+                        mock_post.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

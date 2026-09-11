@@ -327,14 +327,35 @@ terraform apply
 
 ---
 
+### **PR 7b: Debt Paydown Automation — Paycheck Surplus Sweep Engine (Completed)**
+* **BigQuery Analytical View (`schema.sql`)**:
+  * **Paycheck Surplus Sweep Engine (`v_paycheck_surplus_sweep`)**:
+    * Dynamically detects recent income deposits within the past 14 days (non-pending, positive amount, income categories and payroll merchant signatures).
+    * Calculates total liquid checking and depository asset balances.
+    * Models 30-day non-negotiable fixed overhead burn (trailing 3-month average from `v_spend_classification` or active subscriptions baseline).
+    * Incorporates upcoming lump-sum bills due in the next 30 days from `v_annual_bill_radar`.
+    * Computes safe reserve requirement: $\max(2000.00, \text{monthly\_fixed\_burn} \times 1.15 + \text{upcoming\_30d\_lump\_sums})$.
+    * Evaluates safe checking surplus: $\max(0.0, \text{liquid\_balance} - \text{safe\_reserve\_buffer})$.
+    * Joins `v_heloc_daily_cost` to calculate recommended sweep: $\min(\text{safe\_surplus}, \text{heloc\_balance})$.
+    * Computes exact daily, monthly, and annual compound interest savings resulting from the debt sweep at the HELOC's specific APR.
+* **Proactive Advisory Scanner & Synopsis (`app/alerts.py`)**:
+  * Added `check_paycheck_surplus_sweep`: Generates actionable `PAYCHECK_SURPLUS_SWEEP` alert when `recommended_sweep_amount >= 250.00` and `heloc_balance > 0`.
+  * Mapped category badge to `"⚡ DEBT & CARRY • PAYCHECK SURPLUS SWEEP"` with top sort priority in Google Chat Card v2.
+  * Integrated sweep recommendations into Morning Financial Synopsis focus items (`generate_daily_brief_synopsis`).
+  * Implemented conversational AFC tool `get_paycheck_surplus_analysis` registered in Gemini Brain multi-tool dispatcher.
+* **Chat, API & CLI Workflows**:
+  * Added `/sweep` chat command and natural intent dispatcher (e.g., *"safe surplus"*, *"paycheck sweep"*, *"how much to sweep to HELOC"*) in `google_chat_webhook`.
+  * Added `@app.get("/advisor/surplus-sweep")` REST endpoint in FastAPI with API key verification.
+  * Added `job sweep` CLI subparser task in `app/job.py` for automated scheduled sweeps and webhook dispatch.
+* **Full Unit Test Coverage**: Added 8 new unit tests in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py), bringing the test suite to **122 passing unit tests**.
+
+---
+
 ## 8. Sequenced Implementation Roadmap
 
 *Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
 
-### **PR 7b: Debt Paydown Automation — Paycheck Surplus Sweep Engine (Next)**
-* **Paycheck Surplus Sweep (`PAYCHECK_SURPLUS_SWEEP`)**: Detects income deposits and computes safe-to-sweep surplus cash to immediately pay down variable-rate debt without jeopardizing 30-day fixed overhead.
-
-### **PR 9: Receipt & Tax Deductibility Ingestion (Document AI / Gemini Vision)**
+### **PR 9: Receipt & Tax Deductibility Ingestion (Document AI / Gemini Vision) (Next)**
 * Upload receipts and statements directly to Google Chat for Gemini Vision extraction and Schedule C / HSA deductibility classification.
 
 ### **PR 12: Multi-Account Portfolio Drift & Net Worth Rebalancer**
