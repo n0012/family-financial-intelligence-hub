@@ -74,183 +74,337 @@ CREATE TABLE IF NOT EXISTS `family_finance.alert_suppression` (
 -- Analytical & Optimization Views for Conversational Analytics Agent
 -- ==============================================================================
 
--- VIEW A1: Active Subscriptions & Recurring Debits
--- Automatically detects monthly, quarterly, and annual recurring charges,
--- filtering out incidental point-of-sale micro-transactions and variable utility bills.
-CREATE OR REPLACE VIEW `family_finance.v_active_subscriptions` AS
+-- VIEW A0: Merchant Functional Domain Classifier
+-- Maps each merchant to the functional service domain it actually competes in. The
+-- aggregator's flat "Subscriptions" category lumps a password manager, an AI assistant
+-- and a magazine into one bucket; two services are only redundant if they substitute
+-- for each other, so overlap detection must key off this domain, never off the category.
+--
+-- `disposition` constrains what advice is even valid for a merchant:
+--   CANCELLABLE        discretionary service; "cancel or rotate" is a real action.
+--   RESHOPPABLE        underwritten or contractual (insurance, telecom, broadband);
+--                      "re-shop at renewal" is valid, "cancel to save" is not.
+--   ESSENTIAL_METERED  regulated consumption billing (electric, gas, water). No
+--                      substitute and no cancel action; routed to the seasonal baseline.
+--   NOT_A_SUBSCRIPTION episodic services (vet, clinic) that repeat without being a plan.
+CREATE OR REPLACE VIEW `family_finance.v_merchant_domain` AS
+WITH merchant_profile AS (
+    -- Exactly one row per merchant. Monarch re-categorises merchants over time (the same
+    -- streaming service can sit in "Subscriptions" for a year then "Entertainment"), so
+    -- anything keyed on (merchant, category) fragments one service into several.
+    SELECT
+        COALESCE(clean_merchant_name, merchant_name) AS merchant,
+        category_name,
+        COUNT(*) AS observations
+    FROM `family_finance.raw_transactions`
+    WHERE amount < 0
+      AND pending = FALSE
+      AND COALESCE(clean_merchant_name, merchant_name) IS NOT NULL
+    GROUP BY merchant, category_name
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY merchant
+        ORDER BY observations DESC, category_name
+    ) = 1
+),
+classified AS (
+    SELECT
+        merchant,
+        category_name,
+        CASE
+            -- Regulated / metered essentials. Category wins over merchant text here.
+            WHEN LOWER(category_name) IN ('utilities', 'electric', 'gas & electric', 'gas', 'water', 'sewage', 'trash', 'natural gas')
+              OR REGEXP_CONTAINS(LOWER(merchant), r'(energy|electric|utilit|water district|water dept|sewer|natural gas|waste management|sanitation)')
+                THEN 'UTILITY_METERED'
+
+            -- Underwritten contracts: re-shoppable at renewal, never "cancellable".
+            WHEN LOWER(category_name) LIKE '%insurance%'
+              OR REGEXP_CONTAINS(LOWER(merchant), r'(insurance|assurance|underwrit|casualty|state farm|geico|allstate|progressive|nationwide)')
+                THEN 'INSURANCE'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(veterin|animal hospital|animal clinic|companion animal)')
+              OR LOWER(category_name) IN ('veterinary', 'vet')
+                THEN 'VET_CARE'
+            WHEN LOWER(category_name) IN ('phone', 'mobile phone', 'cell phone')
+              OR REGEXP_CONTAINS(LOWER(merchant), r'(verizon|at&t|t-mobile|mint mobile|visible|google fi|cricket wireless)')
+                THEN 'TELECOM_MOBILE'
+            WHEN LOWER(category_name) IN ('internet & cable', 'internet', 'cable')
+                THEN 'INTERNET_BROADBAND'
+            WHEN LOWER(category_name) IN ('home security', 'security')
+              OR REGEXP_CONTAINS(LOWER(merchant), r'(simplisafe|adt\b|ring protect|vivint|frontpoint)')
+                THEN 'HOME_SECURITY'
+
+            -- Discretionary digital services, grouped by what they substitute for.
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(netflix|hulu|disney|max\b|hbo|peacock|paramount|prime video|apple tv|starz|showtime|philo|fubo|sling|youtube tv)')
+                THEN 'VIDEO_STREAMING'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(spotify|pandora|tidal|sirius|apple music|youtube music|deezer)')
+                THEN 'AUDIO_AND_MEDIA'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(audible|kindle|scribd|libro\.fm|everand|kobo)')
+                THEN 'AUDIOBOOKS_READING'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(magazine|the week|nytimes|new york times|wsj|washington post|the athletic|economist|substack)')
+                THEN 'NEWS_AND_READING'
+            -- Hosted consumer storage only. A self-hosted NAS OS licence is not a
+            -- substitute for cloud storage and must not pair with it as "redundant".
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(google one|icloud|dropbox|onedrive|backblaze|carbonite|sync\.com)')
+                THEN 'CLOUD_STORAGE'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(openai|chatgpt|anthropic|claude|perplexity|midjourney|copilot)')
+                THEN 'AI_PRODUCTIVITY'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(1password|lastpass|dashlane|bitwarden|nordpass|keeper security)')
+                THEN 'PASSWORD_MANAGER'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(nordvpn|expressvpn|mullvad|proton vpn|surfshark|private internet access)')
+                THEN 'VPN_PRIVACY'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(canva|adobe|figma|lightroom|affinity)')
+                THEN 'CREATIVE_SOFTWARE'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(plex|channels|emby|jellyfin|unraid|tablo)')
+                THEN 'HOME_MEDIA_SERVER'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(xbox game pass|playstation plus|nintendo switch online|steam\b)')
+                THEN 'GAMING'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(hellofresh|blue apron|home chef|factor|every ?plate|sunbasket)')
+                THEN 'MEAL_KIT_DELIVERY'
+            WHEN LOWER(category_name) IN ('fitness', 'gym', 'gyms & fitness')
+              OR REGEXP_CONTAINS(LOWER(merchant), r'(gym|fitness|athletic club|peloton|crossfit|yoga|pilates|health club)')
+                THEN 'FITNESS'
+            WHEN REGEXP_CONTAINS(LOWER(merchant), r'(amazon prime|prime membership|costco membership|walmart\+|instacart\+)')
+                THEN 'ECOMMERCE_MEMBERSHIP'
+
+            ELSE 'UNCLASSIFIED'
+        END AS domain
+    FROM merchant_profile
+)
+SELECT
+    merchant,
+    category_name,
+    domain,
+    CASE domain
+        WHEN 'UTILITY_METERED' THEN 'ESSENTIAL_METERED'
+        WHEN 'VET_CARE' THEN 'NOT_A_SUBSCRIPTION'
+        WHEN 'INSURANCE' THEN 'RESHOPPABLE'
+        WHEN 'TELECOM_MOBILE' THEN 'RESHOPPABLE'
+        WHEN 'INTERNET_BROADBAND' THEN 'RESHOPPABLE'
+        WHEN 'HOME_SECURITY' THEN 'RESHOPPABLE'
+        WHEN 'UNCLASSIFIED' THEN 'UNKNOWN'
+        ELSE 'CANCELLABLE'
+    END AS disposition,
+    -- Only domains whose members genuinely substitute for one another. Telecom and
+    -- broadband are excluded: two carriers in a household are two lines, not a
+    -- duplicate service. UNCLASSIFIED is excluded because overlap requires positive
+    -- evidence of duplication, never the mere absence of a classification.
+    domain IN (
+        'VIDEO_STREAMING', 'AUDIO_AND_MEDIA', 'AUDIOBOOKS_READING', 'NEWS_AND_READING',
+        'CLOUD_STORAGE', 'AI_PRODUCTIVITY', 'PASSWORD_MANAGER', 'VPN_PRIVACY',
+        'CREATIVE_SOFTWARE', 'HOME_MEDIA_SERVER', 'GAMING', 'MEAL_KIT_DELIVERY', 'FITNESS'
+    ) AS is_overlap_eligible,
+    -- Owning two video streamers is normal; three is a rotation opportunity.
+    CASE WHEN domain = 'VIDEO_STREAMING' THEN 3 ELSE 2 END AS overlap_min_count
+FROM classified;
+
+-- VIEW A1: Recurring Charge Ledger (incidental point-of-sale purchases removed)
+-- A merchant with a membership also takes one-off POS money: a monthly gym plan and an
+-- $8 cafe drink post under the same merchant. Grouping them and comparing MIN to MAX
+-- manufactures a 1,600% "price hike".
+--
+-- Two-stage isolation:
+--   1. Flag priority. If the aggregator marks >= 2 charges at a merchant as recurring,
+--      trust ONLY those rows, so incidental spend never enters scope at all.
+--   2. Median anchor band. Otherwise fall back to subscription-shaped categories and keep
+--      only charges within 60%-200% of that merchant's median. An $8 drink is 2% of a
+--      $347 anchor and drops out; a genuine 3-10% price step survives.
+--
+-- Note the band is applied AFTER stage 1 rather than as an OR alongside it: a charge the
+-- aggregator mislabels as recurring still has to look like the recurring tier to count.
+-- Failure is biased toward false negatives -- if incidental charges outnumber the
+-- membership the anchor lands on noise and the merchant drops out of the corpus entirely,
+-- which is strictly better than emitting a fabricated alert.
+CREATE OR REPLACE VIEW `family_finance.v_subscription_charges` AS
 WITH candidate_txns AS (
     SELECT
         COALESCE(clean_merchant_name, merchant_name) AS merchant,
         category_name,
         transaction_date,
-        ABS(amount) AS amount,
-        is_recurring
+        ROUND(CAST(ABS(amount) AS FLOAT64), 2) AS amount,
+        COALESCE(is_recurring, FALSE) AS is_recurring
     FROM `family_finance.raw_transactions`
     WHERE amount < 0
       AND pending = FALSE
+      AND COALESCE(clean_merchant_name, merchant_name) IS NOT NULL
+      AND ABS(amount) > 0
+      -- Money movement, debt service and metered utilities are not subscriptions. Without
+      -- the mortgage/ATM/fee exclusions a recurring mortgage debit lands in this corpus
+      -- and gets advertised as a five-figure annual "subscription" the family can cancel.
       AND LOWER(category_name) NOT IN (
-          'transfer', 'transfers', 'credit card payment', 'credit card payments', 
-          'loan payment', 'balance transfers', 'utilities', 'gas & electric', 'electric', 'gas', 'water'
+          'transfer', 'transfers', 'credit card payment', 'credit card payments',
+          'loan payment', 'loan repayment', 'balance transfers', 'mortgage', 'rent',
+          'cash & atm', 'atm', 'financial fees', 'bank fees', 'taxes', 'buy', 'sell',
+          'utilities', 'gas & electric', 'electric', 'gas', 'water'
       )
       AND LOWER(COALESCE(clean_merchant_name, merchant_name)) NOT LIKE '%transfer%'
-      AND (
-          is_recurring = TRUE
-          OR LOWER(category_name) IN ('subscriptions', 'phone', 'internet & cable', 'fitness', 'home security')
-      )
-      AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 18 MONTH)
+      AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 24 MONTH)
+),
+flag_profile AS (
+    SELECT merchant, COUNTIF(is_recurring) AS recurring_rows
+    FROM candidate_txns
+    GROUP BY merchant
+),
+scoped AS (
+    SELECT c.*
+    FROM candidate_txns c
+    JOIN flag_profile f USING (merchant)
+    WHERE
+        -- Stage 1: the aggregator's recurrence flag is authoritative when it exists.
+        (f.recurring_rows >= 2 AND c.is_recurring)
+        -- Stage 2: otherwise admit only subscription-shaped categories.
+        OR (
+            f.recurring_rows < 2
+            AND LOWER(c.category_name) IN (
+                'subscriptions', 'phone', 'mobile phone', 'internet & cable', 'internet',
+                'fitness', 'gym', 'gyms & fitness', 'home security', 'streaming', 'software'
+            )
+        )
 ),
 merchant_recurring_baseline AS (
+    -- Keyed on merchant alone. Keying on (merchant, category) splits a single service in
+    -- two whenever the aggregator re-categorises it mid-history, which double-counts the
+    -- service in overlap and halves each fragment's charge history for creep detection.
     SELECT
         merchant,
-        category_name,
-        -- Prioritize median of recurring-flagged transactions; fallback to 75th percentile of candidate charges
-        COALESCE(
-            APPROX_QUANTILES(IF(is_recurring = TRUE, amount, NULL), 100)[SAFE_OFFSET(50)],
-            APPROX_QUANTILES(amount, 100)[SAFE_OFFSET(75)]
-        ) AS baseline_recurring_amount
-    FROM candidate_txns
-    GROUP BY 1, 2
-    HAVING baseline_recurring_amount IS NOT NULL
-),
-clean_recurring_charges AS (
-    SELECT
-        c.merchant,
-        c.category_name,
-        c.transaction_date,
-        c.amount,
-        c.is_recurring
-    FROM candidate_txns c
-    JOIN merchant_recurring_baseline b 
-      ON c.merchant = b.merchant AND c.category_name = b.category_name
-    WHERE 
-        -- If explicitly marked recurring by Monarch, always retain
-        c.is_recurring = TRUE
-        -- Otherwise require charge to be within 60% of baseline recurring tier (drops $8 drinks, $20 passes)
-        OR (c.amount >= b.baseline_recurring_amount * 0.60 
-            AND c.amount <= b.baseline_recurring_amount * 1.60)
-),
-recurring_stats AS (
+        APPROX_QUANTILES(amount, 100)[SAFE_OFFSET(50)] AS baseline_recurring_amount,
+        COUNT(*) AS scoped_rows
+    FROM scoped
+    GROUP BY merchant
+    HAVING scoped_rows >= 3
+)
+SELECT
+    s.merchant,
+    s.category_name,
+    s.transaction_date,
+    s.amount,
+    s.is_recurring,
+    ROUND(b.baseline_recurring_amount, 2) AS recurring_anchor
+FROM scoped s
+JOIN merchant_recurring_baseline b USING (merchant)
+WHERE s.amount BETWEEN b.baseline_recurring_amount * 0.60
+                   AND b.baseline_recurring_amount * 2.00;
+
+-- VIEW A2: Active Subscriptions & Recurring Debits
+-- Built on the cleaned ledger, one row per merchant. `has_price_increased` is deliberately
+-- absent: a lifetime MIN vs MAX comparison re-fires forever on a change that happened a
+-- year ago. Price movement now lives in v_subscription_price_creep.
+CREATE OR REPLACE VIEW `family_finance.v_active_subscriptions` AS
+WITH recurring_stats AS (
     SELECT
         merchant,
-        category_name,
+        ANY_VALUE(category_name) AS category_name,
         COUNT(*) AS charge_count,
+        ROUND(ANY_VALUE(recurring_anchor), 2) AS typical_charge,
         ROUND(AVG(amount), 2) AS avg_charge,
         ROUND(MIN(amount), 2) AS min_charge,
         ROUND(MAX(amount), 2) AS max_charge,
+        -- Coefficient of variation. A real subscription bills a near-constant amount;
+        -- anything genuinely variable is metered consumption, not a plan.
+        ROUND(COALESCE(SAFE_DIVIDE(STDDEV_SAMP(amount), AVG(amount)), 0), 3) AS charge_variability,
         MIN(transaction_date) AS first_seen,
         MAX(transaction_date) AS last_seen,
-        DATE_DIFF(MAX(transaction_date), MIN(transaction_date), DAY) AS span_days,
         ROUND(DATE_DIFF(MAX(transaction_date), MIN(transaction_date), DAY) / NULLIF(COUNT(*) - 1, 0), 1) AS avg_cadence_days
-    FROM clean_recurring_charges
-    GROUP BY 1, 2
-    HAVING charge_count >= 2
+    FROM `family_finance.v_subscription_charges`
+    GROUP BY merchant
+    HAVING charge_count >= 3
 )
 SELECT
-    merchant,
-    category_name,
-    charge_count,
-    avg_charge,
-    min_charge,
-    max_charge,
+    s.merchant,
+    s.category_name,
+    COALESCE(d.domain, 'UNCLASSIFIED') AS functional_domain,
+    COALESCE(d.disposition, 'UNKNOWN') AS disposition,
+    COALESCE(d.is_overlap_eligible, FALSE) AS is_overlap_eligible,
+    COALESCE(d.overlap_min_count, 2) AS overlap_min_count,
+    s.charge_count,
+    s.typical_charge,
+    s.avg_charge,
+    s.min_charge,
+    s.max_charge,
+    s.charge_variability,
     CASE
-        WHEN avg_cadence_days BETWEEN 25 AND 35 THEN 'MONTHLY'
-        WHEN avg_cadence_days BETWEEN 80 AND 100 THEN 'QUARTERLY'
-        WHEN avg_cadence_days BETWEEN 340 AND 390 THEN 'ANNUAL'
-        ELSE 'OTHER'
+        WHEN s.avg_cadence_days BETWEEN 25 AND 35 THEN 'MONTHLY'
+        WHEN s.avg_cadence_days BETWEEN 80 AND 100 THEN 'QUARTERLY'
+        WHEN s.avg_cadence_days BETWEEN 160 AND 200 THEN 'SEMI_ANNUAL'
+        WHEN s.avg_cadence_days BETWEEN 340 AND 400 THEN 'ANNUAL'
+        ELSE 'IRREGULAR'
     END AS billing_cadence,
-    CASE
-        WHEN avg_cadence_days BETWEEN 25 AND 35 THEN ROUND(avg_charge * 12, 2)
-        WHEN avg_cadence_days BETWEEN 80 AND 100 THEN ROUND(avg_charge * 4, 2)
-        WHEN avg_cadence_days BETWEEN 340 AND 390 THEN avg_charge
-        ELSE ROUND(avg_charge * charge_count, 2)
-    END AS estimated_annual_cost,
-    first_seen,
-    last_seen,
-    avg_cadence_days
-FROM recurring_stats
-WHERE avg_cadence_days BETWEEN 25 AND 390
+    -- Cadence-normalised. The previous CASE fell through to avg_charge * charge_count for
+    -- anything off-cadence, which made a subscription's "annual cost" a function of how
+    -- much history happened to be loaded rather than of its price.
+    ROUND(s.typical_charge * 365.0 / s.avg_cadence_days, 2) AS estimated_annual_cost,
+    -- True monthly run rate. Summing avg_charge across mixed cadences counts an annual
+    -- bill as if it were charged every month.
+    ROUND(s.typical_charge * 365.0 / s.avg_cadence_days / 12, 2) AS monthly_run_rate,
+    s.first_seen,
+    s.last_seen,
+    s.avg_cadence_days,
+    DATE_DIFF(CURRENT_DATE(), s.last_seen, DAY) AS days_since_last_charge,
+    -- "Concurrently active" has to be cadence-aware: an annual plan billed 8 months ago is
+    -- still live, a monthly plan last charged 8 months ago was cancelled.
+    (DATE_DIFF(CURRENT_DATE(), s.last_seen, DAY) <= CAST(s.avg_cadence_days * 1.5 + 15 AS INT64)) AS is_currently_active
+FROM recurring_stats s
+LEFT JOIN `family_finance.v_merchant_domain` d USING (merchant)
+WHERE s.avg_cadence_days BETWEEN 25 AND 400
+  AND s.charge_variability <= 0.35
 ORDER BY estimated_annual_cost DESC;
 
--- VIEW A2: Subscription Price Creep Detection (PR 7)
--- Compares the latest recurring subscription charge to the immediately preceding charge
--- to detect actual price hikes within the last 45 days, filtering out tax noise and incidentals.
+-- VIEW A3: Subscription Price Creep Detection
+-- Compares the most recent bill against the average of the three bills before it, over
+-- consecutive billing cycles on the cleaned ledger.
+--
+-- Why a trailing baseline rather than LAG(1) alone: a single anomalous cycle (a prorated
+-- month, a policy endorsement, a one-off credit) becomes the comparison point and either
+-- fabricates a hike or masks a real one. Averaging the prior three cycles survives one
+-- bad reading in either direction. LAG(1) is still required to step up as well, so a
+-- merchant cannot trip the alert purely by reverting from a promo.
 CREATE OR REPLACE VIEW `family_finance.v_subscription_price_creep` AS
-WITH candidate_txns AS (
-    SELECT
-        COALESCE(clean_merchant_name, merchant_name) AS merchant,
-        category_name,
-        transaction_date,
-        ABS(amount) AS amount,
-        is_recurring
-    FROM `family_finance.raw_transactions`
-    WHERE amount < 0
-      AND pending = FALSE
-      AND LOWER(category_name) NOT IN (
-          'transfer', 'transfers', 'credit card payment', 'credit card payments', 
-          'loan payment', 'balance transfers', 'utilities', 'gas & electric', 'electric', 'gas', 'water'
-      )
-      AND LOWER(COALESCE(clean_merchant_name, merchant_name)) NOT LIKE '%transfer%'
-      AND (
-          is_recurring = TRUE
-          OR LOWER(category_name) IN ('subscriptions', 'phone', 'internet & cable', 'fitness', 'home security')
-      )
-      AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 18 MONTH)
-),
-merchant_recurring_baseline AS (
+WITH sequenced AS (
     SELECT
         merchant,
-        category_name,
-        COALESCE(
-            APPROX_QUANTILES(IF(is_recurring = TRUE, amount, NULL), 100)[SAFE_OFFSET(50)],
-            APPROX_QUANTILES(amount, 100)[SAFE_OFFSET(75)]
-        ) AS baseline_recurring_amount
-    FROM candidate_txns
-    GROUP BY 1, 2
-    HAVING baseline_recurring_amount IS NOT NULL
-),
-clean_recurring_charges AS (
-    SELECT
-        c.merchant,
-        c.category_name,
-        c.transaction_date,
-        c.amount
-    FROM candidate_txns c
-    JOIN merchant_recurring_baseline b 
-      ON c.merchant = b.merchant AND c.category_name = b.category_name
-    WHERE 
-        c.is_recurring = TRUE
-        OR (c.amount >= b.baseline_recurring_amount * 0.60 
-            AND c.amount <= b.baseline_recurring_amount * 1.60)
-),
-ranked_charges AS (
-    SELECT
-        merchant,
-        category_name,
         transaction_date,
         amount,
-        LAG(amount, 1) OVER (PARTITION BY merchant ORDER BY transaction_date ASC) AS prev_amount,
-        LAG(transaction_date, 1) OVER (PARTITION BY merchant ORDER BY transaction_date ASC) AS prev_date,
+        LAG(amount, 1) OVER cycle AS prev_amount,
+        LAG(transaction_date, 1) OVER cycle AS prev_date,
+        AVG(amount) OVER (
+            PARTITION BY merchant ORDER BY transaction_date
+            ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
+        ) AS baseline_amount,
+        COUNT(*) OVER (
+            PARTITION BY merchant ORDER BY transaction_date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) AS prior_charge_count,
         ROW_NUMBER() OVER (PARTITION BY merchant ORDER BY transaction_date DESC) AS recency_rank
-    FROM clean_recurring_charges
+    FROM `family_finance.v_subscription_charges`
+    WINDOW cycle AS (PARTITION BY merchant ORDER BY transaction_date)
+),
+latest_cycle AS (
+    SELECT * FROM sequenced WHERE recency_rank = 1
 )
 SELECT
-    merchant,
-    category_name,
-    amount AS latest_charge,
-    prev_amount AS prior_charge,
-    ROUND(amount - prev_amount, 2) AS price_increase_amount,
-    ROUND(((amount - prev_amount) / prev_amount) * 100, 1) AS pct_increase,
-    ROUND(amount * 12, 2) AS estimated_annual_cost,
-    transaction_date AS effective_date
-FROM ranked_charges
-WHERE recency_rank = 1
-  AND prev_amount IS NOT NULL
-  -- Only alert on price increases that took effect recently (last 45 days)
-  AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 45 DAY)
-  -- Enforce realistic SaaS price hike band: >= $1.00 and between +3% and +40%
-  AND (amount - prev_amount) >= 1.00
-  AND ((amount - prev_amount) / prev_amount) BETWEEN 0.03 AND 0.40
-ORDER BY price_increase_amount DESC;
+    l.merchant,
+    s.category_name,
+    s.functional_domain,
+    s.disposition,
+    s.billing_cadence,
+    l.amount AS latest_charge,
+    ROUND(l.baseline_amount, 2) AS prior_charge,
+    ROUND(l.amount - l.baseline_amount, 2) AS price_increase_amount,
+    ROUND(100 * SAFE_DIVIDE(l.amount - l.baseline_amount, l.baseline_amount), 1) AS pct_increase,
+    -- The annualised cost of the INCREASE, not of the whole subscription. Quoting the full
+    -- run rate as the saving is what turned a $2.89/mo step into "save up to $727/year".
+    ROUND((l.amount - l.baseline_amount) * 365.0 / s.avg_cadence_days, 2) AS annual_impact,
+    s.estimated_annual_cost,
+    l.transaction_date AS effective_date,
+    DATE_DIFF(l.transaction_date, l.prev_date, DAY) AS days_since_prior_charge
+FROM latest_cycle l
+JOIN `family_finance.v_active_subscriptions` s USING (merchant)
+WHERE l.prior_charge_count >= 3                                                 -- need a real baseline
+  AND l.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 45 DAY)           -- recent: stale hikes stop firing
+  AND l.amount > l.prev_amount                                                  -- the latest cycle genuinely stepped up
+  AND l.amount - l.baseline_amount > 0.50                                       -- ignore rounding and tax drift
+  AND SAFE_DIVIDE(l.amount - l.baseline_amount, l.baseline_amount) BETWEEN 0.03 AND 0.40
+  AND DATE_DIFF(l.transaction_date, l.prev_date, DAY) BETWEEN 20 AND 400        -- consecutive cycles, not a gap
+  AND s.disposition IN ('CANCELLABLE', 'RESHOPPABLE')                           -- metered utilities are not price creep
+ORDER BY annual_impact DESC;
 
 -- VIEW B: Discretionary Spend vs Fixed Family Overhead
 CREATE OR REPLACE VIEW `family_finance.v_spend_classification` AS
@@ -453,54 +607,84 @@ HAVING frequency_90d >= 4
 ORDER BY total_spend_90d DESC;
 
 -- VIEW F: Subscription Functional Overlap & Redundancy
--- Clusters active subscriptions into functional service domains to identify genuine redundancy
--- (e.g. concurrent video streaming or multiple AI tools) rather than lumping all subscriptions together.
+-- Fires only on genuine functional duplication: several services that substitute for one
+-- another, all currently live. Grouping by the aggregator's category instead produced a
+-- 15-service "Subscriptions" soup advising the family to rotate a password manager
+-- against a magazine, and paired a pet insurer with a veterinary clinic under "Pets".
 CREATE OR REPLACE VIEW `family_finance.v_subscription_overlap` AS
-WITH categorized AS (
-    SELECT
-        merchant,
-        category_name,
-        avg_charge,
-        estimated_annual_cost,
-        CASE
-            -- Video Streaming
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'netflix|hulu|disney|max\b|hbo|peacock|paramount|prime video|apple tv|channels\b') 
-                THEN 'VIDEO_STREAMING'
-            -- Audio & Podcasts
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'spotify|apple music|audible|pandora|tidal|sirius') 
-                THEN 'AUDIO_AND_MEDIA'
-            -- AI Assistants & LLMs
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'openai|chatgpt|anthropic|claude|cursor|midjourney|perplexity') 
-                THEN 'AI_PRODUCTIVITY'
-            -- Cloud Storage & Hosting
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'google one|icloud|dropbox|onedrive|unraid|backblaze|aws') 
-                THEN 'CLOUD_STORAGE'
-            -- News & Publications
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'the week|nytimes|wsj|washington post|the athletic|kindle|substack') 
-                THEN 'NEWS_AND_READING'
-            -- Passwords & Security
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'1password|lastpass|bitwarden|nordvpn|expressvpn') 
-                THEN 'SECURITY_AND_PRIVACY'
-            -- Phone & Mobile Telco
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'at&t|verizon|t-mobile|visible|mint mobile') 
-                THEN 'MOBILE_TELECOM'
-            -- Pet Insurance (Explicitly separated from clinical veterinary practices)
-            WHEN REGEXP_CONTAINS(LOWER(merchant), r'nationwide|trupanion|lemonade|healthy paws') 
-                THEN 'PET_INSURANCE'
-            ELSE NULL
-        END AS functional_domain
-    FROM `family_finance.v_active_subscriptions`
-    WHERE LOWER(category_name) NOT IN ('veterinary', 'medical', 'utilities', 'pets')
-       OR REGEXP_CONTAINS(LOWER(merchant), r'nationwide|trupanion|lemonade|healthy paws')
-)
 SELECT
     functional_domain,
     COUNT(*) AS active_service_count,
-    ROUND(SUM(avg_charge), 2) AS combined_monthly_cost,
+    -- Cadence-normalised, so an annually billed service no longer contributes its full
+    -- price to a "monthly" total.
+    ROUND(SUM(monthly_run_rate), 2) AS combined_monthly_cost,
     ROUND(SUM(estimated_annual_cost), 2) AS combined_annual_cost,
-    STRING_AGG(merchant, ', ' ORDER BY avg_charge DESC) AS active_services
-FROM categorized
-WHERE functional_domain IS NOT NULL
-GROUP BY 1
-HAVING active_service_count >= 2
-ORDER BY combined_monthly_cost DESC;
+    -- Defensible saving: consolidate onto the single largest plan and drop the rest.
+    -- The old view reported the entire domain total as recoverable, which implies
+    -- cancelling every service including the one being kept.
+    ROUND(SUM(monthly_run_rate) - MAX(monthly_run_rate), 2) AS consolidation_savings_monthly,
+    ROUND((SUM(monthly_run_rate) - MAX(monthly_run_rate)) * 12, 2) AS consolidation_savings_annual,
+    STRING_AGG(merchant, ', ' ORDER BY monthly_run_rate DESC) AS active_services
+FROM `family_finance.v_active_subscriptions`
+WHERE is_overlap_eligible
+  -- Concurrency. Without this a service cancelled a year ago still counts toward the
+  -- duplicate tally, which is the same defect as comparing a lifetime MIN to a MAX.
+  AND is_currently_active
+GROUP BY functional_domain
+-- Per-domain threshold: two video streamers is normal household behaviour, three is a
+-- rotation opportunity. Everything else is redundant at two.
+HAVING active_service_count >= MAX(overlap_min_count)
+   AND combined_monthly_cost >= 15.00
+ORDER BY consolidation_savings_monthly DESC;
+
+-- VIEW G: Utility Seasonal Baseline
+-- Utilities are excluded from the subscription corpus because they are regulated, metered
+-- and have no cancel action. That does not mean they should go unwatched: it means the
+-- right comparison is seasonal, not sequential. A December heating bill is not a "price
+-- hike" over November, and a July cooling bill is not a hike over June -- both are the
+-- same consumption curve every year. Comparing a month against the SAME calendar month in
+-- prior years isolates genuine rate changes and consumption regressions from weather.
+CREATE OR REPLACE VIEW `family_finance.v_utility_seasonal_baseline` AS
+WITH utility_months AS (
+    SELECT
+        d.merchant,
+        DATE_TRUNC(t.transaction_date, MONTH) AS spend_month,
+        EXTRACT(MONTH FROM t.transaction_date) AS calendar_month,
+        ROUND(SUM(CAST(ABS(t.amount) AS FLOAT64)), 2) AS month_total
+    FROM `family_finance.raw_transactions` t
+    JOIN `family_finance.v_merchant_domain` d
+      ON COALESCE(t.clean_merchant_name, t.merchant_name) = d.merchant
+    WHERE t.amount < 0
+      AND t.pending = FALSE
+      AND d.domain = 'UTILITY_METERED'
+      AND t.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 48 MONTH)
+    GROUP BY 1, 2, 3
+),
+seasonal_norm AS (
+    SELECT
+        merchant,
+        calendar_month,
+        ROUND(AVG(month_total), 2) AS seasonal_avg,
+        ROUND(STDDEV_SAMP(month_total), 2) AS seasonal_stddev,
+        COUNT(*) AS years_observed
+    FROM utility_months
+    -- Prior years only; the month under test must not be inside its own baseline.
+    WHERE spend_month < DATE_TRUNC(CURRENT_DATE(), MONTH)
+    GROUP BY 1, 2
+)
+SELECT
+    m.merchant,
+    m.spend_month,
+    m.month_total,
+    n.seasonal_avg,
+    n.seasonal_stddev,
+    n.years_observed,
+    ROUND(m.month_total - n.seasonal_avg, 2) AS variance_vs_season,
+    ROUND(100 * SAFE_DIVIDE(m.month_total - n.seasonal_avg, n.seasonal_avg), 1) AS variance_pct
+FROM utility_months m
+JOIN seasonal_norm n USING (merchant, calendar_month)
+-- Last completed month. A month-to-date total compared against a full-month norm always
+-- reads low and would never surface a genuine overage.
+WHERE m.spend_month = DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
+  AND n.years_observed >= 1
+ORDER BY variance_vs_season DESC;
