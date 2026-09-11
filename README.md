@@ -254,7 +254,7 @@ family-financial-intelligence-hub/
 
 ## Configuration & Custom Rates
 
-You can configure custom interest rates (e.g. variable-rate HELOCs), manual account overrides, and bank exclusions using a local configuration file (`config.yaml` or `config.json`), or through Google Cloud Secret Manager / environment variables:
+You can configure custom interest rates (e.g. mortgages, variable-rate HELOCs, personal loans), manual account overrides, and bank exclusions using a local configuration file (`config.yaml` or `config.json`), or through Google Cloud Secret Manager / environment variables:
 
 ```bash
 cp config.example.yaml config.yaml

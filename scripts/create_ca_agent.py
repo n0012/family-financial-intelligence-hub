@@ -63,6 +63,8 @@ TABLES = [
     "v_active_subscriptions",
     "v_subscription_price_creep",
     "v_spend_classification",
+    "v_debt_daily_cost",
+    "v_debt_summary",
     "v_heloc_daily_cost",
     "v_food_efficiency",
     "v_micro_transaction_leakage",
@@ -73,7 +75,7 @@ TABLES = [
 SYSTEM_INSTRUCTION = (
     "You are an expert personal financial advisor and spend optimization strategist for a family. "
     "Your source of truth is Monarch Money synchronized into Google BigQuery. "
-    "CORE MISSION: Help the family optimize spending, eliminate waste, establish budget discipline, and aggressively pay down HELOC debt. "
+    "CORE MISSION: Help the family optimize spending, eliminate waste, establish budget discipline, track liabilities across mortgage, HELOC, and loans, and aggressively optimize debt carrying costs and paydown. "
     "\n"
     "WHEN PRODUCING RECOMMENDATIONS & OPTIMIZATIONS: "
     "1. TIER 1 - PAINLESS CUTS (Zero Lifestyle Impact): "
@@ -86,10 +88,10 @@ SYSTEM_INSTRUCTION = (
     "   - Query v_food_efficiency. If dining_percentage_of_food_budget > 30%, identify delivery markups (DoorDash, UberEats). "
     "   - Propose concrete shifts (e.g., 'Moving 2 delivery meals/month to home cooking frees $220/month'). "
     "   - Query v_micro_transaction_leakage to identify frequent sub-$35 habit leaks (convenience stores, daily coffee, impulse app buys). "
-    "3. TIER 3 - HELOC ACCELERATION & DEBT VELOCITY: "
-    "   - Query v_heloc_daily_cost to get the current HELOC balance, APR, and daily interest burden. "
+    "3. TIER 3 - DEBT ACCELERATION & VELOCITY (MORTGAGE, HELOC, LIABILITIES): "
+    "   - Query v_debt_summary and v_debt_daily_cost to get total liability carry, mortgage interest, and variable debt (HELOC) daily burden. "
     "   - For every dollar saved from Tiers 1 and 2, ALWAYS calculate the exact debt paydown impact: "
-    "     * Daily and annual compound interest eliminated. "
+    "     * Daily and annual compound interest eliminated across liabilities (prioritizing high-rate debt). "
     "     * Number of months shaved off the debt payoff timeline. "
     "\n"
     "CALCULATION STANDARDS: "
@@ -104,7 +106,7 @@ def create_agent():
 
     agent_body = {
         "display_name": "Family Financial & Spend Optimization Advisor",
-        "description": "Proactively identifies spend optimizations, cuts subscription bloat, and optimizes HELOC paydown.",
+        "description": "Proactively identifies spend optimizations, cuts subscription bloat, and optimizes multi-facility debt paydown across mortgage and HELOC.",
         "data_analytics_agent": {
             "published_context": {
                 "datasource_references": {

@@ -330,9 +330,9 @@ async def tax_summary(tax_year: int | None = Query(None, description="Tax year (
 def run_readonly_sql_tool(sql_query: str) -> str:
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
-    (e.g. v_heloc_daily_cost, v_active_subscriptions, v_subscription_price_creep,
-    v_subscription_overlap, v_utility_seasonal_baseline, v_food_efficiency,
-    v_micro_transaction_leakage, raw_accounts, raw_transactions).
+    (e.g. v_debt_daily_cost, v_debt_summary, v_heloc_daily_cost, v_active_subscriptions,
+    v_subscription_price_creep, v_subscription_overlap, v_utility_seasonal_baseline,
+    v_food_efficiency, v_micro_transaction_leakage, raw_accounts, raw_transactions).
 
     Args:
         sql_query: The GoogleSQL SELECT query to execute.
