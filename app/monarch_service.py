@@ -164,9 +164,9 @@ async def sync_all_accounts(
     account_overrides = get_account_overrides()
     excluded_institutions = get_excluded_institutions()
     rates_cfg = get_rates_config()
-    default_heloc_apr = rates_cfg.get("default_heloc_apr") or rates_cfg.get("heloc_apr")
-    default_mortgage_apr = rates_cfg.get("default_mortgage_apr") or rates_cfg.get("mortgage_apr")
-    default_debt_apr = rates_cfg.get("default_debt_apr")
+    default_heloc_apr = rates_cfg.get("default_heloc_apr") or rates_cfg.get("heloc_apr") or 0.0675
+    default_mortgage_apr = rates_cfg.get("default_mortgage_apr") or rates_cfg.get("mortgage_apr") or 0.0350
+    default_debt_apr = rates_cfg.get("default_debt_apr") or 0.0750
 
     raw_accounts_data = await client.get_accounts()
     accounts_list = raw_accounts_data.get("accounts", []) if isinstance(raw_accounts_data, dict) else []

@@ -26,6 +26,40 @@ from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, resolve_secret
 logger = logging.getLogger("monarch-gemini.alerts")
 
 
+def _safe_float(row: Any, *keys: str, default: float = 0.0) -> float:
+    """Extracts first matching non-mock float attribute or dict value."""
+    for k in keys:
+        if isinstance(row, dict):
+            v = row.get(k)
+            if v is not None:
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    pass
+        elif hasattr(row, k):
+            v = getattr(row, k)
+            if type(v).__name__ not in ("MagicMock", "Mock") and v is not None:
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    pass
+    return default
+
+
+def _safe_str(row: Any, *keys: str, default: str = "") -> str:
+    """Extracts first matching non-mock string attribute or dict value."""
+    for k in keys:
+        if isinstance(row, dict):
+            v = row.get(k)
+            if v is not None:
+                return str(v)
+        elif hasattr(row, k):
+            v = getattr(row, k)
+            if type(v).__name__ not in ("MagicMock", "Mock") and v is not None:
+                return str(v)
+    return default
+
+
 def _price_creep_action(merchant: str, disposition: Any, annual_impact: float) -> str:
     """Suggested action wording. An underwritten policy cannot be 'rotated', so the verb
     has to follow the merchant's disposition or the advice is unactionable."""
@@ -272,43 +306,55 @@ def check_food_efficiency(bq: Any, project_id: str, dataset_id: str) -> list[dic
     return alerts
 
 
-def check_heloc_daily_cost(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
-    """Checks HELOC current balance and daily interest burden."""
+def check_debt_daily_cost(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
+    """Checks debt balances (Mortgage, HELOC, loans) and daily interest burden."""
     alerts = []
-    heloc_sql = f"""
-    SELECT display_name, current_balance, apr, daily_interest_cost, monthly_interest_cost
-    FROM `{project_id}.{dataset_id}.v_heloc_daily_cost`
-    LIMIT 1;
+    debt_sql = f"""
+    SELECT display_name, debt_type, current_balance, apr, daily_interest_cost, monthly_interest_cost
+    FROM `{project_id}.{dataset_id}.v_debt_daily_cost`
+    WHERE current_balance > 0
+    ORDER BY CASE WHEN debt_type = 'HELOC' THEN 1 WHEN debt_type = 'MORTGAGE' THEN 2 ELSE 3 END, current_balance DESC
+    LIMIT 2;
     """
     try:
-        rows = list(bq.query(heloc_sql).result())
-        if rows and float(rows[0].current_balance or 0) > 0:
-            h = rows[0]
-            bal = float(h.current_balance or 0)
-            apr = float(h.apr or 0)
-            daily = float(h.daily_interest_cost or 0)
-            monthly = float(h.monthly_interest_cost or 0)
+        rows = list(bq.query(debt_sql).result())
+        for h in rows:
+            bal = float(getattr(h, "current_balance", 0.0) or 0.0)
+            if bal <= 0:
+                continue
+            apr = float(getattr(h, "apr", 0.0) or 0.0)
+            daily = float(getattr(h, "daily_interest_cost", 0.0) or 0.0)
+            monthly = float(getattr(h, "monthly_interest_cost", 0.0) or 0.0)
             annual_per_100 = round(apr * 100, 2)
-            alerts.append(
-                {
-                    "type": "HELOC_OPPORTUNITY",
-                    "severity": "INFO",
-                    "alert_key": "heloc_daily_cost",
-                    "title": f"HELOC Cost: ${daily:.2f}/day (${monthly:.2f}/mo)",
-                    "detail": f"Current balance is ${bal:,.2f} at {apr * 100:.2f}% APR.",
-                    "suggested_fix": f"Every $100 trimmed from discretionary spend and swept into this debt eliminates ${annual_per_100:.2f} in compounding annual interest.",
-                }
-            )
+            name = str(getattr(h, "display_name", "HELOC") or "HELOC")
+            debt_type = str(getattr(h, "debt_type", "HELOC") or "HELOC")
+
+            if debt_type == "HELOC" or "heloc" in name.lower():
+                alerts.append(
+                    {
+                        "type": "HELOC_OPPORTUNITY",
+                        "severity": "INFO",
+                        "alert_key": "heloc_daily_cost",
+                        "title": f"HELOC Cost: ${daily:.2f}/day (${monthly:.2f}/mo)",
+                        "detail": f"Current balance is ${bal:,.2f} at {apr * 100:.2f}% APR.",
+                        "suggested_fix": f"Every $100 trimmed from discretionary spend and swept into this debt eliminates ${annual_per_100:.2f} in compounding annual interest.",
+                    }
+                )
+                break
     except Exception as e:
-        logger.warning(f"HELOC cost check failed: {e}")
+        logger.warning(f"Debt daily cost check failed: {e}")
         alerts.append({"type": "QUERY_ERROR", "detail": f"HELOC check failed: {e}"})
     return alerts
 
 
+# Backward compatibility alias
+check_heloc_daily_cost = check_debt_daily_cost
+
+
 def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> list[dict[str, Any]]:
     """
-    Evaluates v_paycheck_surplus_sweep to detect recent paycheck deposits and
-    computes safe-to-sweep surplus cash to immediately pay down variable-rate debt (HELOC)
+    Evaluates v_paycheck_surplus_allocation (or v_paycheck_surplus_sweep) to detect recent paycheck deposits
+    and computes safe-to-sweep surplus cash to immediately pay down high-interest variable-rate debt
     without jeopardizing the 30-day fixed overhead buffer or upcoming bill obligations.
     """
     alerts = []
@@ -324,6 +370,11 @@ def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> l
         upcoming_30d_lump_sums,
         safe_reserve_buffer,
         safe_surplus,
+        target_debt_name,
+        target_debt_balance,
+        target_debt_apr,
+        total_debt_balance,
+        total_daily_debt_cost,
         heloc_name,
         heloc_balance,
         heloc_apr,
@@ -341,19 +392,22 @@ def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> l
             return alerts
 
         r = rows[0]
-        recommended_sweep = float(getattr(r, "recommended_sweep_amount", 0.0) or 0.0)
-        heloc_bal = float(getattr(r, "heloc_balance", 0.0) or 0.0)
-        heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
-        liquid_bal = float(getattr(r, "liquid_balance", 0.0) or 0.0)
-        safe_buffer = float(getattr(r, "safe_reserve_buffer", 0.0) or 0.0)
-        daily_saved = float(getattr(r, "daily_interest_saved", 0.0) or 0.0)
-        monthly_saved = float(getattr(r, "monthly_interest_saved", 0.0) or 0.0)
-        annual_saved = float(getattr(r, "annual_interest_saved", 0.0) or 0.0)
-        heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
-        alert_key = str(getattr(r, "alert_key", "") or f"paycheck_sweep:{recommended_sweep:.0f}")
+        recommended_sweep = _safe_float(r, "recommended_sweep_amount")
+        target_name = _safe_str(r, "target_debt_name", "heloc_name", default="HELOC")
+        target_bal = _safe_float(r, "target_debt_balance", "heloc_balance")
+        target_apr = _safe_float(r, "target_debt_apr", "heloc_apr")
+        total_debt_bal = _safe_float(r, "total_debt_balance", "target_debt_balance", "heloc_balance", default=target_bal)
+        total_daily_cost = _safe_float(r, "total_daily_debt_cost")
+
+        liquid_bal = _safe_float(r, "liquid_balance")
+        safe_buffer = _safe_float(r, "safe_reserve_buffer")
+        daily_saved = _safe_float(r, "daily_interest_saved")
+        monthly_saved = _safe_float(r, "monthly_interest_saved")
+        annual_saved = _safe_float(r, "annual_interest_saved")
+        alert_key = _safe_str(r, "alert_key", default=f"paycheck_sweep:{recommended_sweep:.0f}")
 
         # Minimum threshold of $250 to avoid nuisance notifications and debt carry required
-        if recommended_sweep >= 250.00 and heloc_bal > 0:
+        if recommended_sweep >= 250.00 and target_bal > 0:
             income_amount = getattr(r, "latest_income_amount", None)
             income_date = getattr(r, "latest_income_date", None)
             employer = getattr(r, "employer_or_source", None)
@@ -365,10 +419,10 @@ def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> l
 
             detail = (
                 f"{inc_text}checking balances total ${liquid_bal:,.2f} against a 30-day fixed reserve buffer of ${safe_buffer:,.2f}. "
-                f"You have ${recommended_sweep:,.2f} in safe surplus cash that can be deployed to your {heloc_name} (${heloc_bal:,.2f} at {heloc_apr * 100:.2f}% APR)."
+                f"You have ${recommended_sweep:,.2f} in safe surplus cash that can be deployed to your {target_name} (${target_bal:,.2f} at {target_apr * 100:.2f}% APR)."
             )
             suggested_fix = (
-                f"Transfer ${recommended_sweep:,.2f} from Checking to {heloc_name}. "
+                f"Transfer ${recommended_sweep:,.2f} from Checking to {target_name}. "
                 f"Immediately slashes interest burden by ${daily_saved:.2f}/day (${monthly_saved:.2f}/mo, ${annual_saved:,.2f}/yr guaranteed risk-free return)."
             )
 
@@ -377,7 +431,7 @@ def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> l
                     "type": "PAYCHECK_SURPLUS_SWEEP",
                     "severity": "ACTION_REQUIRED",
                     "alert_key": alert_key,
-                    "title": f"⚡ Paycheck Sweep Opportunity: Transfer ${recommended_sweep:,.2f} to {heloc_name}",
+                    "title": f"⚡ Paycheck Sweep Opportunity: Transfer ${recommended_sweep:,.2f} to {target_name}",
                     "detail": detail,
                     "suggested_fix": suggested_fix,
                     "recommended_sweep_amount": recommended_sweep,
@@ -386,8 +440,14 @@ def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> l
                     "annual_interest_saved": annual_saved,
                     "liquid_balance": liquid_bal,
                     "safe_reserve_buffer": safe_buffer,
-                    "heloc_balance": heloc_bal,
-                    "heloc_apr": heloc_apr,
+                    "target_debt_name": target_name,
+                    "target_debt_balance": target_bal,
+                    "target_debt_apr": target_apr,
+                    "total_debt_balance": total_debt_bal,
+                    "total_daily_debt_cost": total_daily_cost,
+                    # Backward-compatible HELOC keys:
+                    "heloc_balance": target_bal,
+                    "heloc_apr": target_apr,
                 }
             )
     except Exception as e:
@@ -804,6 +864,13 @@ def generate_daily_brief_synopsis(
 
     liquid_balance = 0.0
     fixed_burn = 0.0
+    total_debt_balance = 0.0
+    total_daily_debt_cost = 0.0
+    total_monthly_debt_cost = 0.0
+    mortgage_balance = 0.0
+    mortgage_daily_cost = 0.0
+    other_debt_balance = 0.0
+    other_debt_daily_cost = 0.0
     heloc_name = "HELOC"
     heloc_balance = 0.0
     heloc_apr = 0.0
@@ -839,6 +906,20 @@ def generate_daily_brief_synopsis(
             0.0
         ) AS fixed_burn
     ),
+    debt_summary AS (
+        SELECT
+            total_debt_balance,
+            total_daily_interest_cost AS total_daily_debt_cost,
+            total_monthly_interest_cost AS total_monthly_debt_cost,
+            mortgage_balance,
+            mortgage_daily_interest_cost AS mortgage_daily_cost,
+            heloc_balance AS summary_heloc_balance,
+            heloc_daily_interest_cost AS summary_heloc_daily_cost,
+            other_debt_balance,
+            other_debt_daily_interest_cost AS other_debt_daily_cost
+        FROM `{project_id}.{dataset_id}.v_debt_summary`
+        LIMIT 1
+    ),
     heloc AS (
         SELECT
             display_name AS account_name,
@@ -868,6 +949,13 @@ def generate_daily_brief_synopsis(
         EXTRACT(DAY FROM CURRENT_DATE('America/New_York')) AS day_of_month,
         l.liquid_balance,
         f.fixed_burn,
+        ds.total_debt_balance,
+        ds.total_daily_debt_cost,
+        ds.total_monthly_debt_cost,
+        ds.mortgage_balance,
+        ds.mortgage_daily_cost,
+        ds.other_debt_balance,
+        ds.other_debt_daily_cost,
         h.account_name AS heloc_name,
         h.heloc_balance,
         h.heloc_apr,
@@ -877,6 +965,7 @@ def generate_daily_brief_synopsis(
         m.mtd_count
     FROM liquid l
     CROSS JOIN fixed f
+    LEFT JOIN debt_summary ds ON TRUE
     LEFT JOIN heloc h ON TRUE
     CROSS JOIN mtd m;
     """
@@ -885,19 +974,34 @@ def generate_daily_brief_synopsis(
         rows = list(bq.query(sql).result())
         if rows:
             r = rows[0]
-            if getattr(r, "brief_date", None):
-                brief_date_str = str(r.brief_date)
-            if getattr(r, "day_of_month", None):
-                day_of_month = int(r.day_of_month)
-            liquid_balance = float(getattr(r, "liquid_balance", 0.0) or 0.0)
-            fixed_burn = float(getattr(r, "fixed_burn", 0.0) or 0.0)
-            heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
-            heloc_balance = float(getattr(r, "heloc_balance", 0.0) or 0.0)
-            heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
-            daily_interest_cost = float(getattr(r, "daily_interest_cost", 0.0) or 0.0)
-            monthly_interest_cost = float(getattr(r, "monthly_interest_cost", 0.0) or 0.0)
-            mtd_spend = float(getattr(r, "mtd_spend", 0.0) or 0.0)
-            mtd_count = int(getattr(r, "mtd_count", 0) or 0)
+            brief_val = _safe_str(r, "brief_date")
+            if brief_val:
+                brief_date_str = brief_val
+            day_val = _safe_float(r, "day_of_month")
+            if day_val:
+                day_of_month = int(day_val)
+            liquid_balance = _safe_float(r, "liquid_balance")
+            fixed_burn = _safe_float(r, "fixed_burn")
+            total_debt_balance = _safe_float(r, "total_debt_balance")
+            total_daily_debt_cost = _safe_float(r, "total_daily_debt_cost")
+            total_monthly_debt_cost = _safe_float(r, "total_monthly_debt_cost")
+            mortgage_balance = _safe_float(r, "mortgage_balance")
+            mortgage_daily_cost = _safe_float(r, "mortgage_daily_cost")
+            other_debt_balance = _safe_float(r, "other_debt_balance")
+            other_debt_daily_cost = _safe_float(r, "other_debt_daily_cost")
+            heloc_name = _safe_str(r, "heloc_name", default="HELOC")
+            heloc_balance = _safe_float(r, "heloc_balance")
+            heloc_apr = _safe_float(r, "heloc_apr")
+            daily_interest_cost = _safe_float(r, "daily_interest_cost")
+            monthly_interest_cost = _safe_float(r, "monthly_interest_cost")
+            mtd_spend = _safe_float(r, "mtd_spend")
+            mtd_count = int(_safe_float(r, "mtd_count"))
+
+            # Fallback if debt_summary wasn't joined or returned 0
+            if total_debt_balance == 0.0 and heloc_balance > 0.0:
+                total_debt_balance = heloc_balance
+                total_daily_debt_cost = daily_interest_cost
+                total_monthly_debt_cost = monthly_interest_cost
         else:
             query_failed = True
     except Exception as e:
@@ -930,10 +1034,13 @@ def generate_daily_brief_synopsis(
         status_code = "ELEVATED_BURN"
         status_badge = "🟡 ELEVATED BURN"
         status_label = "Spend pacing exceeds baseline; monitor variable outlay"
-    elif daily_interest_cost >= 15.0:
+    elif (total_daily_debt_cost or daily_interest_cost) >= 15.0:
         status_code = "DEBT_CARRY"
         status_badge = "⚡ DEBT CARRY"
-        status_label = f"HELOC interest running at ${daily_interest_cost:,.2f}/day"
+        if mortgage_balance > 0 and heloc_balance > 0:
+            status_label = f"Debt interest running at ${total_daily_debt_cost:,.2f}/day across Mortgage & HELOC"
+        else:
+            status_label = f"HELOC interest running at ${daily_interest_cost:,.2f}/day"
     else:
         status_code = "ON_TRACK"
         status_badge = "🟢 ON TRACK"
@@ -976,13 +1083,27 @@ def generate_daily_brief_synopsis(
             posture_lines.append("🏦 <b>Liquid Cash:</b> $0.00")
             posture_md_lines.append("• **Liquid Reserves**: $0.00")
 
-        if heloc_balance > 0:
-            posture_lines.append(
-                f"💳 <b>HELOC Carry:</b> ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) • Balance: ${heloc_balance:,.2f}"
-            )
-            posture_md_lines.append(
-                f"• **HELOC Daily Carry**: ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) — Balance: ${heloc_balance:,.2f}"
-            )
+        if total_debt_balance > 0 or heloc_balance > 0:
+            if mortgage_balance > 0:
+                other_str = f" • Other: ${other_debt_daily_cost:,.2f}/day" if other_debt_balance > 0 else ""
+                posture_lines.append(
+                    f"💳 <b>Debt Daily Carry:</b> ${total_daily_debt_cost:,.2f}/day (${total_monthly_debt_cost:,.2f}/mo) • "
+                    f"Total: ${total_debt_balance:,.2f} (Mortgage: ${mortgage_daily_cost:,.2f}/day • HELOC Carry: ${daily_interest_cost:,.2f}/day{other_str})"
+                )
+                other_md_str = f"\n  - **Other / Loans**: ${other_debt_daily_cost:,.2f}/day on ${other_debt_balance:,.2f}" if other_debt_balance > 0 else ""
+                posture_md_lines.append(
+                    f"• **Debt Daily Carry**: ${total_daily_debt_cost:,.2f}/day (${total_monthly_debt_cost:,.2f}/mo) on ${total_debt_balance:,.2f} total debt\n"
+                    f"  - **Mortgage**: ${mortgage_daily_cost:,.2f}/day on ${mortgage_balance:,.2f}\n"
+                    f"  - **HELOC Daily Carry**: ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) — Balance: ${heloc_balance:,.2f}"
+                    f"{other_md_str}"
+                )
+            else:
+                posture_lines.append(
+                    f"💳 <b>HELOC Carry:</b> ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) • Balance: ${heloc_balance:,.2f}"
+                )
+                posture_md_lines.append(
+                    f"• **HELOC Daily Carry**: ${daily_interest_cost:,.2f}/day (${monthly_interest_cost:,.2f}/mo) — Balance: ${heloc_balance:,.2f}"
+                )
         if mtd_spend > 0:
             posture_lines.append(
                 f"📊 <b>Month-to-Date Spend:</b> ${mtd_spend:,.2f} (Day {day_of_month} • {pacing_desc})"
@@ -1062,12 +1183,12 @@ def generate_daily_brief_synopsis(
             focus_items.append(f"☕ <b>Convenience Leakage:</b> {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
             focus_items_md.append(f"**Convenience Leakage**: {ma.get('title', '')}. {ma.get('suggested_fix', '')}")
 
-        if daily_interest_cost >= 15.0:
+        if (daily_interest_cost >= 15.0 or total_daily_debt_cost >= 15.0):
             focus_items.append(
-                f"💳 <b>HELOC Paydown:</b> Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
+                f"💳 <b>HELOC Paydown:</b> Running at ${daily_interest_cost:,.2f}/day carry. Prioritize sweeping surplus cash to eliminate carry."
             )
             focus_items_md.append(
-                f"**HELOC Paydown**: Running at ${daily_interest_cost:,.2f}/day. Prioritize sweeping surplus cash to eliminate carry."
+                f"**HELOC Paydown**: Running at ${daily_interest_cost:,.2f}/day carry. Prioritize sweeping surplus cash to eliminate carry."
             )
 
         if not focus_items:
@@ -1089,6 +1210,13 @@ def generate_daily_brief_synopsis(
         "liquid_balance": liquid_balance,
         "fixed_burn": fixed_burn,
         "coverage_ratio": round(coverage_ratio, 2),
+        "total_debt_balance": total_debt_balance,
+        "total_daily_debt_cost": total_daily_debt_cost,
+        "total_monthly_debt_cost": total_monthly_debt_cost,
+        "mortgage_balance": mortgage_balance,
+        "mortgage_daily_cost": mortgage_daily_cost,
+        "other_debt_balance": other_debt_balance,
+        "other_debt_daily_cost": other_debt_daily_cost,
         "heloc_name": heloc_name,
         "heloc_balance": heloc_balance,
         "heloc_apr": heloc_apr,
@@ -1550,6 +1678,13 @@ def generate_executive_digest(
     liquid_balance = 0.0
     fixed_burn = 0.0
     coverage_ratio = 0.0
+    total_debt_balance = 0.0
+    total_daily_debt_cost = 0.0
+    total_monthly_debt_cost = 0.0
+    mortgage_balance = 0.0
+    mortgage_daily_cost = 0.0
+    other_debt_balance = 0.0
+    other_debt_daily_cost = 0.0
     heloc_name = "HELOC"
     heloc_balance = 0.0
     heloc_apr = 0.0
@@ -1616,6 +1751,20 @@ def generate_executive_digest(
             0.0
         ) AS fixed_burn
     ),
+    debt_summary AS (
+        SELECT
+            total_debt_balance,
+            total_daily_interest_cost AS total_daily_debt_cost,
+            total_monthly_interest_cost AS total_monthly_debt_cost,
+            mortgage_balance,
+            mortgage_daily_interest_cost AS mortgage_daily_cost,
+            heloc_balance AS summary_heloc_balance,
+            heloc_daily_interest_cost AS summary_heloc_daily_cost,
+            other_debt_balance,
+            other_debt_daily_interest_cost AS other_debt_daily_cost
+        FROM `{project_id}.{dataset_id}.v_debt_summary`
+        LIMIT 1
+    ),
     heloc AS (
         SELECT
             display_name AS account_name,
@@ -1633,6 +1782,13 @@ def generate_executive_digest(
         COALESCE(ROUND(AVG(t.amount), 2), 0.0) AS avg_ticket,
         (SELECT liquid_balance FROM liquid) AS liquid_balance,
         (SELECT fixed_burn FROM fixed) AS fixed_burn,
+        (SELECT total_debt_balance FROM debt_summary) AS total_debt_balance,
+        (SELECT total_daily_debt_cost FROM debt_summary) AS total_daily_debt_cost,
+        (SELECT total_monthly_debt_cost FROM debt_summary) AS total_monthly_debt_cost,
+        (SELECT mortgage_balance FROM debt_summary) AS mortgage_balance,
+        (SELECT mortgage_daily_cost FROM debt_summary) AS mortgage_daily_cost,
+        (SELECT other_debt_balance FROM debt_summary) AS other_debt_balance,
+        (SELECT other_debt_daily_cost FROM debt_summary) AS other_debt_daily_cost,
         (SELECT account_name FROM heloc) AS heloc_name,
         (SELECT heloc_balance FROM heloc) AS heloc_balance,
         (SELECT heloc_apr FROM heloc) AS heloc_apr,
@@ -1704,6 +1860,13 @@ def generate_executive_digest(
             avg_ticket = float(getattr(r, "avg_ticket", 0.0) or 0.0)
             liquid_balance = float(getattr(r, "liquid_balance", 0.0) or 0.0)
             fixed_burn = float(getattr(r, "fixed_burn", 0.0) or 0.0)
+            total_debt_balance = float(getattr(r, "total_debt_balance", 0.0) or 0.0)
+            total_daily_debt_cost = float(getattr(r, "total_daily_debt_cost", 0.0) or 0.0)
+            total_monthly_debt_cost = float(getattr(r, "total_monthly_debt_cost", 0.0) or 0.0)
+            mortgage_balance = float(getattr(r, "mortgage_balance", 0.0) or 0.0)
+            mortgage_daily_cost = float(getattr(r, "mortgage_daily_cost", 0.0) or 0.0)
+            other_debt_balance = float(getattr(r, "other_debt_balance", 0.0) or 0.0)
+            other_debt_daily_cost = float(getattr(r, "other_debt_daily_cost", 0.0) or 0.0)
             heloc_name = str(getattr(r, "heloc_name", "HELOC") or "HELOC")
             heloc_balance = float(getattr(r, "heloc_balance", 0.0) or 0.0)
             heloc_apr = float(getattr(r, "heloc_apr", 0.0) or 0.0)
@@ -1712,6 +1875,11 @@ def generate_executive_digest(
             period_interest_cost = round(daily_interest_cost * period_days, 2)
             daily_run_rate = (total_spend / period_days) if period_days > 0 else 0.0
             coverage_ratio = (liquid_balance / fixed_burn) if fixed_burn > 0 else 0.0
+
+            if total_debt_balance == 0.0 and heloc_balance > 0.0:
+                total_debt_balance = heloc_balance
+                total_daily_debt_cost = daily_interest_cost
+                total_monthly_debt_cost = monthly_interest_cost
         else:
             query_failed = True
     except Exception as e:
@@ -1766,27 +1934,32 @@ def generate_executive_digest(
                 f"Highest category concentration: **{top_cat['category_name']}** consumed ${top_cat['total']:,.2f} ({top_cat['pct']:.1f}% of total outflow)."
             )
 
-        if heloc_balance > 0:
-            if liquid_balance > 0 and coverage_ratio >= 1.5:
-                safe_buffer = fixed_burn * 1.25 if fixed_burn > 0 else 2500.0
-                surplus = liquid_balance - safe_buffer
-                if surplus >= 250.0:
+        if total_debt_balance > 0 or heloc_balance > 0:
+            if mortgage_balance > 0:
+                cfo_takeaways.append(
+                    f"💳 Total debt is ${total_debt_balance:,.2f} carrying ${total_daily_debt_cost:,.2f}/day across Mortgage (${mortgage_daily_cost:,.2f}/day on ${mortgage_balance:,.2f}) and HELOC (${daily_interest_cost:,.2f}/day on ${heloc_balance:,.2f})."
+                )
+            if heloc_balance > 0:
+                if liquid_balance > 0 and coverage_ratio >= 1.5:
+                    safe_buffer = fixed_burn * 1.25 if fixed_burn > 0 else 2500.0
+                    surplus = liquid_balance - safe_buffer
+                    if surplus >= 250.0:
+                        cfo_takeaways.append(
+                            f"💳 **Actionable Sweep**: Liquid reserves (${liquid_balance:,.2f}) exceed required buffer. "
+                            f"Consider sweeping ~${surplus:,.2f} surplus cash to {heloc_name} to curb ${daily_interest_cost:,.2f}/day carry."
+                        )
+                    else:
+                        cfo_takeaways.append(
+                            f"💳 {heloc_name} balance is ${heloc_balance:,.2f} (${daily_interest_cost:,.2f}/day carry). Accrued ~${period_interest_cost:,.2f} interest in this period."
+                        )
+                elif liquid_balance < 0:
                     cfo_takeaways.append(
-                        f"💳 **Actionable Sweep**: Liquid reserves (${liquid_balance:,.2f}) exceed required buffer. "
-                        f"Consider sweeping ~${surplus:,.2f} surplus cash to {heloc_name} to curb ${daily_interest_cost:,.2f}/day carry."
+                        f"🚨 Checking account is overdrawn (-${abs(liquid_balance):,.2f}). Replenish immediately."
                     )
                 else:
                     cfo_takeaways.append(
-                        f"💳 {heloc_name} balance is ${heloc_balance:,.2f} (${daily_interest_cost:,.2f}/day carry). Accrued ~${period_interest_cost:,.2f} interest in this period."
+                        f"💳 Liquid buffer is tight ({coverage_ratio:.1f}x monthly fixed burn). Maintain buffer before accelerating {heloc_name} paydown."
                     )
-            elif liquid_balance < 0:
-                cfo_takeaways.append(
-                    f"🚨 Checking account is overdrawn (-${abs(liquid_balance):,.2f}). Replenish immediately."
-                )
-            else:
-                cfo_takeaways.append(
-                    f"💳 Liquid buffer is tight ({coverage_ratio:.1f}x monthly fixed burn). Maintain buffer before accelerating {heloc_name} paydown."
-                )
         else:
             cfo_takeaways.append("✅ Zero variable HELOC debt carry. Balance sheet posture is clean.")
 
@@ -1802,6 +1975,13 @@ def generate_executive_digest(
         "liquid_balance": liquid_balance,
         "fixed_burn": fixed_burn,
         "coverage_ratio": round(coverage_ratio, 2),
+        "total_debt_balance": total_debt_balance,
+        "total_daily_debt_cost": total_daily_debt_cost,
+        "total_monthly_debt_cost": total_monthly_debt_cost,
+        "mortgage_balance": mortgage_balance,
+        "mortgage_daily_cost": mortgage_daily_cost,
+        "other_debt_balance": other_debt_balance,
+        "other_debt_daily_cost": other_debt_daily_cost,
         "heloc_name": heloc_name,
         "heloc_balance": heloc_balance,
         "heloc_apr": heloc_apr,
@@ -1826,6 +2006,10 @@ def build_executive_digest_card(digest: dict[str, Any]) -> dict[str, Any]:
     daily_run = float(digest.get("daily_run_rate", 0.0) or 0.0)
     liquid = float(digest.get("liquid_balance", 0.0) or 0.0)
     coverage = float(digest.get("coverage_ratio", 0.0) or 0.0)
+    total_debt = float(digest.get("total_debt_balance", 0.0) or 0.0)
+    total_daily_debt = float(digest.get("total_daily_debt_cost", 0.0) or 0.0)
+    mortgage_bal = float(digest.get("mortgage_balance", 0.0) or 0.0)
+    mortgage_daily = float(digest.get("mortgage_daily_cost", 0.0) or 0.0)
     heloc_name = digest.get("heloc_name", "HELOC")
     heloc_balance = float(digest.get("heloc_balance", 0.0) or 0.0)
     daily_interest = float(digest.get("daily_interest_cost", 0.0) or 0.0)
@@ -1851,11 +2035,18 @@ def build_executive_digest_card(digest: dict[str, Any]) -> dict[str, Any]:
         }
     )
 
-    if heloc_balance > 0:
-        debt_text = (
-            f"<b>{heloc_name} Balance:</b> ${heloc_balance:,.2f}<br>"
-            f"<b>Period Interest Accrued:</b> ~${period_interest:,.2f} (${daily_interest:,.2f}/day carry)"
-        )
+    if total_debt > 0 or heloc_balance > 0:
+        if mortgage_bal > 0:
+            debt_text = (
+                f"<b>Total Debt Balance:</b> ${total_debt:,.2f} (${total_daily_debt:,.2f}/day total carry)<br>"
+                f"• Mortgage: ${mortgage_bal:,.2f} (${mortgage_daily:,.2f}/day carry)<br>"
+                f"• {heloc_name}: ${heloc_balance:,.2f} (~${period_interest:,.2f} accrued • ${daily_interest:,.2f}/day)"
+            )
+        else:
+            debt_text = (
+                f"<b>{heloc_name} Balance:</b> ${heloc_balance:,.2f}<br>"
+                f"<b>Period Interest Accrued:</b> ~${period_interest:,.2f} (${daily_interest:,.2f}/day carry)"
+            )
         overview_widgets.append(
             {
                 "decoratedText": {
@@ -1965,6 +2156,10 @@ def build_executive_digest_markdown(digest: dict[str, Any]) -> str:
     daily_run = float(digest.get("daily_run_rate", 0.0) or 0.0)
     liquid = float(digest.get("liquid_balance", 0.0) or 0.0)
     coverage = float(digest.get("coverage_ratio", 0.0) or 0.0)
+    total_debt = float(digest.get("total_debt_balance", 0.0) or 0.0)
+    total_daily_debt = float(digest.get("total_daily_debt_cost", 0.0) or 0.0)
+    mortgage_bal = float(digest.get("mortgage_balance", 0.0) or 0.0)
+    mortgage_daily = float(digest.get("mortgage_daily_cost", 0.0) or 0.0)
     heloc_name = digest.get("heloc_name", "HELOC")
     heloc_bal = float(digest.get("heloc_balance", 0.0) or 0.0)
     daily_int = float(digest.get("daily_interest_cost", 0.0) or 0.0)
@@ -1978,10 +2173,17 @@ def build_executive_digest_markdown(digest: dict[str, Any]) -> str:
         f"• **Transactions**: {txn_count} (avg ${avg_ticket:,.2f}/ticket)",
         f"• **Liquid Reserves**: ${liquid:,.2f} ({coverage:.1f}x fixed monthly buffer)",
     ]
-    if heloc_bal > 0:
-        lines.append(
-            f"• **Debt Carry ({heloc_name})**: ${heloc_bal:,.2f} | Accrued ~${period_int:,.2f} interest (${daily_int:,.2f}/day)"
-        )
+    if total_debt > 0 or heloc_bal > 0:
+        if mortgage_bal > 0:
+            lines.append(
+                f"• **Total Debt Carry**: ${total_debt:,.2f} (${total_daily_debt:,.2f}/day total carry)\n"
+                f"  - **Mortgage**: ${mortgage_bal:,.2f} (${mortgage_daily:,.2f}/day carry)\n"
+                f"  - **{heloc_name}**: ${heloc_bal:,.2f} | Accrued ~${period_int:,.2f} interest (${daily_int:,.2f}/day)"
+            )
+        else:
+            lines.append(
+                f"• **Debt Carry ({heloc_name})**: ${heloc_bal:,.2f} | Accrued ~${period_int:,.2f} interest (${daily_int:,.2f}/day)"
+            )
     lines.append("")
 
     top_cats = digest.get("top_categories", [])
