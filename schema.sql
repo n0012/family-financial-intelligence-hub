@@ -1036,4 +1036,25 @@ WHERE is_tax_deductible = TRUE
   AND audit_status != 'REJECTED'
 GROUP BY 1, 2;
 
+-- 3. Chat History Table (Session memory & multi-turn thread continuity)
+CREATE TABLE IF NOT EXISTS `family_finance.chat_history` (
+    session_id STRING NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    user_email STRING,
+    user_text STRING,
+    model_response STRING
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY session_id, user_email;
+
+-- 4. User Preferences & Long-Term Memory
+CREATE TABLE IF NOT EXISTS `family_finance.user_preferences` (
+    preference_id STRING NOT NULL,
+    user_email STRING NOT NULL,
+    preference_text STRING NOT NULL,
+    created_at TIMESTAMP NOT NULL
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY user_email;
+
 

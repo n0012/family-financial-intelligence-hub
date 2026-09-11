@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import re
+from datetime import UTC
 
 import google.auth
 from google.auth.transport.requests import Request
@@ -64,25 +65,24 @@ def _resolve_user_email(user_email: str | None = None) -> str:
 
 
 def get_memory_client():
-    """Initializes and caches the Google GenAI client with explicit reasoning engine scope."""
+    """Initializes and caches the Agent Platform client with explicit reasoning engine scope."""
     global _cached_client
     if _cached_client is not None:
         return _cached_client
 
     try:
-        from google import genai
+        import agentplatform
 
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         creds.refresh(Request())
-        _cached_client = genai.Client(
-            vertexai=True,
+        _cached_client = agentplatform.Client(
             project=GCP_PROJECT,
             location=GCP_REGION,
             credentials=creds,
         )
         return _cached_client
     except Exception as e:
-        logger.warning(f"Failed to initialize GenAI Reasoning Engine client: {e}")
+        logger.debug(f"Agent Platform Reasoning Engine client unavailable: {e}")
         return None
 
 
@@ -92,7 +92,7 @@ def get_memory_bank_name(client=None) -> str | None:
         return DEFAULT_MEMORY_BANK_NAME
 
     cli = client or get_memory_client()
-    if not cli:
+    if not cli or not hasattr(cli, "memory_banks"):
         return None
 
     try:
@@ -103,7 +103,7 @@ def get_memory_bank_name(client=None) -> str | None:
         if banks:
             return banks[0].name
     except Exception as e:
-        logger.warning(f"Could not list memory banks: {e}")
+        logger.debug(f"Could not list memory banks: {e}")
 
     return None
 
@@ -111,33 +111,59 @@ def get_memory_bank_name(client=None) -> str | None:
 def retrieve_user_memories(user_email: str | None = None, client=None) -> list[str]:
     """
     Retrieves consolidated long-term memories and preferences scoped to the user's email.
+    Queries persistent BigQuery user_preferences table, combined with Vertex AI Memory Bank if active.
     Returns a list of extracted fact strings.
     """
     target_user = _resolve_user_email(user_email)
-    bank_name = get_memory_bank_name(client)
-    if not bank_name:
-        return []
+    facts: list[str] = []
 
-    cli = client or get_memory_client()
-    if not cli:
-        return []
-
+    # 1. Primary: Retrieve stored user preferences from BigQuery
     try:
-        response = cli.memory_banks.memories.retrieve(
-            name=bank_name,
-            scope={"user_id": target_user},
+        from google.cloud import bigquery
+
+        from app.bq_service import get_bq_client, get_target_dataset, get_target_project
+
+        target_project = get_target_project()
+        target_dataset = get_target_dataset()
+        bq = get_bq_client(target_project)
+        query = f"""
+            SELECT preference_text
+            FROM `{target_project}.{target_dataset}.user_preferences`
+            WHERE user_email = @email
+            ORDER BY created_at ASC
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("email", "STRING", target_user)
+            ]
         )
-        facts = []
-        for item in getattr(response, "page", []):
-            mem = getattr(item, "memory", None)
-            fact = getattr(mem, "fact", None) if mem else None
-            if fact:
-                facts.append(fact.strip())
-        logger.info(f"Retrieved {len(facts)} memories for user '{target_user}' from Memory Bank.")
-        return facts
+        rows = list(bq.query(query, job_config=job_config).result())
+        for r in rows:
+            p_text = getattr(r, "preference_text", None)
+            if p_text and p_text.strip() and p_text.strip() not in facts:
+                facts.append(p_text.strip())
     except Exception as e:
-        logger.warning(f"Failed to retrieve memories for user '{target_user}': {e}")
-        return []
+        logger.debug(f"Could not retrieve user preferences from BigQuery: {e}")
+
+    # 2. Vertex AI Memory Bank (if configured and client provided/available)
+    bank_name = get_memory_bank_name(client)
+    cli = client or (get_memory_client() if bank_name and "PROJECT_ID" not in bank_name else None)
+    if bank_name and cli and hasattr(cli, "memory_banks"):
+        try:
+            response = cli.memory_banks.memories.retrieve(
+                name=bank_name,
+                scope={"user_id": target_user},
+            )
+            for item in getattr(response, "page", []):
+                mem = getattr(item, "memory", None)
+                fact = getattr(mem, "fact", None) if mem else None
+                if fact and fact.strip() and fact.strip() not in facts:
+                    facts.append(fact.strip())
+            logger.info(f"Retrieved memories for user '{target_user}' from Memory Bank.")
+        except Exception as e:
+            logger.debug(f"Memory Bank retrieve skipped/failed: {e}")
+
+    return facts
 
 
 def format_memories_for_prompt(memories: list[str]) -> str:
@@ -191,53 +217,85 @@ def save_user_preference(
             logger.debug(f"Audit log non-fatal error: {audit_err}")
         return False
 
-    bank_name = get_memory_bank_name(client)
-    if not bank_name:
-        logger.warning("No Memory Bank resource name configured; cannot persist preference.")
-        return False
-
-    cli = client or get_memory_client()
-    if not cli:
-        logger.warning("Agent Platform client unavailable; cannot persist preference.")
-        return False
-
+    bq_saved = False
     try:
-        cli.memory_banks.memories.generate(
-            name=bank_name,
-            direct_memories_source={"direct_memories": [{"fact": clean_fact}]},
-            scope={"user_id": target_user},
+        from datetime import datetime
+
+        from app.bq_service import get_bq_client, get_target_dataset, get_target_project
+
+        target_project = get_target_project()
+        target_dataset = get_target_dataset()
+        bq = get_bq_client(target_project)
+        table_ref = f"{target_project}.{target_dataset}.user_preferences"
+        errors = bq.insert_rows_json(
+            table_ref,
+            [
+                {
+                    "preference_id": pref_id,
+                    "user_email": target_user,
+                    "preference_text": clean_fact,
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            ],
         )
-        logger.info(f"Successfully consolidated preference into Memory Bank for '{target_user}': {clean_fact}")
-        try:
-            from app.monarch_service import log_mutation_audit
+        if not errors:
+            bq_saved = True
+        else:
+            logger.warning(f"BigQuery user preferences insert error: {errors}")
+    except Exception as bq_err:
+        logger.debug(f"Could not persist user preference to BigQuery: {bq_err}")
 
-            log_mutation_audit(
-                action_type="STORE_PREFERENCE",
-                target_id=pref_id,
-                user_email=target_user,
-                status="SUCCESS",
-                new_value=clean_fact,
-                details="Consolidated into Memory Bank",
-            )
-        except Exception as audit_err:
-            logger.debug(f"Audit log non-fatal error: {audit_err}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to generate memory in Memory Bank for '{target_user}': {e}")
+    # Also persist to Vertex AI Memory Bank if available
+    mb_saved = False
+    bank_name = get_memory_bank_name(client)
+    cli = client or (get_memory_client() if bank_name and "PROJECT_ID" not in bank_name else None)
+    if bank_name and cli and hasattr(cli, "memory_banks"):
         try:
-            from app.monarch_service import log_mutation_audit
-
-            log_mutation_audit(
-                action_type="STORE_PREFERENCE",
-                target_id=pref_id,
-                user_email=target_user,
-                status="FAILED",
-                new_value=clean_fact,
-                details=str(e),
+            cli.memory_banks.memories.generate(
+                name=bank_name,
+                direct_memories_source={"direct_memories": [{"fact": clean_fact}]},
+                scope={"user_id": target_user},
             )
-        except Exception as audit_err:
-            logger.debug(f"Audit log non-fatal error: {audit_err}")
-        return False
+            mb_saved = True
+            logger.info(f"Successfully consolidated preference into Memory Bank for '{target_user}': {clean_fact}")
+        except Exception as e:
+            logger.error(f"Failed to generate memory in Memory Bank for '{target_user}': {e}")
+            if client is not None:
+                try:
+                    from app.monarch_service import log_mutation_audit
+
+                    log_mutation_audit(
+                        action_type="STORE_PREFERENCE",
+                        target_id=pref_id,
+                        user_email=target_user,
+                        status="FAILED",
+                        new_value=clean_fact,
+                        details=str(e),
+                    )
+                except Exception as audit_err:
+                    logger.debug(f"Audit log non-fatal error: {audit_err}")
+                return False
+
+    success = bq_saved or mb_saved
+    if client is not None and not mb_saved:
+        success = False
+
+    status = "SUCCESS" if success else "FAILED"
+    try:
+        from app.monarch_service import log_mutation_audit
+
+        log_mutation_audit(
+            action_type="STORE_PREFERENCE",
+            target_id=pref_id,
+            user_email=target_user,
+            status=status,
+            new_value=clean_fact,
+            details="Consolidated into Memory Bank and BigQuery" if success else "Failed to persist",
+        )
+    except Exception as audit_err:
+        logger.debug(f"Audit log non-fatal error: {audit_err}")
+
+    return success
 
 
 def store_user_preference(preference_or_rule: str) -> str:
