@@ -355,10 +355,31 @@ terraform apply
 
 *Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
 
-### **PR 9: Receipt & Tax Deductibility Ingestion (Document AI / Gemini Vision) (Next)**
-* Upload receipts and statements directly to Google Chat for Gemini Vision extraction and Schedule C / HSA deductibility classification.
+### **PR 9: Receipt & Tax Deductibility Ingestion (Document AI / Gemini Vision) (Completed)**
+* **BigQuery Schema (`schema.sql`)**:
+  * **Receipt Records Table (`family_finance.receipt_records`)**: Structured persistence for `receipt_id`, `uploaded_at`, `user_email`, `merchant_name`, `receipt_date`, `total_amount`, `deductible_amount`, `tax_amount`, `tip_amount`, `payment_method_last4`, `tax_category`, `is_tax_deductible`, `deductibility_confidence`, `tax_justification`, `audit_status`, `matched_transaction_id`, `line_items_json`, and `notes`.
+  * **Tax Summary Analytical View (`family_finance.v_tax_deductible_summary`)**: Annual aggregations by `tax_year` and `tax_category` tracking total deductible deductions, gross receipt volume, matched bank transactions, and pending audit items.
+* **Multimodal Extraction & Zero-PII Processing Engine ([`app/receipt_service.py`](app/receipt_service.py))**:
+  * **Zero-PII Regex Sanitization (`scrub_pii`)**: Deterministically scrubs SSNs, EINs, and credit card PANs before any BigQuery insertion or log writing.
+  * **Multimodal In-Memory Vision**: Extracts line items and tax classifications via Gemini 2.5 Flash using Pydantic structured schemas (`ReceiptExtractionResult`, `LineItem`). Raw images are processed strictly in-memory and discarded.
+  * **IRS Tax Classification & Confidence Gating**: Classifies expenses into `SCHEDULE_C_EXPENSE`, `HSA_FSA_ELIGIBLE`, `CHARITABLE_DONATION`, `CHILDCARE_DEPENDENT_CARE`, and `STANDARD_NON_DEDUCTIBLE`. Enforces strict 0.85 confidence threshold and invariant gating (`0.0 <= deductible_amount <= total_amount`), marking unitemized or ambiguous deductions as `NEEDS_REVIEW`.
+  * **Asymmetric Bank Transaction Reconciliation (`match_receipt_to_transaction`)**: Searches `raw_transactions` across `[-3 days, +10 days]`, evaluating negative debit amounts against gross total, pre-tip authorizations, and restaurant dining tip bands (`[total, total * 1.35]`), assigning `match_status` (`MATCHED_POSTED`, `MATCHED_PENDING`, `AMBIGUOUS`) and `amount_delta`.
+  * **PR 10 Mutation Guardrails & Audit Logging**: Ingestion enforces user mutation rate limits via `check_mutation_rate_limit` and logs BigQuery audit trails via `log_mutation_audit(action_type="INGEST_RECEIPT")`.
+  * **Google Chat Card v2 Visual Generation (`build_receipt_chat_card`)**: Formats rich interactive widgets with tax category badges, audit status pills, IRS justification cites (e.g. IRC Sec. 213(d) / Pub 502), matched bank transaction links, and itemized line-item breakdowns.
+* **Chat, API & CLI Integrations**:
+  * **FastAPI Endpoints**: Added `POST /advisor/receipts/upload` (multipart upload with 15MB byte cap and extension-verified MIME derivation) and `GET /advisor/tax-summary`.
+  * **Google Chat Bot**: Handles `.png`, `.jpg`, `.jpeg`, `.webp`, and `.pdf` attachments with explicit `/receipt` intent, adds `/tax [YYYY]` command handler, and updates `/help` menu.
+  * **Gemini Brain AFC Tool**: Registered `get_tax_deduction_analysis(tax_year)` for autonomous natural language tax deduction queries.
+  * **Batch CLI Job**: Added `job tax-summary [--year YYYY]` subparser in [`app/job.py`](app/job.py).
+* **Unit Test Coverage**: Added 25 unit tests in [`tests/test_receipt_service.py`](tests/test_receipt_service.py), raising the repository test suite to **147 passing tests** (0 failures).
 
-### **PR 12: Multi-Account Portfolio Drift & Net Worth Rebalancer**
+---
+
+## 8. Sequenced Implementation Roadmap
+
+*Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
+
+### **PR 12: Multi-Account Portfolio Drift & Net Worth Rebalancer (Next)**
 * Track asset allocation across 401(k), IRA, HSA, and brokerage accounts against target model portfolios.
 
 ### **Backlog / Optional: Dynamic Benchmark Rates & HELOC Intelligence (FRED / DPRIME)**

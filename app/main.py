@@ -8,7 +8,7 @@ import secrets
 
 import google.auth
 import requests
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Security, UploadFile
 from fastapi.security import APIKeyHeader
 from google.auth.transport import requests as google_requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -65,6 +65,12 @@ from app.monarch_service import (
     record_mutation_idempotency,
     request_plaid_refresh,
     verify_mutation_signature,
+)
+from app.receipt_service import (
+    format_tax_summary_text,
+    get_tax_deductible_summary,
+    get_tax_deduction_analysis,
+    process_receipt_bytes,
 )
 
 try:
@@ -273,6 +279,54 @@ async def paycheck_surplus_sweep():
     }
 
 
+@app.post("/advisor/receipts/upload", dependencies=[Depends(verify_api_key)], tags=["Receipts & Tax Intelligence"])
+async def upload_receipt(
+    file: UploadFile = File(..., description="Receipt or invoice file (PNG, JPG, WEBP, PDF)"),
+):
+    """
+    Ingests a receipt or invoice document, executes Zero-PII multimodal extraction with Gemini Vision,
+    reconciles against BigQuery raw_transactions within -3d to +10d, saves record to BigQuery,
+    and returns tax deductibility breakdown and Google Chat Card v2.
+    """
+    MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+    content_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if not content_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(content_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded file exceeds 15MB limit.")
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    mime_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".pdf": "application/pdf",
+    }
+    mime = mime_map.get(ext) or file.content_type or "image/jpeg"
+    bq = get_bq_client()
+    result = await asyncio.to_thread(process_receipt_bytes, content_bytes, mime_type=mime, bq=bq)
+    return result
+
+
+@app.get("/advisor/tax-summary", dependencies=[Depends(verify_api_key)], tags=["Receipts & Tax Intelligence"])
+async def tax_summary(tax_year: int | None = Query(None, description="Tax year (e.g. 2026)")):
+    """
+    Retrieves annual tax deductible summary by category (Schedule C, HSA/FSA, Charity, Childcare)
+    from BigQuery v_tax_deductible_summary.
+    """
+    import datetime
+
+    bq = get_bq_client()
+    target_year = tax_year or datetime.date.today().year
+    rows = await asyncio.to_thread(get_tax_deductible_summary, bq, BQ_PROJECT_ID, BQ_DATASET_ID, target_year)
+    return {
+        "tax_year": target_year,
+        "summary": rows,
+        "formatted_text": format_tax_summary_text(rows, target_year),
+    }
+
+
 def run_readonly_sql_tool(sql_query: str) -> str:
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
@@ -380,6 +434,7 @@ def ask_gemini_brain(
             "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
             "15. Daily Morning Brief & Synopsis: You are equipped with `get_daily_morning_brief()` to retrieve the executive morning synopsis (liquid cash reserves, monthly fixed burn buffer, HELOC daily carry, MTD spend pacing, and high-priority items to pay attention to today). Call this whenever the user asks for the morning brief, daily financial synopsis, or daily overview.\n"
+            "16. Tax Deductibility & Receipts: You are equipped with `get_tax_deduction_analysis(tax_year)` to retrieve annual tax-deductible expense summaries (Schedule C business expenses, HSA/FSA medical expenses, 501(c)(3) charitable contributions, and childcare/dependent care). Call this whenever the user asks about tax deductions, write-offs, HSA spending, or annual tax summaries.\n"
             f"{memory_block}"
         )
 
@@ -408,6 +463,7 @@ def ask_gemini_brain(
                     get_daily_morning_brief,
                     get_executive_cfo_digest,
                     get_paycheck_surplus_analysis,
+                    get_tax_deduction_analysis,
                 ],
             ),
         )
@@ -599,10 +655,20 @@ def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
             try:
                 resp = requests.get(url, headers=headers, timeout=20)
                 if resp.status_code == 200 and resp.content:
-                    content_type = attachment.get("contentType") or "image/png"
-                    logger.info(
-                        f"Successfully downloaded attachment {attachment.get('contentName', 'image')} ({len(resp.content)} bytes, type={content_type})"
-                    )
+                    if len(resp.content) > 15 * 1024 * 1024:
+                        logger.warning(f"Attachment exceeds 15MB byte limit ({len(resp.content)} bytes); skipping.")
+                        return None
+                    content_name = attachment.get("contentName", "").lower()
+                    mime_map = {
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".webp": "image/webp",
+                        ".pdf": "application/pdf",
+                    }
+                    ext = os.path.splitext(content_name)[1]
+                    content_type = mime_map.get(ext) or "image/jpeg"
+                    logger.info(f"Successfully downloaded attachment ({len(resp.content)} bytes, type={content_type})")
                     return resp.content, content_type
                 else:
                     logger.debug(f"Media download from {url} returned {resp.status_code}")
@@ -1049,7 +1115,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     if attachments and isinstance(attachments, list):
         for att in attachments:
             content_name = att.get("contentName", "")
-            if content_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            if content_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".pdf")):
                 img_tuple = download_chat_attachment(att)
                 if img_tuple:
                     downloaded_images.append(img_tuple)
@@ -1073,7 +1139,8 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             "• `/alerts` to run proactive spend scan\n"
             "• `/digest` for weekly or monthly executive CFO brief\n"
             "• `/sweep` to calculate safe surplus cash to pay down HELOC\n"
-            "• *You can also paste screenshots or financial documents!*"
+            "• `/tax` to review annual tax-deductible expense summaries\n"
+            "• *You can also paste receipts, invoices, or financial documents!*"
         )
         return respond(help_text)
 
@@ -1192,6 +1259,67 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             return respond(analysis_text)
         except Exception as e:
             return respond(f"⚠️ Failed to evaluate paycheck surplus sweep: {e}")
+
+    # Command: /receipt, receipt image drop, or receipt extraction intent
+    is_receipt_intent = lower_text.startswith(("/receipt", "receipt", "/invoice")) or any(
+        phrase in lower_text
+        for phrase in [
+            "process receipt",
+            "extract receipt",
+            "parse receipt",
+            "scan receipt",
+            "read receipt",
+            "receipt deduction",
+            "upload receipt",
+        ]
+    )
+    if downloaded_images and is_receipt_intent:
+        try:
+            img_bytes, mime = downloaded_images[0]
+            bq = get_bq_client()
+            res = await asyncio.to_thread(
+                process_receipt_bytes,
+                img_bytes,
+                mime_type=mime,
+                user_email=user_email,
+                bq=bq,
+            )
+            chat_card = res.get("chat_card", {})
+            ext = res.get("extraction", {})
+            m_name = ext.get("merchant_name", "Receipt")
+            tot = ext.get("total_amount", 0.0)
+            ded = ext.get("deductible_amount", 0.0)
+            is_ded = ext.get("is_tax_deductible", False)
+            summary_msg = f"🧾 *Processed Receipt*: {m_name} (${tot:,.2f})"
+            if is_ded:
+                summary_msg += f" • 🟢 ${ded:,.2f} Deductible"
+            return respond(summary_msg, cards_v2=[chat_card.get("card", {})] if "card" in chat_card else None)
+        except Exception as e:
+            logger.error(f"Error processing receipt attachment: {e}")
+            return respond(f"⚠️ Failed to process receipt attachment: {e}")
+
+    # Command: /tax, /deductions, or tax deductibility intent
+    is_tax_intent = lower_text.startswith(("/tax", "/deduct")) or any(
+        phrase in lower_text
+        for phrase in [
+            "tax deductions",
+            "tax summary",
+            "tax write-offs",
+            "my deductions",
+            "deductible expenses",
+            "hsa expenses",
+            "schedule c expenses",
+            "charitable deductions",
+        ]
+    )
+    if is_tax_intent:
+        year_match = re.search(r"\b(20\d{2})\b", lower_text)
+        target_year = int(year_match.group(1)) if year_match else None
+        try:
+            summary_text = await asyncio.to_thread(get_tax_deduction_analysis, target_year)
+            return respond(summary_text)
+        except Exception as e:
+            return respond(f"⚠️ Failed to retrieve tax deduction summary: {e}")
 
     # Natural language query -> Conversational Analytics Agent
     # If the response completes within 20s, return synchronously.
