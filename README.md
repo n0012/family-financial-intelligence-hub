@@ -216,8 +216,6 @@ family-financial-intelligence-hub/
 │   ├── memory_service.py        # Vertex AI Agent Platform Memory Bank client & user preference tools
 │   ├── monarch_service.py       # Monarch client auth, sync ingestion, live read tools & guarded mutations
 │   └── receipt_service.py       # Multimodal receipt extraction, Zero-PII scrubber, tax classifier & bank matcher
-├── docs/
-│   └── ALERTS_STRATEGY.md       # Spend anomaly detection and debt acceleration strategy guide
 ├── scripts/
 │   ├── bootstrap_gcp_project.sh # GCP project bootstrapping, API enablement & IAM automation
 │   ├── create_ca_agent.py       # Google Cloud Conversational Analytics Agent deployment script
