@@ -17,8 +17,6 @@ Strictly adheres to Zero-PII policy:
   - Deterministic regex scrubbing of SSNs, EINs, and card PANs from line items and notes.
 """
 
-from __future__ import annotations
-
 import datetime
 import json
 import logging

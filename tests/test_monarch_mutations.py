@@ -166,6 +166,40 @@ class TestMonarchMutations(unittest.TestCase):
             self.assertEqual(buttons[0]["text"], "Confirm Update")
             self.assertEqual(buttons[1]["text"], "Cancel")
 
+    def test_afc_tool_annotations_are_real_types_not_strings(self):
+        """
+        Verify that AFC tools exposed to Gemini have real Python types in their signature annotations.
+        Stringified annotations (from __future__ import annotations) cause google-genai AFC to fail
+        with `TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union`.
+        """
+        import inspect
+
+        from app.main import (
+            get_live_account_balance,
+            get_live_transaction,
+            get_tax_deduction_analysis,
+            propose_transaction_recategorization,
+            request_plaid_refresh,
+        )
+
+        tools = [
+            propose_transaction_recategorization,
+            get_live_account_balance,
+            get_live_transaction,
+            request_plaid_refresh,
+            get_tax_deduction_analysis,
+        ]
+
+        for tool in tools:
+            sig = inspect.signature(tool)
+            for param_name, param in sig.parameters.items():
+                if param.annotation != inspect.Parameter.empty:
+                    self.assertNotIsInstance(
+                        param.annotation,
+                        str,
+                        f"Tool {tool.__name__} parameter '{param_name}' has stringified annotation '{param.annotation}' which breaks Gemini AFC.",
+                    )
+
     def test_execute_guarded_recategorization(self):
         mock_client = AsyncMock()
         mock_client.update_transaction = AsyncMock(return_value={"id": "txn_100", "categoryId": "cat_1"})

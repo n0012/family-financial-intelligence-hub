@@ -11,8 +11,6 @@ Provides:
    - `request_plaid_refresh`: Cooldown-guarded on-demand institution sync.
 """
 
-from __future__ import annotations
-
 import asyncio
 import concurrent.futures
 import contextvars
