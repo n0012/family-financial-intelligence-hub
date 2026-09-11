@@ -1583,6 +1583,123 @@ class TestChatWorker(unittest.TestCase):
                         self.assertTrue(res["webhook_dispatched"])
                         mock_post.assert_called_once()
 
+    def test_check_debt_daily_cost_multi_facility(self):
+        """Verify check_debt_daily_cost alerts on HELOC, mortgage, and other loans without premature break."""
+        mock_bq = MagicMock()
+        mock_bq.query.return_value.result.return_value = [
+            SimpleNamespace(
+                display_name="First Tech HELOC",
+                debt_type="HELOC",
+                current_balance=45000.0,
+                apr=0.0675,
+                daily_interest_cost=8.32,
+                monthly_interest_cost=253.13,
+            ),
+            SimpleNamespace(
+                display_name="Primary Home Mortgage",
+                debt_type="MORTGAGE",
+                current_balance=400000.0,
+                apr=0.0350,
+                daily_interest_cost=38.36,
+                monthly_interest_cost=1166.67,
+            ),
+            SimpleNamespace(
+                display_name="Auto Loan",
+                debt_type="OTHER_LOAN",
+                current_balance=18000.0,
+                apr=0.0550,
+                daily_interest_cost=2.71,
+                monthly_interest_cost=82.50,
+            ),
+        ]
+
+        found = alerts.check_debt_daily_cost(mock_bq, "test-proj", "test-ds")
+        self.assertEqual(len(found), 3)
+        keys = [a["alert_key"] for a in found]
+        self.assertIn("heloc_daily_cost", keys)
+        self.assertIn("mortgage_daily_cost", keys)
+        self.assertIn("debt_daily_cost_other_loan", keys)
+
+        # Ensure wording uses annual interest carry instead of compounding
+        for a in found:
+            self.assertIn("annual interest carry", a["suggested_fix"])
+            self.assertNotIn("compounding", a["suggested_fix"].lower())
+
+    def test_generate_daily_brief_mortgage_only_no_alert_fatigue(self):
+        """Verify a mortgage-only household does not get false DEBT_CARRY alert fatigue or $0 HELOC copy."""
+        mock_bq = MagicMock()
+        mock_row = SimpleNamespace(
+            brief_date="2026-09-11",
+            day_of_month=11,
+            liquid_balance=15000.0,
+            fixed_burn=6000.0,
+            total_debt_balance=400000.0,
+            total_daily_debt_cost=38.36,
+            total_monthly_debt_cost=1166.67,
+            mortgage_balance=400000.0,
+            mortgage_daily_cost=38.36,
+            heloc_balance=0.0,
+            heloc_name="HELOC",
+            heloc_apr=0.0675,
+            daily_interest_cost=0.0,
+            monthly_interest_cost=0.0,
+            other_debt_balance=0.0,
+            other_debt_daily_cost=0.0,
+            mtd_spend=2200.0,
+            mtd_count=18,
+        )
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        synopsis = alerts.generate_daily_brief_synopsis(mock_bq, "test-proj", "test-ds", alerts=[])
+        # Liquid buffer is 15000 / 6000 = 2.5x, mortgage carry is structural, so status should be ON_TRACK
+        self.assertEqual(synopsis["status_code"], "ON_TRACK")
+        self.assertEqual(synopsis["status_badge"], "🟢 ON TRACK")
+
+        focus_items_str = " ".join(synopsis["focus_items"])
+        self.assertNotIn("$0.00/day carry", focus_items_str)
+        self.assertNotIn("HELOC Paydown", focus_items_str)
+
+    def test_chat_webhook_brief_command(self):
+        """Verify /brief command routes to morning brief card."""
+        from app.main import google_chat_webhook
+
+        sample_event = {
+            "type": "MESSAGE",
+            "space": {"name": "spaces/test_space", "type": "DM"},
+            "message": {
+                "name": "spaces/test_space/messages/msg_brief",
+                "text": "/brief",
+                "sender": {"displayName": "FinSage User", "email": "user@example.com"},
+            },
+        }
+
+        mock_metrics = {
+            "date": "2026-09-11",
+            "day_of_month": 11,
+            "days_in_month": 30,
+            "liquid_balance": 15000.0,
+            "fixed_burn": 6000.0,
+            "total_debt_balance": 0.0,
+            "total_daily_debt_cost": 0.0,
+            "heloc_balance": 0.0,
+            "daily_interest_cost": 0.0,
+            "mtd_spend": 2200.0,
+            "coverage_ratio": 2.5,
+            "status_code": "ON_TRACK",
+            "status_badge": "🟢 ON TRACK",
+            "status_label": "Healthy reserves",
+            "pacing_percentage": 36.7,
+            "pacing_emoji": "🟢",
+            "pacing_desc": "~$200.00/day",
+            "focus_items": ["All systems normal"],
+            "focus_items_md": ["All systems normal"],
+        }
+
+        with patch("app.main.execute_alert_scan", return_value={"alerts": [], "brief_synopsis": mock_metrics}):
+            res = asyncio.run(google_chat_webhook(sample_event))
+            self.assertIn("cardsV2", res)
+            self.assertIn("FinSage", res["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

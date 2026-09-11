@@ -166,7 +166,7 @@ async def sync_all_accounts(
     rates_cfg = get_rates_config()
     default_heloc_apr = rates_cfg.get("default_heloc_apr") or rates_cfg.get("heloc_apr") or 0.0675
     default_mortgage_apr = rates_cfg.get("default_mortgage_apr") or rates_cfg.get("mortgage_apr") or 0.0350
-    default_debt_apr = rates_cfg.get("default_debt_apr") or 0.0750
+    default_debt_apr = rates_cfg.get("default_debt_apr")
 
     raw_accounts_data = await client.get_accounts()
     accounts_list = raw_accounts_data.get("accounts", []) if isinstance(raw_accounts_data, dict) else []
@@ -205,9 +205,9 @@ async def sync_all_accounts(
                 int_rate = None
         elif "home_equity" in subtype_str or "heloc" in subtype_str or "heloc" in disp_name_str:
             int_rate = float(default_heloc_apr) if default_heloc_apr is not None else None
-        elif "mortgage" in subtype_str or "mortgage" in type_str:
+        elif "mortgage" in subtype_str or "mortgage" in type_str or "mortgage" in disp_name_str:
             int_rate = float(default_mortgage_apr) if default_mortgage_apr is not None else None
-        elif type_str in ("loan", "credit") and not acc.get("isAsset", False):
+        elif type_str == "loan" and not acc.get("isAsset", False):
             int_rate = float(default_debt_apr) if default_debt_apr is not None else None
         else:
             int_rate = None

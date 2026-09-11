@@ -6,15 +6,36 @@ FinSage provides a flexible, secure configuration engine supporting local files,
 
 ## 1. Resolution Precedence
 
-Configuration values are resolved seamlessly in the following order:
-1. **Google Cloud Secret Manager** (production secrets and rates)
-2. **Environment Variables** (local testing & container runtime)
-3. **Local Configuration File** (`config.yaml` or `config.json` in repository root)
-4. **Internal Defaults** (fail-safe defaults)
+FinSage evaluates configuration using a tiered resolution order tailored for local agility and production security:
+
+### Application Settings (`rates`, `account_overrides`, `decommissioned_account_ids`, `excluded_institutions`)
+1. **Local Configuration File**: `config.yaml` or `config.json` in repository root (evaluated first for local development and rapid tuning).
+2. **Google Cloud Secret Manager**: Production JSON secrets (e.g., `account-overrides`, `rates-config`).
+3. **Environment Variables**: Container and CI/CD runtime variables (e.g., `ACCOUNT_OVERRIDES_JSON`, `RATES_CONFIG_JSON`).
+4. **Internal Defaults**: Safe zero/fallback defaults.
+
+### Runtime Secrets (`MONARCH_EMAIL`, `MONARCH_PASSWORD`, `ALERT_WEBHOOK_URL`, `GEMINI_WRAPPER_KEY`)
+1. **Google Cloud Secret Manager**: Fetched securely via ADC if running inside GCP (`PROJECT_ID` set).
+2. **Environment Variables**: Checked if Secret Manager secret is unset (used for local `.env.local` execution).
 
 ---
 
-## 2. Local Configuration (`config.yaml`)
+## 2. Debt APR Resolution & Provenance
+
+To guarantee mathematical consistency across BigQuery views, ingestion strictly resolves APRs using the following hierarchy:
+1. **Explicit Account Override**: Matching `account_id` in `config.yaml` or `ACCOUNT_OVERRIDES_JSON`.
+2. **Institution Feed APR**: Real-time `interestRate` reported directly by Monarch Money / Plaid.
+3. **Configured Subtype Defaults**:
+   - `default_heloc_apr` (fallback: 6.75%): Applied only if account name or subtype indicates a HELOC.
+   - `default_mortgage_apr` (fallback: 3.50%): Applied only if account name or subtype indicates a Mortgage.
+   - `default_debt_apr`: Applied **strictly to term loans** (`type_str == "loan"`).
+4. **Credit Cards**: Credit cards (`type_str == "credit"`) are **never** assigned an automatic default APR. Credit cards only enter interest-bearing debt calculations if Monarch explicitly reports a positive APR or if explicitly specified in `account_overrides`.
+
+In BigQuery, `v_debt_daily_cost` tracks `is_apr_estimated`, which evaluates to `FALSE` whenever a rate is verified or explicit, and `TRUE` only if unrated.
+
+---
+
+## 3. Local Configuration (`config.yaml`)
 
 Copy the example template to get started:
 ```bash
