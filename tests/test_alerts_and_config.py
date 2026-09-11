@@ -1057,6 +1057,304 @@ class TestChatWorker(unittest.TestCase):
             mock_future.cancel.assert_called_once()
             mock_subscriber.close.assert_called_once()
 
+    def test_generate_daily_brief_synopsis_thermometer_and_posture_badges(self):
+        mock_bq = MagicMock()
+        mock_row = MagicMock()
+        mock_row.brief_date = "2026-09-12"
+        mock_row.day_of_month = 12
+        mock_row.liquid_balance = 12000.00
+        mock_row.fixed_burn = 3500.00
+        mock_row.heloc_name = "HELOC"
+        mock_row.heloc_balance = 85000.00
+        mock_row.heloc_apr = 0.08
+        mock_row.daily_interest_cost = 18.63
+        mock_row.monthly_interest_cost = 566.67
+        mock_row.mtd_spend = 1440.00
+        mock_row.mtd_count = 18
+        mock_bq.query.return_value.result.return_value = [mock_row]
+
+        synopsis = alerts.generate_daily_brief_synopsis(mock_bq, "test-proj", "test-ds", alerts=[])
+        self.assertFalse(synopsis["is_error"])
+        self.assertEqual(synopsis["days_in_month"], 30)
+        self.assertEqual(synopsis["month_pct"], 40.0)
+        self.assertEqual(synopsis["status_code"], "DEBT_CARRY")
+        self.assertEqual(synopsis["status_badge"], "⚡ DEBT CARRY")
+        self.assertIn("█", synopsis["pacing_thermometer"])
+        self.assertIn("░", synopsis["pacing_thermometer"])
+        self.assertIn("Day 12/30 (40% elapsed)", synopsis["pacing_thermometer"])
+        self.assertIn("Projected: $3,600.00", synopsis["pacing_thermometer"])
+        self.assertIn("🧭 <b>Posture:</b> ⚡ DEBT CARRY", synopsis["posture_text"])
+
+    def test_build_chat_card_v2_with_thermometer_and_categorized_alerts(self):
+        mock_alerts = [
+            {
+                "type": "MICRO_TRANSACTION_LEAKAGE",
+                "title": "Frequent Small Purchases: Coffee",
+                "detail": "12 transactions totaling $72",
+                "suggested_fix": "Batch coffee visits",
+                "alert_key": "micro_coffee",
+            },
+            {
+                "type": "DUPLICATE_CHARGE",
+                "title": "Duplicate Charge: $45.00 at Grocery Store",
+                "detail": "Identical charges posted 1 day apart",
+                "suggested_fix": "Request refund from merchant",
+                "alert_key": "dup_123",
+            },
+            {
+                "type": "PRICE_CREEP",
+                "title": "Price Hike: SaaS Tool",
+                "detail": "Increased from $10 to $15",
+                "suggested_fix": "Audit usage",
+                "alert_key": "creep_saas",
+            },
+        ]
+        mock_synopsis = {
+            "date": "2026-09-12",
+            "status_badge": "🟢 ON TRACK",
+            "posture_text": "🧭 <b>Posture:</b> 🟢 ON TRACK<br>🏦 <b>Liquid Cash:</b> $12,000.00",
+            "pacing_thermometer": "████░░░░░░ Day 12/30 (40% elapsed)<br>MTD Outflow: $1,440.00",
+            "focus_items": ["✅ <b>All Systems Normal:</b> Spend is tracking normally."],
+        }
+
+        payload = alerts.build_chat_card_v2(mock_alerts, synopsis=mock_synopsis)
+        card = payload["cardsV2"][0]["card"]
+        sections = card["sections"]
+        self.assertEqual(len(sections), 2)
+
+        # Synopsis section widgets: Posture snapshot, Pacing Thermometer, Focus items
+        syn_widgets = sections[0]["widgets"]
+        self.assertEqual(len(syn_widgets), 3)
+        self.assertEqual(syn_widgets[1]["decoratedText"]["topLabel"], "MONTH-TO-DATE SPEND PACING THERMOMETER")
+        self.assertIn("Day 12/30", syn_widgets[1]["decoratedText"]["text"])
+
+        # Alert section: Sorted by priority so DUPLICATE_CHARGE appears before PRICE_CREEP and MICRO_TRANSACTION_LEAKAGE
+        alert_widgets = sections[1]["widgets"]
+        # DUPLICATE_CHARGE (widget 0 = text, widget 1 = snooze)
+        self.assertEqual(alert_widgets[0]["decoratedText"]["topLabel"], "⚡ URGENT ANOMALY • DUPLICATE CHARGE")
+        self.assertIn("Duplicate Charge", alert_widgets[0]["decoratedText"]["text"])
+        # PRICE_CREEP (widget 2 = text, widget 3 = snooze)
+        self.assertEqual(alert_widgets[2]["decoratedText"]["topLabel"], "🔄 RECURRING SPEND • PRICE HIKE")
+        # MICRO_TRANSACTION_LEAKAGE (widget 4 = text, widget 5 = snooze)
+        self.assertEqual(alert_widgets[4]["decoratedText"]["topLabel"], "☕ LIFESTYLE LEAK • CONVENIENCE HABIT")
+
+    def test_generate_executive_digest_weekly_and_monthly(self):
+        mock_bq = MagicMock()
+
+        # Summary query row
+        mock_summary = MagicMock()
+        mock_summary.total_spend = 1250.75
+        mock_summary.txn_count = 22
+        mock_summary.avg_ticket = 56.85
+        mock_summary.liquid_balance = 8500.00
+        mock_summary.fixed_burn = 3200.00
+        mock_summary.heloc_name = "HELOC"
+        mock_summary.heloc_balance = 60000.00
+        mock_summary.heloc_apr = 0.0825
+        mock_summary.daily_interest_cost = 13.56
+        mock_summary.monthly_interest_cost = 412.50
+
+        # Category query rows
+        mock_cat1 = MagicMock(category_name="Groceries", total=450.25, count=6)
+        mock_cat2 = MagicMock(category_name="Dining Out", total=310.50, count=8)
+
+        # Merchant query rows
+        mock_m1 = MagicMock(merchant="Whole Foods", total=275.50, count=3)
+        mock_m2 = MagicMock(merchant="Costco", total=174.75, count=2)
+
+        mock_bq.query.side_effect = [
+            MagicMock(result=MagicMock(return_value=[mock_summary])),
+            MagicMock(result=MagicMock(return_value=[mock_cat1, mock_cat2])),
+            MagicMock(result=MagicMock(return_value=[mock_m1, mock_m2])),
+        ]
+
+        # Weekly digest
+        weekly_digest = alerts.generate_executive_digest(mock_bq, "test-proj", "test-ds", period="WEEKLY")
+        self.assertFalse(weekly_digest["is_error"])
+        self.assertEqual(weekly_digest["period"], "WEEKLY")
+        self.assertEqual(weekly_digest["period_days"], 7)
+        self.assertEqual(weekly_digest["total_spend"], 1250.75)
+        self.assertEqual(weekly_digest["txn_count"], 22)
+        self.assertEqual(weekly_digest["coverage_ratio"], 2.66)
+        self.assertEqual(len(weekly_digest["top_categories"]), 2)
+        self.assertEqual(weekly_digest["top_categories"][0]["category_name"], "Groceries")
+        self.assertEqual(len(weekly_digest["top_merchants"]), 2)
+        self.assertEqual(weekly_digest["top_merchants"][0]["merchant"], "Whole Foods")
+        self.assertTrue(len(weekly_digest["cfo_takeaways"]) > 0)
+
+        # Monthly digest
+        mock_bq.query.side_effect = [
+            MagicMock(result=MagicMock(return_value=[mock_summary])),
+            MagicMock(result=MagicMock(return_value=[mock_cat1])),
+            MagicMock(result=MagicMock(return_value=[mock_m1])),
+        ]
+        monthly_digest = alerts.generate_executive_digest(mock_bq, "test-proj", "test-ds", period="MONTHLY")
+        self.assertEqual(monthly_digest["period"], "MONTHLY")
+        self.assertEqual(monthly_digest["period_title"], "Monthly")
+
+    def test_build_executive_digest_card_and_markdown(self):
+        mock_digest = {
+            "period": "WEEKLY",
+            "period_title": "Weekly",
+            "period_label": "Trailing 7 Days (Sep 5 – Sep 12, 2026)",
+            "period_days": 7,
+            "total_spend": 1250.75,
+            "txn_count": 22,
+            "avg_ticket": 56.85,
+            "daily_run_rate": 178.68,
+            "liquid_balance": 8500.00,
+            "fixed_burn": 3200.00,
+            "coverage_ratio": 2.7,
+            "heloc_name": "HELOC",
+            "heloc_balance": 60000.00,
+            "daily_interest_cost": 13.56,
+            "period_interest_cost": 94.92,
+            "top_categories": [
+                {"category_name": "Groceries", "total": 450.25, "count": 6, "pct": 36.0},
+                {"category_name": "Dining Out", "total": 310.50, "count": 8, "pct": 24.8},
+            ],
+            "top_merchants": [
+                {"merchant": "Whole Foods", "total": 275.50, "count": 3},
+            ],
+            "cfo_takeaways": [
+                "Household spend totaled $1,250.75 (22 transactions, ~$178.68/day).",
+                "Highest category concentration: **Groceries** consumed $450.25 (36.0% of total outflow).",
+                "💳 **Actionable Sweep**: Liquid reserves ($8,500.00) exceed required buffer. Sweep surplus to HELOC.",
+            ],
+            "is_error": False,
+        }
+
+        # Card v2
+        card_res = alerts.build_executive_digest_card(mock_digest)
+        self.assertIn("cardsV2", card_res)
+        card = card_res["cardsV2"][0]["card"]
+        self.assertEqual(card["header"]["title"], "FinSage")
+        self.assertEqual(card["header"]["subtitle"], "Weekly Executive CFO Digest")
+        self.assertEqual(len(card["sections"]), 3)
+        self.assertIn("Executive CFO Weekly Overview", card["sections"][0]["header"])
+        self.assertIn("Outflow Concentration", card["sections"][1]["header"])
+        self.assertIn("Strategic CFO Takeaways", card["sections"][2]["header"])
+
+        # Markdown
+        md = alerts.build_executive_digest_markdown(mock_digest)
+        self.assertIn("## 📊 FinSage Executive CFO Digest: Weekly Recap", md)
+        self.assertIn("Total Spend**: $1,250.75", md)
+        self.assertIn("Groceries**: $450.25", md)
+        self.assertIn("Whole Foods**: $275.50", md)
+        self.assertIn("Strategic CFO Takeaways", md)
+
+    def test_get_executive_cfo_digest_tool(self):
+        mock_bq = MagicMock()
+        mock_summary = MagicMock(
+            total_spend=900.00,
+            txn_count=12,
+            avg_ticket=75.00,
+            liquid_balance=5000.00,
+            fixed_burn=2500.00,
+            heloc_name="HELOC",
+            heloc_balance=40000.00,
+            heloc_apr=0.08,
+            daily_interest_cost=8.77,
+            monthly_interest_cost=266.67,
+        )
+        mock_bq.query.side_effect = [
+            MagicMock(result=MagicMock(return_value=[mock_summary])),
+            MagicMock(result=MagicMock(return_value=[])),
+            MagicMock(result=MagicMock(return_value=[])),
+        ]
+
+        with patch("app.alerts.bigquery.Client", return_value=mock_bq):
+            res = alerts.get_executive_cfo_digest(period="weekly")
+            self.assertIn("Executive CFO Digest", res)
+            self.assertIn("$900.00", res)
+
+    def test_fastapi_advisor_digest_endpoint(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app, verify_api_key
+
+        client = TestClient(app)
+        auth_headers = {"X-API-Key": "test-api-key"}
+
+        mock_digest = {
+            "period": "WEEKLY",
+            "period_title": "Weekly",
+            "total_spend": 1250.00,
+            "txn_count": 15,
+            "is_error": False,
+        }
+
+        app.dependency_overrides[verify_api_key] = lambda: "test-api-key"
+        try:
+            with patch("app.main.get_bq_client", return_value=MagicMock()):
+                with patch("app.main.generate_executive_digest", return_value=mock_digest):
+                    resp = client.get("/advisor/digest?period=weekly", headers=auth_headers)
+                    self.assertEqual(resp.status_code, 200)
+                    data = resp.json()
+                    self.assertEqual(data["period"], "WEEKLY")
+                    self.assertEqual(data["total_spend"], 1250.00)
+
+                    resp_m = client.get("/advisor/digest?period=monthly", headers=auth_headers)
+                    self.assertEqual(resp_m.status_code, 200)
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_chat_webhook_digest_command(self):
+        from app.main import google_chat_webhook
+
+        sample_event = {
+            "type": "MESSAGE",
+            "message": {
+                "name": "spaces/test/messages/msg123",
+                "text": "@FinSage /digest weekly",
+                "sender": {"displayName": "Nick", "email": "nick@example.com"},
+            },
+            "space": {"name": "spaces/test"},
+        }
+
+        mock_digest = {
+            "period": "WEEKLY",
+            "period_title": "Weekly",
+            "period_label": "Trailing 7 Days",
+            "total_spend": 1200.00,
+            "txn_count": 10,
+            "avg_ticket": 120.00,
+            "daily_run_rate": 171.43,
+            "liquid_balance": 9000.00,
+            "coverage_ratio": 3.0,
+            "heloc_balance": 0.0,
+            "daily_interest_cost": 0.0,
+            "period_interest_cost": 0.0,
+            "top_categories": [],
+            "top_merchants": [],
+            "cfo_takeaways": ["Spend is well managed."],
+            "is_error": False,
+        }
+
+        with patch("app.main.generate_executive_digest", return_value=mock_digest):
+            res = asyncio.run(google_chat_webhook(sample_event))
+            self.assertIn("cardsV2", res)
+            self.assertIn("Executive CFO Digest", res["text"])
+
+    def test_job_run_digest(self):
+        from app import job
+
+        mock_digest = {
+            "period": "WEEKLY",
+            "total_spend": 1000.0,
+            "is_error": False,
+        }
+
+        with patch("app.alerts.generate_executive_digest", return_value=mock_digest):
+            with patch("app.alerts.resolve_secret", return_value="https://chat.googleapis.com/v1/spaces/XYZ/messages"):
+                with patch("app.bq_service.get_bq_client", return_value=MagicMock()):
+                    with patch("requests.post") as mock_post:
+                        mock_post.return_value.status_code = 200
+                        res = asyncio.run(job.run_digest("weekly"))
+                        self.assertEqual(res["status"], "success")
+                        self.assertTrue(res["webhook_dispatched"])
+                        mock_post.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

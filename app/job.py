@@ -31,6 +31,46 @@ async def run_alerts() -> dict:
     return await execute_alert_scan()
 
 
+async def run_digest(period: str = "weekly") -> dict:
+    import requests
+
+    from app.alerts import (
+        BQ_DATASET_ID,
+        BQ_PROJECT_ID,
+        build_executive_digest_card,
+        build_executive_digest_markdown,
+        generate_executive_digest,
+        resolve_secret,
+    )
+    from app.bq_service import get_bq_client
+
+    target_project = BQ_PROJECT_ID
+    target_dataset = BQ_DATASET_ID
+    bq = get_bq_client(target_project)
+    p = "MONTHLY" if str(period).lower().startswith("m") else "WEEKLY"
+    digest = await asyncio.to_thread(generate_executive_digest, bq, target_project, target_dataset, p)
+
+    webhook_url = resolve_secret("alert-webhook-url", "ALERT_WEBHOOK_URL")
+    webhook_sent = False
+    if webhook_url:
+        try:
+            if "chat.googleapis.com" in webhook_url:
+                payload = build_executive_digest_card(digest)
+            else:
+                md = build_executive_digest_markdown(digest)
+                payload = {"content": md, "text": md}
+            resp = await asyncio.to_thread(requests.post, webhook_url, json=payload, timeout=10)
+            webhook_sent = resp.status_code in (200, 204)
+        except Exception as e:
+            logger.error(f"Digest webhook dispatch failed: {e}")
+
+    return {
+        "status": "success",
+        "digest": digest,
+        "webhook_dispatched": webhook_sent,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="job")
     sub = parser.add_subparsers(dest="task", required=True)
@@ -45,14 +85,26 @@ def main() -> int:
 
     sub.add_parser("alerts", help="Scan BigQuery views and dispatch spend alerts")
 
+    digest_cmd = sub.add_parser("digest", help="Generate and dispatch weekly or monthly executive CFO digest")
+    digest_cmd.add_argument(
+        "--period",
+        choices=["weekly", "monthly"],
+        default="weekly",
+        help="Period for executive digest (weekly or monthly)",
+    )
+
     args = parser.parse_args()
 
     try:
         if args.task == "sync":
             days_back = args.days_back if args.days_back > 0 else None
             result = asyncio.run(run_sync(days_back))
-        else:
+        elif args.task == "alerts":
             result = asyncio.run(run_alerts())
+        elif args.task == "digest":
+            result = asyncio.run(run_digest(args.period))
+        else:
+            result = {"error": f"Unknown task {args.task}"}
     except Exception as e:
         logger.exception(f"Task '{args.task}' failed: {e}")
         return 1

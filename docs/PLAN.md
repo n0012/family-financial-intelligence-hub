@@ -304,17 +304,34 @@ terraform apply
   * Wired all 3 scanners into `collect_all_alerts`, Morning Financial Synopsis focus item synthesis (`generate_daily_brief_synopsis`), and Card v2 interactive HMAC snooze flows.
 * **Full Unit Test Coverage**: Added 8 new unit tests in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py), bringing the test suite to **106 passing unit tests**.
 
+### **PR 11: Executive CFO Briefing Card & Digest (Completed)**
+* **Visual Burn Pacing Thermometer & Posture Badges**:
+  * Implemented calendar progress evaluation, projected monthly outflow run-rate, and Unicode progress thermometer (`[████░░░░░░] Day 12/30 (40% elapsed) • MTD Outflow: $X,XXX (~$YY/day • Projected: $Z,ZZZ)`).
+  * Automated posture assessment badge engine (`🟢 ON TRACK`, `🟡 LOW BUFFER`, `🟡 ELEVATED BURN`, `⚡ DEBT CARRY`, `🚨 OVERDRAWN`, `⚠️ DATA DEGRADED`).
+* **Categorized Optimization Opportunities in Chat Card v2**:
+  * Prioritized alert sorting and pillar labeling in `build_chat_card_v2`:
+    * `⚡ URGENT ANOMALIES & DUPLICATES`
+    * `🆕 URGENT ANOMALY • TRIAL INTERCEPT`
+    * `🔄 RECURRING SPEND & PRICE SPIKES`
+    * `☕ LIFESTYLE & CONVENIENCE LEAKS`
+    * `💳 DEBT & UTILITY EFFICIENCY`
+* **Weekly & Monthly Family Executive Digest Engine**:
+  * Built `generate_executive_digest(bq, project_id, dataset_id, period="WEEKLY"|"MONTHLY")` synthesizing total volume, transaction counts, average ticket, liquid reserves buffer, HELOC interest carry, top 5 expense categories, top 5 merchants, and actionable CFO recommendations.
+  * Formatted output via Google Chat Card v2 (`build_executive_digest_card`) and plain markdown fallback (`build_executive_digest_markdown`).
+  * Registered `get_executive_cfo_digest` as an AFC callable tool in the Gemini Brain multi-tool dispatcher.
+* **Chat, API & CLI Workflows**:
+  * Added `/digest [weekly|monthly]` command and natural intent trigger in `google_chat_webhook`.
+  * Added `@app.get("/advisor/digest")` REST endpoint in FastAPI with API key authorization.
+  * Added batch CLI task `job digest --period [weekly|monthly]` in `app/job.py` for Cloud Scheduler automation.
+* **Full Unit Test Coverage**: Added 8 new unit tests in [`tests/test_alerts_and_config.py`](tests/test_alerts_and_config.py), bringing the total test suite to **114 passing unit tests**.
+
 ---
 
 ## 8. Sequenced Implementation Roadmap
 
 *Informed by architectural audit recommendations and industry best practices inspired in part by [`personal-finance-skill`](https://github.com/6missedcalls/personal-finance-skill) (credits: 6missedcalls).*
 
-### **PR 11: Executive CFO Briefing Card & Digest (Next)**
-* Multi-section Google Chat card with visual emoji KPIs, burn pacing thermometer, and categorized optimization action items.
-* Weekly / monthly family executive digest.
-
-### **PR 7b: Debt Paydown Automation — Paycheck Surplus Sweep Engine**
+### **PR 7b: Debt Paydown Automation — Paycheck Surplus Sweep Engine (Next)**
 * **Paycheck Surplus Sweep (`PAYCHECK_SURPLUS_SWEEP`)**: Detects income deposits and computes safe-to-sweep surplus cash to immediately pay down variable-rate debt without jeopardizing 30-day fixed overhead.
 
 ### **PR 9: Receipt & Tax Deductibility Ingestion (Document AI / Gemini Vision)**

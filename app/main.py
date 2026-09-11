@@ -17,11 +17,14 @@ from google.oauth2 import id_token
 
 from app.alerts import (
     build_chat_card_v2,
+    build_executive_digest_card,
     build_snooze_success_card,
     collect_all_alerts,
     execute_alert_scan,
     generate_daily_brief_synopsis,
+    generate_executive_digest,
     get_daily_morning_brief,
+    get_executive_cfo_digest,
     snooze_spend_alert,
     suppress_alert,
 )
@@ -241,6 +244,17 @@ async def morning_brief():
     return await asyncio.to_thread(generate_daily_brief_synopsis, bq, BQ_PROJECT_ID, BQ_DATASET_ID, alerts)
 
 
+@app.get("/advisor/digest", dependencies=[Depends(verify_api_key)], tags=["Spend Optimization Advisor"])
+async def executive_digest(period: str = "weekly"):
+    """
+    Retrieves the executive FinSage CFO digest (weekly or monthly) summarizing spend volume,
+    category and merchant concentration, debt carry, and strategic capital allocation actions.
+    """
+    bq = get_bq_client()
+    p = "MONTHLY" if period.upper().startswith("M") else "WEEKLY"
+    return await asyncio.to_thread(generate_executive_digest, bq, BQ_PROJECT_ID, BQ_DATASET_ID, p)
+
+
 def run_readonly_sql_tool(sql_query: str) -> str:
     """
     Executes a read-only GoogleSQL query against the family_finance BigQuery dataset
@@ -374,6 +388,7 @@ def ask_gemini_brain(
                     store_user_preference,
                     snooze_spend_alert,
                     get_daily_morning_brief,
+                    get_executive_cfo_digest,
                 ],
             ),
         )
@@ -1037,6 +1052,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             "• _What frequent small purchases are we making?_\n"
             "• `/sync` to pull latest transactions\n"
             "• `/alerts` to run proactive spend scan\n"
+            "• `/digest` for weekly or monthly executive CFO brief\n"
             "• *You can also paste screenshots or financial documents!*"
         )
         return respond(help_text)
@@ -1099,6 +1115,38 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             )
         except Exception as e:
             return respond(f"⚠️ Alert scan failed: {e}")
+
+    # Command: /digest [weekly|monthly] or natural digest intent
+    is_digest_intent = lower_text.startswith(("/digest", "digest")) or any(
+        phrase in lower_text
+        for phrase in [
+            "weekly digest",
+            "monthly digest",
+            "executive digest",
+            "cfo digest",
+            "cfo brief",
+            "cfo report",
+            "monthly recap",
+            "weekly recap",
+            "spending recap",
+            "executive recap",
+            "executive summary",
+        ]
+    )
+    if is_digest_intent:
+        period = "MONTHLY" if any(w in lower_text for w in ["month", "monthly"]) else "WEEKLY"
+        try:
+            target_project = BQ_PROJECT_ID
+            target_dataset = BQ_DATASET_ID
+            bq = get_bq_client(target_project)
+            digest_data = await asyncio.to_thread(generate_executive_digest, bq, target_project, target_dataset, period)
+            card_payload = build_executive_digest_card(digest_data)
+            return respond(
+                card_payload.get("text", f"📊 *FinSage*: {period.title()} Executive CFO Digest"),
+                cards_v2=card_payload.get("cardsV2"),
+            )
+        except Exception as e:
+            return respond(f"⚠️ Failed to generate {period.lower()} digest: {e}")
 
     # Natural language query -> Conversational Analytics Agent
     # If the response completes within 20s, return synchronously.
