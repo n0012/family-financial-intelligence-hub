@@ -486,16 +486,7 @@ scored AS (
         END AS account_class,
         ROUND(ABS(a.current_balance), 2) AS current_balance,
         ROUND(a.credit_limit, 2) AS credit_limit,
-        COALESCE(
-            a.interest_rate,
-            CASE
-                WHEN LOWER(a.subtype_name) IN ('heloc', 'home_equity', 'home_equity_line_of_credit') 
-                     OR LOWER(a.display_name) LIKE '%heloc%' OR LOWER(a.display_name) LIKE '%home equity%' THEN 0.0675
-                WHEN LOWER(a.subtype_name) IN ('mortgage') OR LOWER(a.display_name) LIKE '%mortgage%' THEN 0.0350
-                WHEN LOWER(a.subtype_name) IN ('loan', 'student_loan', 'auto_loan', 'personal_loan') THEN 0.0750
-                ELSE NULL
-            END
-        ) AS apr,
+        a.interest_rate AS apr,
         tx.last_tx_date,
         COALESCE(tx.tx_total, 0) AS tx_total,
         COALESCE(tx.tx_45d, 0) AS tx_45d,
@@ -574,7 +565,7 @@ SELECT
     institution_tx_count,
     updated_at
 FROM `family_finance.v_account_lifecycle`
-WHERE account_class IN ('HOME_EQUITY_LINE', 'MORTGAGE', 'OTHER_LOAN', 'TERM_LOAN')
+WHERE account_class IN ('HOME_EQUITY_LINE', 'MORTGAGE', 'OTHER_LOAN')
    OR (account_class = 'CREDIT_CARD' AND current_balance > 0 AND apr > 0)
 ORDER BY 
     CASE 
@@ -991,6 +982,7 @@ target_sweep_debt AS (
     FROM `family_finance.v_debt_daily_cost`
     WHERE (debt_type = 'HELOC' OR (debt_type IN ('CREDIT_CARD', 'OTHER_LOAN') AND apr > 0.05))
       AND current_balance > 0
+      AND (is_primary_active = TRUE OR lifecycle_status = 'PRIMARY')
     ORDER BY apr DESC, current_balance DESC
     LIMIT 1
 ),

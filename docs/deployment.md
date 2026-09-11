@@ -123,7 +123,50 @@ The entire system is designed to operate within Google Cloud's **Always Free Tie
 
 ---
 
-## 8. Local Development & Testing
+## 8. Security & Privacy Architecture
+
+FinSage is built from the ground up for strict family financial confidentiality:
+
+* **Zero Public Ingress**: The Cloud Run webhook worker operates with `--ingress internal` and `--no-allow-unauthenticated`. Inbound Google Chat interactions are ingested via **Cloud Pub/Sub pull subscriptions**, ensuring zero open HTTP ports or public endpoints exposed to the internet.
+* **Confidential Secret Storage**: Monarch credentials, MFA secrets, and API keys reside in **Google Cloud Secret Manager**. Secrets are fetched via Application Default Credentials (ADC) in memory and never logged or written to disk.
+* **Zero-PII Git Standard**: Real account numbers, balances, merchant addresses, lender identities, and household names are strictly prohibited in git commits, automated tests, and documentation.
+* **Guarded Financial Mutations**: While FinSage can recategorize transactions, split line items, and add notes, all mutations enforce an interactive **Two-Phase Confirmation** flow in Google Chat. The bot will never alter Monarch Money records without explicit user approval.
+* **Deterministic Isolation**: Calculations (balances, burns, APRs, debt carry, safety buffers) are computed strictly in deterministic BigQuery SQL. LLMs (Gemini Flash) are never permitted to estimate or hallucinate financial figures.
+
+---
+
+## 9. Architectural Boundaries
+
+```
+[Monarch Money API]
+       │
+       ▼ (Automated Pull / Ingestion)
+[Cloud Run Ingestion Service]
+       │
+       ▼ (Append / Upsert)
+[BigQuery Raw Storage]
+ ├── raw_transactions
+ ├── raw_accounts
+ └── raw_categories
+       │
+       ▼ (Deterministic SQL Transformations)
+[18+ Analytical Views]
+ ├── v_fixed_overhead_burn
+ ├── v_debt_daily_cost & v_debt_summary
+ ├── v_paycheck_surplus_allocation
+ └── v_active_subscriptions
+       │
+       ├─────────────────────────────────┐
+       ▼ (Proactive Rule Engines)         ▼ (Advisory Queries & Tools)
+[Scheduled Daily Alerts Job]        [Chat Advisor (Gemini 2.5 Flash)]
+       │                                 ▲ (Pub/Sub Pull)
+       ▼ (Webhook Dispatch)              │
+[Google Chat Space / Direct Message / Two-Phase Mutation Approval]
+```
+
+---
+
+## 10. Local Development & Testing
 
 Run tests and style checks locally:
 
@@ -138,6 +181,6 @@ pip install -r requirements.txt -r requirements-dev.txt
 # Run lint checks
 ./.venv/bin/ruff check .
 
-# Run pytest test suite (148 tests)
+# Run pytest test suite (151 tests)
 PYTHONPATH=. ./.venv/bin/pytest -v
 ```

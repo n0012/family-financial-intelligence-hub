@@ -1,6 +1,6 @@
 # BigQuery Analytical Views & Data Model
 
-FinSage decouples transaction ingestion from financial intelligence using **Google BigQuery** GoogleSQL views. All mathematical computations—such as compounding liability interest, subscription price creep, utility seasonality, and paycheck sweeps—are performed deterministically in SQL to eliminate AI arithmetic hallucinations.
+FinSage decouples transaction ingestion from financial intelligence using **Google BigQuery** GoogleSQL views. All mathematical computations—such as daily liability interest carry, subscription price creep, utility seasonality, and paycheck sweeps—are performed deterministically in SQL to eliminate AI arithmetic hallucinations.
 
 ---
 
@@ -87,10 +87,10 @@ flowchart TD
 ## 2. Account Lifecycle & Multi-Facility Debt Views
 
 ### `v_account_lifecycle`
-Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity recency, non-zero balance, and transaction count. Resolves duplicate accounts caused by bank platform migrations and mergers. Also delineates `debt_type` across `MORTGAGE`, `HELOC`, `CREDIT_CARD`, and `OTHER_LOAN` with fallback APRs (`3.50%` mortgage, `6.75%` HELOC, `7.50%` general debt).
+Dynamically classifies accounts as `PRIMARY` vs `SUPERSEDED` based on activity recency, non-zero balance, and transaction count. Resolves duplicate accounts caused by bank platform migrations and mergers. Also delineates `account_class` across `MORTGAGE`, `HOME_EQUITY_LINE`, `CREDIT_CARD`, and `OTHER_LOAN` passing through verified APRs from Monarch and configuration overrides, flagging `is_apr_estimated` when estimated.
 
 ### `v_debt_daily_cost`
-Computes the exact daily compounding cost and monthly carrying cost across all active liability facilities (Mortgage, HELOC, Loans, Revolving Credit):
+Computes the exact daily interest cost and monthly carrying cost across all active liability facilities (Mortgage, HELOC, Loans, Revolving Credit):
 $$\text{daily\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{365}$$
 $$\text{monthly\_interest\_cost} = \frac{\text{current\_balance} \times \text{apr}}{12}$$
 

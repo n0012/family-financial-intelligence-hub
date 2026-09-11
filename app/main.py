@@ -1194,20 +1194,31 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         except Exception as e:
             return respond(f"⚠️ Sync failed: {e}")
 
-    # Command: /alerts
-    if clean_text.lower().startswith(("/alerts", "alerts")):
+    # Command: /brief, /alerts
+    is_brief_or_alerts_intent = clean_text.lower().startswith(("/brief", "brief", "/alerts", "alerts")) or any(
+        phrase in lower_text for phrase in ["morning brief", "daily brief", "daily synopsis", "morning synopsis"]
+    )
+    if is_brief_or_alerts_intent:
         try:
             scan_res = await execute_alert_scan(user_email=user_email)
             alerts_list = scan_res.get("alerts", [])
+            synopsis = scan_res.get("brief_synopsis")
             active_alerts = [a for a in alerts_list if a.get("type") != "QUERY_ERROR"]
-            if not active_alerts:
-                return respond("✅ No active financial anomalies or spending leaks detected right now!")
-            card_payload = build_chat_card_v2(active_alerts)
-            return respond(
-                card_payload.get("text", "🔔 *FinSage*: Alerts Scan completed."), cards_v2=card_payload.get("cardsV2")
-            )
+            if any(term in lower_text for term in ["brief", "synopsis"]):
+                card_payload = build_chat_card_v2(active_alerts, synopsis=synopsis)
+                return respond(
+                    card_payload.get("text", "🌅 *FinSage Morning Financial Synopsis*"),
+                    cards_v2=card_payload.get("cardsV2"),
+                )
+            else:
+                if not active_alerts:
+                    return respond("✅ No active financial anomalies or spending leaks detected right now!")
+                card_payload = build_chat_card_v2(active_alerts)
+                return respond(
+                    card_payload.get("text", "🔔 *FinSage*: Alerts Scan completed."), cards_v2=card_payload.get("cardsV2")
+                )
         except Exception as e:
-            return respond(f"⚠️ Alert scan failed: {e}")
+            return respond(f"⚠️ Brief / Alert scan failed: {e}")
 
     # Command: /digest [weekly|monthly] or natural digest intent
     is_digest_intent = lower_text.startswith(("/digest", "digest")) or any(
