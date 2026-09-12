@@ -46,7 +46,7 @@ steps:
       - '--cpu'
       - '1'
       - '--set-env-vars'
-      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION},ENABLE_CHAT_PULL_WORKER=true,CHAT_SUBSCRIPTION=monarch-chat-sub'
+      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION},ENABLE_CHAT_PULL_WORKER=true,CHAT_SUBSCRIPTION=monarch-chat-sub,VERTEX_MEMORY_BANK_NAME=${_MEMORY_BANK},DEFAULT_USER_EMAIL=${_DEFAULT_USER_EMAIL}'
       - '--set-secrets'
       - 'MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest,ALERT_WEBHOOK_URL=alert-webhook-url:latest,GEMINI_API_KEY=gemini-api-key:latest'
       - '--no-allow-unauthenticated'
@@ -100,6 +100,8 @@ substitutions:
   _SERVICE: 'monarch-gemini-wrapper'
   _DATASET_ID: 'family_finance'
   _COMMIT_SHA: 'latest'
+  _MEMORY_BANK: ''
+  _DEFAULT_USER_EMAIL: 'user@example.com'
 
 images:
   - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}'

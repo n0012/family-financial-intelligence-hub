@@ -573,7 +573,7 @@ class TestMonarchMutations(unittest.TestCase):
                 },
             },
             "chat": {
-                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "user": {"email": "user@example.com", "displayName": "Test User"},
                 "buttonClickedPayload": {
                     "space": {"name": "spaces/testSpace123"},
                     "message": {
@@ -709,7 +709,7 @@ class TestMonarchMutations(unittest.TestCase):
                 },
             },
             "chat": {
-                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "user": {"email": "user@example.com", "displayName": "Test User"},
                 "buttonClickedPayload": {
                     "space": {"name": "spaces/spaceCancel"},
                     "message": {
@@ -922,7 +922,7 @@ class TestMonarchMutations(unittest.TestCase):
                 }
             },
             "chat": {
-                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "user": {"email": "user@example.com", "displayName": "Test User"},
                 "buttonClickedPayload": {
                     "space": {"name": "spaces/spaceBatch"},
                     "message": {
@@ -1039,7 +1039,7 @@ class TestMonarchMutations(unittest.TestCase):
                 }
             },
             "chat": {
-                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "user": {"email": "user@example.com", "displayName": "Test User"},
                 "buttonClickedPayload": {
                     "space": {"name": "spaces/spaceRec"},
                     "message": {

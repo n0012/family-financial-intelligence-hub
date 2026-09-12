@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS `family_finance.pending_batches` (
     merchant_name STRING NOT NULL,
     category_id STRING NOT NULL,
     category_name STRING NOT NULL,
-    transaction_ids ARRAY<STRING> NOT NULL,
+    transaction_ids ARRAY<STRING>,
     transaction_count INT64 NOT NULL,
     total_amount NUMERIC NOT NULL,
     created_at TIMESTAMP NOT NULL,
