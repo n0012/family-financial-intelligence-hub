@@ -81,8 +81,22 @@ CREATE TABLE IF NOT EXISTS `family_finance.mutation_audit_log` (
     new_value STRING,                -- JSON/string of proposed/applied state
     status STRING NOT NULL,          -- 'SUCCESS', 'REJECTED', 'FAILED', 'RATE_LIMITED', 'NOOP', 'CANCELLED'
     signature_valid BOOL,            -- TRUE if HMAC verified, FALSE if signature failed/missing, NULL if N/A
-    details STRING,                  -- notes, reason for rejection or failure
     created_at TIMESTAMP
+);
+
+-- 6. Pending Batch Recategorization Proposals
+CREATE TABLE IF NOT EXISTS `family_finance.pending_batches` (
+    batch_id STRING NOT NULL,
+    user_email STRING NOT NULL,
+    merchant_name STRING NOT NULL,
+    category_id STRING NOT NULL,
+    category_name STRING NOT NULL,
+    transaction_ids ARRAY<STRING> NOT NULL,
+    transaction_count INT64 NOT NULL,
+    total_amount NUMERIC NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    status STRING NOT NULL,          -- 'PENDING', 'PROCESSING', 'CONFIRMED', 'PARTIAL_SUCCESS', 'CANCELLED', 'FAILED'
+    signature STRING NOT NULL
 );
 
 -- ==============================================================================

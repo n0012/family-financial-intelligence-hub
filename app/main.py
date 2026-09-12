@@ -51,10 +51,13 @@ from app.memory_service import (
 from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
     CURRENT_USER_EMAIL,
+    build_batch_recategorization_cancelled_card,
+    build_batch_recategorization_success_card,
     build_recategorization_cancelled_card,
     build_recategorization_success_card,
     check_mutation_idempotency,
     check_mutation_rate_limit,
+    execute_guarded_batch_recategorization,
     execute_guarded_recategorization,
     execute_sync,
     extract_card_action_parameters,
@@ -62,9 +65,12 @@ from app.monarch_service import (
     get_live_transaction,
     get_monarch_client,
     log_mutation_audit,
+    mark_batch_status_async,
+    propose_batch_recategorization,
     propose_transaction_recategorization,
     record_mutation_idempotency,
     request_plaid_refresh,
+    verify_batch_signature,
     verify_mutation_signature,
 )
 from app.receipt_service import (
@@ -437,7 +443,10 @@ def ask_gemini_brain(
             "9. Format all currency as $X,XXX.XX.\n"
             "10. Multimodal Understanding: When the user provides images, screenshots, paystubs, statements, or compensation/outlook plans, thoroughly examine the visual data, parse every figure and projection, and integrate them directly into your financial analysis and debt paydown calculations.\n"
             "11. Live Monarch Confirmation & Plaid Tools: BigQuery is your primary historical analytical engine. If the user asks for up-to-the-minute balance checks (e.g. 'what is my balance right now?', 'did that payment post?'), call `get_live_account_balance(account_identifier)` to confirm live figures directly from Monarch. To inspect a specific transaction's pending status, call `get_live_transaction(transaction_id)`. If an institution's data appears stale, call `request_plaid_refresh(institution_name)`.\n"
-            "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix a transaction's category, call `propose_transaction_recategorization(transaction_id, new_category)`. Never attempt to mutate transactions directly; calling this tool prepares an HMAC-signed confirmation card requiring the user's interactive confirmation in Google Chat. Only propose 1 transaction at a time, and never for pending transactions.\n"
+            "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix transactions:\n"
+            "    - For recurring merchants or multiple transactions (e.g. streaming services like Netflix, Hulu, Prime Video), call `propose_batch_recategorization(merchant_name, new_category, current_category)`. This prepares an interactive confirmation card in Google Chat that allows the user to reclassify all matching transactions in a single click.\n"
+            "    - For a single specific transaction, call `propose_transaction_recategorization(transaction_id, new_category)`.\n"
+            "    - Never attempt to mutate transactions directly; both tools strictly prepare HMAC-signed confirmation cards requiring the user's interactive confirmation in Google Chat.\n"
             "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
             "15. Daily Morning Brief & Synopsis: You are equipped with `get_daily_morning_brief()` to retrieve the executive morning synopsis (liquid cash reserves, monthly fixed burn buffer, debt daily carry across Mortgage and HELOC, MTD spend pacing, and high-priority items to pay attention to today). Call this whenever the user asks for the morning brief, daily financial synopsis, or daily overview.\n"
@@ -465,6 +474,7 @@ def ask_gemini_brain(
                     get_live_transaction,
                     request_plaid_refresh,
                     propose_transaction_recategorization,
+                    propose_batch_recategorization,
                     store_user_preference,
                     snooze_spend_alert,
                     get_daily_morning_brief,
@@ -1066,6 +1076,122 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             if msg_name:
                 patch_chat_card(msg_name, [cancel_card], text="🚫 Recategorization cancelled.")
             return respond(f"🚫 Recategorization for transaction #{txn_id} was cancelled. No changes were made.")
+
+        elif action_name == "confirm_batch_recategorize":
+            batch_id = action_params.get("batch_id", "")
+            cat_id = action_params.get("category_id", "")
+            cat_name = action_params.get("category_name", "Updated Category")
+            merchant_name = action_params.get("merchant_name", "Merchant")
+            count_str = action_params.get("count", "0")
+            amt_str = action_params.get("total_amount", "0.0")
+            ts_str = action_params.get("timestamp", "0")
+            target_user = action_params.get("user_email", "unknown")
+            sig = action_params.get("signature", "")
+
+            try:
+                count = int(count_str)
+            except ValueError:
+                count = 0
+            try:
+                total_amount = float(amt_str)
+            except ValueError:
+                total_amount = 0.0
+
+            # 1. Rate Limiting Check (batch counts as 1 mutation rate token)
+            allowed, rate_msg = check_mutation_rate_limit(user_email)
+            if not allowed:
+                logger.warning(f"Batch mutation rate limit exceeded for user '{user_email}' on batch #{batch_id}")
+                log_mutation_audit(
+                    action_type="BATCH_RECATEGORIZE",
+                    target_id=batch_id,
+                    user_email=user_email,
+                    status="RATE_LIMITED",
+                    new_value=cat_name,
+                    details=rate_msg,
+                )
+                return respond(f"⛔ {rate_msg}")
+
+            # 2. Addressee Validation
+            if target_user and target_user != "unknown" and user_email.lower() != target_user.lower():
+                logger.warning(f"Batch mutation rejected: user {user_email} attempted to confirm batch assigned to {target_user}")
+                return respond(f"⛔ Only {target_user} can confirm this batch recategorization.")
+
+            # 3. Timestamp Validation
+            try:
+                ts = int(ts_str)
+            except ValueError:
+                log_mutation_audit(
+                    action_type="BATCH_RECATEGORIZE",
+                    target_id=batch_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    new_value=cat_name,
+                    signature_valid=False,
+                    details="Invalid timestamp in batch confirmation card",
+                )
+                return respond("⛔ Invalid timestamp in confirmation card.")
+
+            # 4. Cryptographic Signature Validation
+            is_valid, reason = verify_batch_signature(batch_id, cat_id, count, target_user, ts, sig)
+            if not is_valid:
+                logger.warning(f"Batch signature rejected: {reason} (batch={batch_id}, user={user_email})")
+                log_mutation_audit(
+                    action_type="BATCH_RECATEGORIZE",
+                    target_id=batch_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    new_value=cat_name,
+                    signature_valid=False,
+                    details=reason,
+                )
+                return respond(f"⛔ Batch confirmation rejected: {reason}")
+
+            # 5. Execute Guarded Batch Mutation
+            batch_result = await execute_guarded_batch_recategorization(
+                batch_id=batch_id,
+                user_email=user_email,
+            )
+
+            if batch_result.get("success"):
+                confirmed_cnt = batch_result.get("confirmed_count", count)
+                failed_cnt = batch_result.get("failed_count", 0)
+                success_card = build_batch_recategorization_success_card(
+                    batch_id=batch_id,
+                    merchant_name=merchant_name,
+                    category_name=cat_name,
+                    confirmed_count=confirmed_cnt,
+                    failed_count=failed_cnt,
+                    total_amount=total_amount,
+                )
+                patch_text = f"✅ Batch recategorization completed: {confirmed_cnt} transactions reclassified."
+                if msg_name:
+                    patch_chat_card(msg_name, [success_card], text=patch_text)
+                    return respond(
+                        f"✅ Successfully reclassified *{confirmed_cnt}* transactions for *{merchant_name}* (${total_amount:,.2f}) to *{cat_name}* in Monarch Money and BigQuery."
+                    )
+                return respond(
+                    f"✅ Successfully reclassified *{confirmed_cnt}* transactions for *{merchant_name}* (${total_amount:,.2f}) to *{cat_name}* in Monarch Money and BigQuery.",
+                    cards_v2=[success_card],
+                )
+            else:
+                err = batch_result.get("error", "Unknown batch execution error")
+                return respond(f"⚠️ Failed to execute batch recategorization for *{merchant_name}*: {err}")
+
+        elif action_name == "cancel_batch_recategorize":
+            batch_id = action_params.get("batch_id", "")
+            merchant_name = action_params.get("merchant_name", "Merchant")
+            await mark_batch_status_async(batch_id, "CANCELLED")
+            log_mutation_audit(
+                action_type="BATCH_RECATEGORIZE",
+                target_id=batch_id,
+                user_email=user_email,
+                status="CANCELLED",
+                details=f"User clicked Cancel on batch proposal for {merchant_name}",
+            )
+            cancel_card = build_batch_recategorization_cancelled_card(batch_id, merchant_name)
+            if msg_name:
+                patch_chat_card(msg_name, [cancel_card], text=f"🚫 Batch recategorization for {merchant_name} was cancelled.")
+            return respond(f"🚫 Batch recategorization proposal for *{merchant_name}* was cancelled. No changes were made.")
 
         elif action_name == "snooze_alert":
             alert_key = action_params.get("alert_key", "")
