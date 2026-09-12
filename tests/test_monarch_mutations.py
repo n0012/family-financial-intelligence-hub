@@ -730,7 +730,233 @@ class TestMonarchMutations(unittest.TestCase):
             msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
             self.assertIn("cancelled", msg["text"].lower())
 
+    def test_batch_signature_validation(self):
+        """Tests that batch signature generates and verifies with domain separation."""
+        from app.monarch_service import generate_batch_signature, verify_batch_signature
+
+        batch_id = "batch_123"
+        cat_id = "cat_subs"
+        count = 22
+        user = "test@example.com"
+        now = int(datetime.now(UTC).timestamp())
+
+        sig = generate_batch_signature(batch_id, cat_id, count, user, now)
+        valid, reason = verify_batch_signature(batch_id, cat_id, count, user, now, sig)
+        self.assertTrue(valid)
+        self.assertEqual(reason, "Valid")
+
+        # Tampered count
+        valid_tampered, reason_tampered = verify_batch_signature(batch_id, cat_id, count + 1, user, now, sig)
+        self.assertFalse(valid_tampered)
+        self.assertIn("mismatch", reason_tampered.lower())
+
+        # Expired timestamp
+        old_time = now - 90000
+        old_sig = generate_batch_signature(batch_id, cat_id, count, user, old_time)
+        valid_old, reason_old = verify_batch_signature(batch_id, cat_id, count, user, old_time, old_sig)
+        self.assertFalse(valid_old)
+        self.assertIn("expired", reason_old.lower())
+
+    def test_batch_card_builders(self):
+        """Tests card builder generation and HTML escaping for batch actions."""
+        from app.monarch_service import (
+            build_batch_recategorization_card,
+            build_batch_recategorization_cancelled_card,
+            build_batch_recategorization_success_card,
+        )
+
+        card = build_batch_recategorization_card(
+            batch_id="batch_xyz",
+            merchant_name="Netflix & Co <tag>",
+            count=22,
+            total_amount=550.22,
+            current_category="Entertainment",
+            new_category="Subscriptions",
+            category_id="cat_sub_1",
+            user_email="user@example.com",
+            timestamp=12345678,
+            signature="sig123",
+        )
+        self.assertIn("Netflix &amp; Co &lt;tag&gt;", str(card))
+        self.assertIn("$550.22", str(card))
+
+        succ_card = build_batch_recategorization_success_card(
+            batch_id="batch_xyz",
+            merchant_name="Netflix",
+            category_name="Subscriptions",
+            confirmed_count=22,
+            total_amount=550.22,
+        )
+        self.assertIn("22", str(succ_card))
+        self.assertIn("Subscriptions", str(succ_card))
+
+        cancel_card = build_batch_recategorization_cancelled_card(
+            batch_id="batch_xyz",
+            merchant_name="Netflix",
+        )
+        self.assertIn("cancelled", str(cancel_card).lower())
+
+    def test_propose_batch_recategorization_flow(self):
+        """Tests proposing a batch recategorization with mock BigQuery and category resolution."""
+        from app.monarch_service import propose_batch_recategorization_async
+
+        mock_client = AsyncMock()
+        mock_cats = {
+            "by_id": {"cat_sub_id": {"id": "cat_sub_id", "name": "Subscriptions"}},
+            "by_name": {"subscriptions": {"id": "cat_sub_id", "name": "Subscriptions"}},
+        }
+
+        mock_rows = [
+            {
+                "transaction_id": "txn_1",
+                "amount": 24.89,
+                "transaction_date": "2026-08-01",
+                "merchant_name": "Netflix",
+                "clean_merchant_name": "Netflix",
+                "category_name": "Entertainment",
+                "category_id": "cat_old",
+            },
+            {
+                "transaction_id": "txn_2",
+                "amount": 24.89,
+                "transaction_date": "2026-07-01",
+                "merchant_name": "Netflix",
+                "clean_merchant_name": "Netflix",
+                "category_name": "Entertainment",
+                "category_id": "cat_old",
+            },
+        ]
+
+        mock_bq = MagicMock()
+        mock_query_job = MagicMock()
+        mock_query_job.result.return_value = [MagicMock(items=lambda r=r: r.items()) for r in mock_rows]
+        mock_bq.query.return_value = mock_query_job
+
+        with (
+            patch("app.monarch_service.get_monarch_client", AsyncMock(return_value=mock_client)),
+            patch("app.monarch_service.get_cached_categories", AsyncMock(return_value=mock_cats)),
+            patch("app.monarch_service.get_bq_client", return_value=mock_bq),
+        ):
+            res = asyncio.run(propose_batch_recategorization_async("Netflix", "Subscriptions"))
+            self.assertEqual(res["status"], "confirmation_required")
+            self.assertEqual(res["count"], 2)
+            self.assertEqual(res["total_amount"], 49.78)
+            self.assertIn("card", res)
+
+    def test_execute_guarded_batch_recategorization(self):
+        """Tests concurrent batch update execution and BigQuery bulk update."""
+        from app.monarch_service import (
+            execute_guarded_batch_recategorization,
+            save_pending_batch_async,
+        )
+
+        batch_id = "batch_test_exec"
+        batch_record = {
+            "batch_id": batch_id,
+            "user_email": "user@example.com",
+            "merchant_name": "Netflix",
+            "category_id": "cat_sub_id",
+            "category_name": "Subscriptions",
+            "transaction_ids": ["txn_1", "txn_2", "txn_3"],
+            "transaction_count": 3,
+            "total_amount": 74.67,
+            "status": "PENDING",
+            "signature": "mock_sig",
+        }
+
+        mock_client = AsyncMock()
+        mock_client.update_transaction = AsyncMock(return_value={"id": "mock"})
+
+        mock_bq = MagicMock()
+        mock_query_job = MagicMock()
+        mock_query_job.result.return_value = []
+        mock_bq.query.return_value = mock_query_job
+
+        with (
+            patch("app.monarch_service.get_monarch_client", AsyncMock(return_value=mock_client)),
+            patch("app.monarch_service.get_bq_client", return_value=mock_bq),
+        ):
+            asyncio.run(save_pending_batch_async(batch_record))
+            res = asyncio.run(execute_guarded_batch_recategorization(batch_id, "user@example.com"))
+
+            self.assertTrue(res["success"])
+            self.assertEqual(res["confirmed_count"], 3)
+            self.assertEqual(res["failed_count"], 0)
+            self.assertEqual(mock_client.update_transaction.await_count, 3)
+
+    def test_webhook_confirm_batch_recategorize(self):
+        """Tests Google Chat webhook CARD_CLICKED confirm_batch_recategorize flow."""
+        from app.monarch_service import generate_batch_signature, save_pending_batch_async
+
+        batch_id = "batch_hook_1"
+        now = int(datetime.now(UTC).timestamp())
+        sig = generate_batch_signature(batch_id, "cat_sub_id", 2, "user@example.com", now)
+
+        batch_record = {
+            "batch_id": batch_id,
+            "user_email": "user@example.com",
+            "merchant_name": "Netflix",
+            "category_id": "cat_sub_id",
+            "category_name": "Subscriptions",
+            "transaction_ids": ["txn_1", "txn_2"],
+            "transaction_count": 2,
+            "total_amount": 49.78,
+            "status": "PENDING",
+            "signature": sig,
+        }
+
+        payload = {
+            "commonEventObject": {
+                "parameters": {
+                    "action": "confirm_batch_recategorize",
+                    "batch_id": batch_id,
+                    "category_id": "cat_sub_id",
+                    "category_name": "Subscriptions",
+                    "merchant_name": "Netflix",
+                    "count": "2",
+                    "total_amount": "49.78",
+                    "user_email": "user@example.com",
+                    "timestamp": str(now),
+                    "signature": sig,
+                }
+            },
+            "chat": {
+                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "buttonClickedPayload": {
+                    "space": {"name": "spaces/spaceBatch"},
+                    "message": {
+                        "name": "spaces/spaceBatch/messages/msgBatch.1",
+                        "thread": {"name": "spaces/spaceBatch/threads/threadBatch"},
+                    },
+                },
+            },
+        }
+
+        mock_batch_res = {
+            "success": True,
+            "batch_id": batch_id,
+            "merchant_name": "Netflix",
+            "category_name": "Subscriptions",
+            "attempted_count": 2,
+            "confirmed_count": 2,
+            "failed_count": 0,
+            "total_amount": 49.78,
+        }
+
+        with (
+            patch("app.main.execute_guarded_batch_recategorization", AsyncMock(return_value=mock_batch_res)),
+            patch("app.main.patch_chat_card", return_value=True) as mock_patch,
+            patch("app.main.log_mutation_audit") as mock_audit,
+        ):
+            resp = asyncio.run(main.google_chat_webhook(payload))
+            mock_patch.assert_called_once()
+            self.assertEqual(mock_patch.call_args[0][0], "spaces/spaceBatch/messages/msgBatch.1")
+            msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
+            self.assertIn("2", msg["text"])
+            self.assertIn("Subscriptions", msg["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

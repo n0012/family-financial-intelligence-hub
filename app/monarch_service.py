@@ -775,6 +775,44 @@ def verify_snooze_signature(
     return True, "Valid"
 
 
+def generate_batch_signature(
+    batch_id: str,
+    category_id: str,
+    count: int,
+    user_email: str,
+    timestamp: int,
+) -> str:
+    """Generates a SHA-256 HMAC signature tying batch_id, category, count, user, and timestamp."""
+    key = get_mutation_hmac_secret().encode("utf-8")
+    payload = f"batch_recat:v1:{batch_id}:{category_id}:{count}:{user_email.strip().lower()}:{timestamp}".encode()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def verify_batch_signature(
+    batch_id: str,
+    category_id: str,
+    count: int,
+    user_email: str,
+    timestamp: int,
+    signature: str,
+    max_age_seconds: int = HMAC_EXPIRATION_SECONDS,
+) -> tuple[bool, str]:
+    """Validates batch signature authenticity and timestamp freshness."""
+    if not signature:
+        return False, "Missing cryptographic signature for batch recategorization."
+    now = int(datetime.now(UTC).timestamp())
+    age = abs(now - timestamp)
+    if age > max_age_seconds:
+        return (
+            False,
+            f"Batch confirmation expired (card age: {age}s > limit: {max_age_seconds}s). Please request a fresh confirmation.",
+        )
+    expected = generate_batch_signature(batch_id, category_id, count, user_email, timestamp)
+    if not secrets.compare_digest(expected, signature):
+        return False, "Cryptographic signature mismatch. Batch parameters may have been altered."
+    return True, "Valid"
+
+
 # =============================================================================
 # PR 10: Conversational Guardrails, Idempotency & BigQuery Audit Log
 # =============================================================================
@@ -1171,6 +1209,180 @@ def build_recategorization_cancelled_card(transaction_id: str) -> dict:
     }
 
 
+def build_batch_recategorization_card(
+    batch_id: str,
+    merchant_name: str,
+    count: int,
+    total_amount: float,
+    current_category: str | None,
+    new_category: str,
+    category_id: str,
+    user_email: str,
+    timestamp: int,
+    signature: str,
+) -> dict:
+    """Builds an interactive Card v2 proposing batch recategorization for a recurring merchant/pattern."""
+    target_action = get_chat_action_target("confirm_batch_recategorize")
+    cancel_action = get_chat_action_target("cancel_batch_recategorize")
+    amt_clean = abs(float(total_amount or 0.0))
+    esc_merchant = html.escape(str(merchant_name or "Merchant"))
+    esc_current = html.escape(str(current_category or "Entertainment / Various"))
+    esc_proposed = html.escape(str(new_category or ""))
+
+    return {
+        "cardId": f"batch_recat_{batch_id}_{timestamp}",
+        "card": {
+            "header": {
+                "title": "Batch Recategorization Proposal",
+                "subtitle": f"Reclassify {count} Transactions in Bulk",
+                "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                "imageType": "CIRCLE",
+            },
+            "sections": [
+                {
+                    "header": "Batch Scope & Details",
+                    "widgets": [
+                        {
+                            "decoratedText": {
+                                "topLabel": "Merchant & Scope",
+                                "text": f"<b>{esc_merchant}</b> • <b>{count} transactions</b>",
+                                "startIcon": {"knownIcon": "STORE"},
+                            }
+                        },
+                        {
+                            "decoratedText": {
+                                "topLabel": "Total Spend",
+                                "text": f"<b>${amt_clean:,.2f}</b>",
+                                "startIcon": {"knownIcon": "DOLLAR"},
+                            }
+                        },
+                        {
+                            "decoratedText": {
+                                "topLabel": "Classification Change",
+                                "text": f"Current: <i>{esc_current}</i> → Proposed: <b>{esc_proposed}</b>",
+                                "startIcon": {"knownIcon": "CONFIRMATION_NUMBER_ICON"},
+                            }
+                        },
+                        {
+                            "buttonList": {
+                                "buttons": [
+                                    {
+                                        "text": f"Confirm Batch Update ({count} txns)",
+                                        "color": {"red": 0.12, "green": 0.53, "blue": 0.90},
+                                        "onClick": {
+                                            "action": {
+                                                "function": target_action,
+                                                "parameters": [
+                                                    {"key": "action", "value": "confirm_batch_recategorize"},
+                                                    {"key": "batch_id", "value": str(batch_id)},
+                                                    {"key": "category_id", "value": str(category_id)},
+                                                    {"key": "category_name", "value": str(new_category)},
+                                                    {"key": "merchant_name", "value": str(merchant_name)},
+                                                    {"key": "count", "value": str(count)},
+                                                    {"key": "total_amount", "value": f"{amt_clean:.2f}"},
+                                                    {"key": "user_email", "value": str(user_email)},
+                                                    {"key": "timestamp", "value": str(timestamp)},
+                                                    {"key": "signature", "value": str(signature)},
+                                                ],
+                                            }
+                                        },
+                                    },
+                                    {
+                                        "text": "Cancel",
+                                        "onClick": {
+                                            "action": {
+                                                "function": cancel_action,
+                                                "parameters": [
+                                                    {"key": "action", "value": "cancel_batch_recategorize"},
+                                                    {"key": "batch_id", "value": str(batch_id)},
+                                                    {"key": "merchant_name", "value": str(merchant_name)},
+                                                ],
+                                            }
+                                        },
+                                    },
+                                ]
+                            }
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def build_batch_recategorization_success_card(
+    batch_id: str,
+    merchant_name: str,
+    category_name: str,
+    confirmed_count: int,
+    failed_count: int = 0,
+    total_amount: float | None = None,
+) -> dict:
+    """Builds a confirmation Card v2 showing successful batch recategorization across Monarch & BigQuery."""
+    esc_cat = html.escape(str(category_name))
+    esc_merch = html.escape(str(merchant_name))
+    amt_str = f" (${abs(total_amount):,.2f})" if total_amount is not None else ""
+    status_text = (
+        f"✅ <b>{confirmed_count}</b> transactions for <b>{esc_merch}</b>{amt_str} were successfully reclassified to <b>{esc_cat}</b>."
+    )
+    if failed_count > 0:
+        status_text += f" (⚠️ {failed_count} transactions could not be updated)."
+
+    return {
+        "cardId": f"batch_recat_success_{batch_id}",
+        "card": {
+            "header": {
+                "title": "Batch Update Completed",
+                "subtitle": f"{confirmed_count} Transactions Reclassified to {esc_cat}",
+                "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                "imageType": "CIRCLE",
+            },
+            "sections": [
+                {
+                    "widgets": [
+                        {
+                            "decoratedText": {
+                                "topLabel": "Monarch Money & BigQuery Status",
+                                "text": status_text,
+                                "startIcon": {"knownIcon": "BOOKMARK"},
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+
+
+def build_batch_recategorization_cancelled_card(batch_id: str, merchant_name: str) -> dict:
+    """Builds a confirmation Card v2 acknowledging user cancellation of a batch proposal."""
+    esc_merch = html.escape(str(merchant_name))
+    return {
+        "cardId": f"batch_recat_cancel_{batch_id}",
+        "card": {
+            "header": {
+                "title": "Batch Recategorization Cancelled",
+                "subtitle": f"Merchant: {esc_merch}",
+                "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
+                "imageType": "CIRCLE",
+            },
+            "sections": [
+                {
+                    "widgets": [
+                        {
+                            "decoratedText": {
+                                "topLabel": "Monarch Money Status",
+                                "text": f"🚫 Batch proposal for <b>{esc_merch}</b> was cancelled. Action buttons deactivated.",
+                                "startIcon": {"knownIcon": "DESCRIPTION"},
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+
+
 async def propose_transaction_recategorization_async(
     transaction_id: str,
     new_category: str,
@@ -1331,6 +1543,366 @@ async def execute_guarded_recategorization(
             "transaction_id": transaction_id,
             "error": str(e),
         }
+
+
+# -------------------------------------------------------------------------
+# Batch Recategorization Infrastructure (PR: 1-Click Bulk Fix)
+# -------------------------------------------------------------------------
+
+_PENDING_BATCHES_CACHE: dict[str, dict] = {}
+_BATCH_CACHE_LOCK = asyncio.Lock()
+
+
+async def save_pending_batch_async(batch: dict) -> None:
+    """Saves a pending batch proposal into memory cache and BigQuery."""
+    batch_id = batch["batch_id"]
+    async with _BATCH_CACHE_LOCK:
+        _PENDING_BATCHES_CACHE[batch_id] = batch
+
+    def _save_to_bq():
+        try:
+            bq = get_bq_client(BQ_PROJECT_ID)
+            ddl = f"""
+            CREATE TABLE IF NOT EXISTS `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.pending_batches` (
+                batch_id STRING NOT NULL,
+                user_email STRING NOT NULL,
+                merchant_name STRING NOT NULL,
+                category_id STRING NOT NULL,
+                category_name STRING NOT NULL,
+                transaction_ids ARRAY<STRING> NOT NULL,
+                transaction_count INT64 NOT NULL,
+                total_amount NUMERIC NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                status STRING NOT NULL,
+                signature STRING NOT NULL
+            )
+            """
+            bq.query(ddl).result()
+
+            insert_sql = f"""
+            INSERT INTO `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.pending_batches`
+            (batch_id, user_email, merchant_name, category_id, category_name, transaction_ids, transaction_count, total_amount, created_at, status, signature)
+            VALUES (
+                @batch_id, @user_email, @merchant_name, @category_id, @category_name, @txn_ids, @count, @amount, CURRENT_TIMESTAMP(), 'PENDING', @sig
+            )
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("batch_id", "STRING", batch_id),
+                    bigquery.ScalarQueryParameter("user_email", "STRING", batch.get("user_email", "unknown")),
+                    bigquery.ScalarQueryParameter("merchant_name", "STRING", batch.get("merchant_name", "")),
+                    bigquery.ScalarQueryParameter("category_id", "STRING", batch.get("category_id", "")),
+                    bigquery.ScalarQueryParameter("category_name", "STRING", batch.get("category_name", "")),
+                    bigquery.ArrayQueryParameter("txn_ids", "STRING", batch.get("transaction_ids", [])),
+                    bigquery.ScalarQueryParameter("count", "INT64", int(batch.get("transaction_count", 0))),
+                    bigquery.ScalarQueryParameter("amount", "NUMERIC", float(batch.get("total_amount", 0.0))),
+                    bigquery.ScalarQueryParameter("sig", "STRING", batch.get("signature", "")),
+                ]
+            )
+            bq.query(insert_sql, job_config=job_config).result()
+        except Exception as e:
+            logger.warning(f"Could not persist batch #{batch_id} to BigQuery pending_batches: {e}")
+
+    await asyncio.to_thread(_save_to_bq)
+
+
+async def get_pending_batch_async(batch_id: str) -> dict | None:
+    """Retrieves a pending batch proposal by ID from memory cache or BigQuery."""
+    async with _BATCH_CACHE_LOCK:
+        if batch_id in _PENDING_BATCHES_CACHE:
+            return _PENDING_BATCHES_CACHE[batch_id]
+
+    def _read_from_bq():
+        try:
+            bq = get_bq_client(BQ_PROJECT_ID)
+            sql = f"""
+            SELECT batch_id, user_email, merchant_name, category_id, category_name, transaction_ids, transaction_count, total_amount, status, signature
+            FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.pending_batches`
+            WHERE batch_id = @batch_id
+            LIMIT 1
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("batch_id", "STRING", batch_id)]
+            )
+            results = list(bq.query(sql, job_config=job_config).result())
+            if results:
+                row = dict(results[0].items())
+                return {
+                    "batch_id": row["batch_id"],
+                    "user_email": row["user_email"],
+                    "merchant_name": row["merchant_name"],
+                    "category_id": row["category_id"],
+                    "category_name": row["category_name"],
+                    "transaction_ids": list(row["transaction_ids"]),
+                    "transaction_count": int(row["transaction_count"]),
+                    "total_amount": float(row["total_amount"]),
+                    "status": row["status"],
+                    "signature": row["signature"],
+                }
+        except Exception as e:
+            logger.warning(f"Could not read batch #{batch_id} from BigQuery: {e}")
+        return None
+
+    res = await asyncio.to_thread(_read_from_bq)
+    if res:
+        async with _BATCH_CACHE_LOCK:
+            _PENDING_BATCHES_CACHE[batch_id] = res
+    return res
+
+
+async def mark_batch_status_async(batch_id: str, status: str) -> None:
+    """Updates the lifecycle status of a batch proposal."""
+    async with _BATCH_CACHE_LOCK:
+        if batch_id in _PENDING_BATCHES_CACHE:
+            _PENDING_BATCHES_CACHE[batch_id]["status"] = status
+
+    def _update_bq():
+        try:
+            bq = get_bq_client(BQ_PROJECT_ID)
+            sql = f"""
+            UPDATE `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.pending_batches`
+            SET status = @status
+            WHERE batch_id = @batch_id
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("status", "STRING", status),
+                    bigquery.ScalarQueryParameter("batch_id", "STRING", batch_id),
+                ]
+            )
+            bq.query(sql, job_config=job_config).result()
+        except Exception as e:
+            logger.warning(f"Could not update batch #{batch_id} status in BigQuery: {e}")
+
+    await asyncio.to_thread(_update_bq)
+
+
+async def propose_batch_recategorization_async(
+    merchant_name: str,
+    new_category: str,
+    current_category: str | None = None,
+) -> dict:
+    """
+    Finds misclassified non-pending transactions matching merchant_name in BigQuery,
+    constructs an HMAC-signed batch proposal, and prepares the Google Chat interactive Card v2.
+    """
+    clean_merchant = str(merchant_name).strip()
+    if not clean_merchant:
+        return {"status": "error", "message": "Merchant name cannot be empty."}
+
+    client = await get_monarch_client()
+    cat_match = await resolve_category(new_category, client=client)
+    if not cat_match:
+        cats = await get_cached_categories(client=client)
+        sample_cats = sorted({c["name"] for c in cats.get("by_id", {}).values()})[:10]
+        return {
+            "status": "error",
+            "message": f"Category '{new_category}' is not recognized in Monarch Money. Available categories include: {', '.join(sample_cats)}.",
+        }
+
+    new_cat_id = cat_match["id"]
+    new_cat_name = cat_match["name"]
+
+    def _query_txns():
+        bq = get_bq_client(BQ_PROJECT_ID)
+        pattern = f"%{clean_merchant.lower()}%"
+        curr_filter = ""
+        params = [
+            bigquery.ScalarQueryParameter("pattern", "STRING", pattern),
+            bigquery.ScalarQueryParameter("new_cat_id", "STRING", new_cat_id),
+        ]
+        if current_category:
+            curr_filter = "AND LOWER(category_name) = LOWER(@curr_cat)"
+            params.append(bigquery.ScalarQueryParameter("curr_cat", "STRING", current_category.strip()))
+
+        sql = f"""
+        SELECT transaction_id, amount, transaction_date, merchant_name, clean_merchant_name, category_name, category_id
+        FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions`
+        WHERE (
+            LOWER(COALESCE(clean_merchant_name, merchant_name, '')) LIKE @pattern
+        )
+        AND pending IS NOT TRUE
+        AND (category_id != @new_cat_id OR category_id IS NULL)
+        {curr_filter}
+        ORDER BY transaction_date DESC
+        LIMIT 500
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        return [dict(row.items()) for row in bq.query(sql, job_config=job_config).result()]
+
+    txns = await asyncio.to_thread(_query_txns)
+    if not txns:
+        return {
+            "status": "noop",
+            "message": f"No non-pending transactions found matching merchant '{clean_merchant}' needing reclassification to '{new_cat_name}'.",
+        }
+
+    txn_ids = [str(t["transaction_id"]) for t in txns]
+    total_amount = sum(abs(float(t.get("amount") or 0.0)) for t in txns)
+    batch_id = uuid.uuid4().hex[:12]
+    user_email = CURRENT_USER_EMAIL.get()
+    timestamp = int(datetime.now(UTC).timestamp())
+    sig = generate_batch_signature(batch_id, new_cat_id, len(txn_ids), user_email, timestamp)
+
+    batch_record = {
+        "batch_id": batch_id,
+        "user_email": user_email,
+        "merchant_name": clean_merchant,
+        "category_id": new_cat_id,
+        "category_name": new_cat_name,
+        "transaction_ids": txn_ids,
+        "transaction_count": len(txn_ids),
+        "total_amount": float(total_amount),
+        "created_at": datetime.now(UTC).isoformat(),
+        "status": "PENDING",
+        "signature": sig,
+    }
+    await save_pending_batch_async(batch_record)
+
+    card = build_batch_recategorization_card(
+        batch_id=batch_id,
+        merchant_name=clean_merchant,
+        count=len(txn_ids),
+        total_amount=total_amount,
+        current_category=current_category or txns[0].get("category_name"),
+        new_category=new_cat_name,
+        category_id=new_cat_id,
+        user_email=user_email,
+        timestamp=timestamp,
+        signature=sig,
+    )
+    CURRENT_PROPOSED_CARD.set(card)
+
+    return {
+        "status": "confirmation_required",
+        "batch_id": batch_id,
+        "merchant": clean_merchant,
+        "count": len(txn_ids),
+        "total_amount": total_amount,
+        "proposed_category": new_cat_name,
+        "card": card,
+        "message": f"Batch confirmation card generated for {len(txn_ids)} transactions (${total_amount:,.2f}) matching '{clean_merchant}'. Awaiting user confirmation in Google Chat.",
+    }
+
+
+def propose_batch_recategorization(
+    merchant_name: str,
+    new_category: str,
+    current_category: str | None = None,
+) -> str:
+    """
+    Tool: Proposes batch updating misclassified transactions for a recurring merchant/pattern in Monarch Money.
+    Strictly generates an interactive Google Chat confirmation card requiring user approval.
+    Never executes mutations directly.
+    """
+    try:
+        res = _run_async(propose_batch_recategorization_async(merchant_name, new_category, current_category))
+        if isinstance(res, dict) and res.get("card"):
+            CURRENT_PROPOSED_CARD.set(res["card"])
+        return json.dumps(res, default=str)
+    except Exception as e:
+        logger.error(f"Error proposing batch recategorization for '{merchant_name}': {e}", exc_info=True)
+        return json.dumps({"status": "error", "message": f"Failed to propose batch update: {str(e)}"})
+
+
+async def execute_guarded_batch_recategorization(
+    batch_id: str,
+    user_email: str | None = None,
+) -> dict:
+    """
+    Executes an approved batch recategorization across Monarch Money with bounded concurrency (semaphore=5)
+    and executes an atomic bulk update in BigQuery for confirmed transactions.
+    """
+    batch = await get_pending_batch_async(batch_id)
+    if not batch:
+        return {"success": False, "error": f"Pending batch #{batch_id} not found or expired."}
+    if batch.get("status") != "PENDING":
+        return {
+            "success": False,
+            "error": f"Batch #{batch_id} is in status '{batch.get('status')}' and cannot be executed.",
+        }
+
+    await mark_batch_status_async(batch_id, "PROCESSING")
+    cat_id = batch["category_id"]
+    cat_name = batch["category_name"]
+    txn_ids = batch["transaction_ids"]
+    merchant_name = batch.get("merchant_name", "Merchant")
+
+    client = await get_monarch_client()
+    sem = asyncio.Semaphore(5)
+
+    async def _update_single(txn_id: str):
+        async with sem:
+            for attempt in range(2):
+                try:
+                    await client.update_transaction(
+                        transaction_id=str(txn_id),
+                        category_id=str(cat_id),
+                    )
+                    return txn_id, True, None
+                except Exception as e:
+                    if attempt == 1:
+                        return txn_id, False, str(e)
+                    await asyncio.sleep(0.5)
+
+    results = await asyncio.gather(*(_update_single(tid) for tid in txn_ids))
+    confirmed_ids = [tid for tid, ok, _ in results if ok]
+    failed_items = [{"id": tid, "error": err} for tid, ok, err in results if not ok]
+
+    # Bulk update BigQuery for confirmed transactions
+    if confirmed_ids:
+        def _bq_bulk_update():
+            try:
+                bq = get_bq_client(BQ_PROJECT_ID)
+                update_sql = f"""
+                UPDATE `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions`
+                SET category_id = @cat_id,
+                    category_name = @cat_name,
+                    updated_at = CURRENT_TIMESTAMP()
+                WHERE transaction_id IN UNNEST(@confirmed_ids)
+                """
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("cat_id", "STRING", str(cat_id)),
+                        bigquery.ScalarQueryParameter("cat_name", "STRING", str(cat_name)),
+                        bigquery.ArrayQueryParameter("confirmed_ids", "STRING", confirmed_ids),
+                    ]
+                )
+                bq.query(update_sql, job_config=job_config).result()
+            except Exception as bq_err:
+                logger.warning(f"BigQuery bulk update for batch #{batch_id} encountered non-fatal error: {bq_err}")
+
+        await asyncio.to_thread(_bq_bulk_update)
+
+    final_status = "CONFIRMED" if not failed_items else ("PARTIAL_SUCCESS" if confirmed_ids else "FAILED")
+    await mark_batch_status_async(batch_id, final_status)
+
+    log_mutation_audit(
+        action_type="BATCH_RECATEGORIZE",
+        target_id=batch_id,
+        user_email=user_email or batch.get("user_email") or "unknown",
+        status="SUCCESS" if not failed_items else ("PARTIAL_SUCCESS" if confirmed_ids else "FAILED"),
+        previous_value=f"{len(txn_ids)} txns for {merchant_name}",
+        new_value=cat_name,
+        signature_valid=True,
+        details=json.dumps({
+            "attempted": len(txn_ids),
+            "succeeded": len(confirmed_ids),
+            "failed_count": len(failed_items),
+            "failed_samples": failed_items[:5],
+        }),
+    )
+
+    return {
+        "success": len(confirmed_ids) > 0,
+        "batch_id": batch_id,
+        "merchant_name": merchant_name,
+        "category_name": cat_name,
+        "attempted_count": len(txn_ids),
+        "confirmed_count": len(confirmed_ids),
+        "failed_count": len(failed_items),
+        "total_amount": batch.get("total_amount"),
+    }
 
 
 def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str, str]]:
