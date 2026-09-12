@@ -3,6 +3,7 @@ Unit tests for PR 4 Monarch Money mutation guards, HMAC signing, and confirmatio
 """
 
 import asyncio
+import json
 import unittest
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -954,6 +955,132 @@ class TestMonarchMutations(unittest.TestCase):
             msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
             self.assertIn("2", msg["text"])
             self.assertIn("Subscriptions", msg["text"])
+
+    def test_find_next_recategorization_recommendation(self):
+        """Tests scanning BigQuery for next high-confidence batch recommendation."""
+        from app.monarch_service import (
+            find_next_recategorization_recommendation_async,
+            get_recategorization_recommendations,
+        )
+
+        mock_bq = MagicMock()
+        mock_job = MagicMock()
+        mock_rows = [
+            {
+                "merchant": "Prime Video",
+                "current_category": "Entertainment & Recreation",
+                "target_category": "Subscriptions",
+                "count": 88,
+                "total_amount": 725.74,
+            }
+        ]
+        mock_job.result.return_value = [MagicMock(items=lambda r=r: r.items()) for r in mock_rows]
+        mock_bq.query.return_value = mock_job
+
+        with patch("app.monarch_service.get_bq_client", return_value=mock_bq):
+            rec = asyncio.run(find_next_recategorization_recommendation_async(exclude_merchant="Netflix"))
+            self.assertIsNotNone(rec)
+            self.assertEqual(rec["merchant"], "Prime Video")
+            self.assertEqual(rec["count"], 88)
+            self.assertEqual(rec["target_category"], "Subscriptions")
+
+            # Test sync tool wrapper
+            tool_output = json.loads(get_recategorization_recommendations(exclude_merchant="Netflix"))
+            self.assertEqual(tool_output["status"], "found")
+            self.assertEqual(tool_output["recommendation"]["merchant"], "Prime Video")
+
+    def test_batch_success_card_with_next_recommendation(self):
+        """Tests that the success card renders the next recommendation section."""
+        from app.monarch_service import build_batch_recategorization_success_card
+
+        next_rec = {
+            "merchant": "Prime Video",
+            "current_category": "Entertainment & Recreation",
+            "target_category": "Subscriptions",
+            "count": 88,
+            "total_amount": 725.74,
+        }
+
+        card = build_batch_recategorization_success_card(
+            batch_id="b123",
+            merchant_name="Netflix",
+            category_name="Subscriptions",
+            confirmed_count=21,
+            total_amount=521.41,
+            next_recommendation=next_rec,
+        )
+        card_str = json.dumps(card)
+        self.assertIn("Next Recommended Batch", card_str)
+        self.assertIn("Prime Video", card_str)
+        self.assertIn("88", card_str)
+        self.assertIn("725.74", card_str)
+
+    def test_webhook_confirm_batch_with_recommendation_followup(self):
+        """Tests that confirming a batch recategorization includes the next suggestion in chat."""
+        from app.monarch_service import generate_batch_signature
+
+        batch_id = "batch_hook_rec"
+        now = int(datetime.now(UTC).timestamp())
+        sig = generate_batch_signature(batch_id, "cat_sub_id", 21, "user@example.com", now)
+
+        payload = {
+            "commonEventObject": {
+                "parameters": {
+                    "action": "confirm_batch_recategorize",
+                    "batch_id": batch_id,
+                    "category_id": "cat_sub_id",
+                    "category_name": "Subscriptions",
+                    "merchant_name": "Netflix",
+                    "count": "21",
+                    "total_amount": "521.41",
+                    "user_email": "user@example.com",
+                    "timestamp": str(now),
+                    "signature": sig,
+                }
+            },
+            "chat": {
+                "user": {"email": "user@example.com", "displayName": "Nick"},
+                "buttonClickedPayload": {
+                    "space": {"name": "spaces/spaceRec"},
+                    "message": {
+                        "name": "spaces/spaceRec/messages/msgRec.1",
+                        "thread": {"name": "spaces/spaceRec/threads/threadRec"},
+                    },
+                },
+            },
+        }
+
+        mock_batch_res = {
+            "success": True,
+            "batch_id": batch_id,
+            "merchant_name": "Netflix",
+            "category_name": "Subscriptions",
+            "attempted_count": 21,
+            "confirmed_count": 21,
+            "failed_count": 0,
+            "total_amount": 521.41,
+        }
+
+        mock_next_rec = {
+            "merchant": "Prime Video",
+            "current_category": "Entertainment & Recreation",
+            "target_category": "Subscriptions",
+            "count": 88,
+            "total_amount": 725.74,
+        }
+
+        with (
+            patch("app.main.execute_guarded_batch_recategorization", AsyncMock(return_value=mock_batch_res)),
+            patch("app.main.find_next_recategorization_recommendation_async", AsyncMock(return_value=mock_next_rec)),
+            patch("app.main.patch_chat_card", return_value=True) as mock_patch,
+            patch("app.main.log_mutation_audit"),
+        ):
+            resp = asyncio.run(main.google_chat_webhook(payload))
+            mock_patch.assert_called_once()
+            msg = resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
+            self.assertIn("Prime Video", msg["text"])
+            self.assertIn("88", msg["text"])
+            self.assertIn("Fix Prime Video", msg["text"])
 
 
 if __name__ == "__main__":

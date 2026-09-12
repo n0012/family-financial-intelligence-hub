@@ -1317,6 +1317,7 @@ def build_batch_recategorization_success_card(
     confirmed_count: int,
     failed_count: int = 0,
     total_amount: float | None = None,
+    next_recommendation: dict | None = None,
 ) -> dict:
     """Builds a confirmation Card v2 showing successful batch recategorization across Monarch & BigQuery."""
     esc_cat = html.escape(str(category_name))
@@ -1328,6 +1329,42 @@ def build_batch_recategorization_success_card(
     if failed_count > 0:
         status_text += f" (⚠️ {failed_count} transactions could not be updated)."
 
+    sections = [
+        {
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": "Monarch Money & BigQuery Status",
+                        "text": status_text,
+                        "startIcon": {"knownIcon": "BOOKMARK"},
+                    }
+                }
+            ]
+        }
+    ]
+
+    if next_recommendation:
+        rec_m = html.escape(str(next_recommendation.get("merchant", "")))
+        rec_cnt = next_recommendation.get("count", 0)
+        rec_amt = abs(float(next_recommendation.get("total_amount", 0.0)))
+        rec_target = html.escape(str(next_recommendation.get("target_category", "")))
+        rec_cur = html.escape(str(next_recommendation.get("current_category", "")))
+        sections.append(
+            {
+                "header": "Next Recommended Batch",
+                "widgets": [
+                    {
+                        "decoratedText": {
+                            "topLabel": "High-Confidence Suggestion",
+                            "text": f"<b>{rec_m}</b> ({rec_cnt} txns • ${rec_amt:,.2f})<br><i>{rec_cur}</i> → <b>{rec_target}</b>",
+                            "bottomLabel": f"Reply 'Fix {rec_m}' to review and confirm",
+                            "startIcon": {"knownIcon": "STAR"},
+                        }
+                    }
+                ],
+            }
+        )
+
     return {
         "cardId": f"batch_recat_success_{batch_id}",
         "card": {
@@ -1337,19 +1374,7 @@ def build_batch_recategorization_success_card(
                 "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                 "imageType": "CIRCLE",
             },
-            "sections": [
-                {
-                    "widgets": [
-                        {
-                            "decoratedText": {
-                                "topLabel": "Monarch Money & BigQuery Status",
-                                "text": status_text,
-                                "startIcon": {"knownIcon": "BOOKMARK"},
-                            }
-                        }
-                    ]
-                }
-            ],
+            "sections": sections,
         },
     }
 
@@ -1903,6 +1928,133 @@ async def execute_guarded_batch_recategorization(
         "failed_count": len(failed_items),
         "total_amount": batch.get("total_amount"),
     }
+
+
+async def find_next_recategorization_recommendation_async(
+    exclude_merchant: str | None = None,
+) -> dict | None:
+    """
+    Scans BigQuery for the highest-confidence candidate merchant with misclassified
+    or fragmented transactions, prioritizing well-known digital subscriptions and
+    merchants with high historical category consensus.
+    """
+    def _query_recommendations():
+        try:
+            bq = get_bq_client(BQ_PROJECT_ID)
+            ex_pattern = f"%{str(exclude_merchant or '').strip().lower()}%" if exclude_merchant else ""
+
+            # 1. Known Streaming & Subscription services frequently misclassified under Entertainment/General
+            known_streaming_sql = fr"""
+            SELECT
+                COALESCE(clean_merchant_name, merchant_name) AS merchant,
+                category_name AS current_category,
+                'Subscriptions' AS target_category,
+                COUNT(*) AS count,
+                ROUND(SUM(ABS(amount)), 2) AS total_amount
+            FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions`
+            WHERE pending IS NOT TRUE
+              AND LOWER(category_name) NOT IN ('subscriptions', 'subscription')
+              AND (
+                  REGEXP_CONTAINS(LOWER(COALESCE(clean_merchant_name, merchant_name, '')), r'(prime video|amazon prime video|hulu|spotify|disney\+|disney plus|apple\.com/bill|youtube premium|youtube tv|peacock|paramount\+|audible|max\.com|hbomax)')
+              )
+              AND (@ex_pattern = '' OR LOWER(COALESCE(clean_merchant_name, merchant_name, '')) NOT LIKE @ex_pattern)
+            GROUP BY 1, 2
+            HAVING count >= 2
+            ORDER BY count DESC, total_amount DESC
+            LIMIT 1
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("ex_pattern", "STRING", ex_pattern)]
+            )
+            rows = list(bq.query(known_streaming_sql, job_config=job_config).result())
+            if rows:
+                r = dict(rows[0].items())
+                return {
+                    "merchant": r["merchant"],
+                    "current_category": r["current_category"],
+                    "target_category": r["target_category"],
+                    "count": int(r["count"]),
+                    "total_amount": float(r["total_amount"]),
+                    "reason": f"Known recurring digital subscription filed under {r['current_category']} instead of Subscriptions.",
+                }
+
+            # 2. General fragmentation scan: merchants with >= 3 txns where >= 60% are in a dominant category
+            # but >= 2 txns are stranded in a minority category
+            general_frag_sql = f"""
+            WITH merchant_splits AS (
+                SELECT
+                    COALESCE(clean_merchant_name, merchant_name) AS merchant,
+                    category_name,
+                    COUNT(*) AS cat_tx_count,
+                    ROUND(SUM(ABS(amount)), 2) AS cat_total_amount,
+                    SUM(COUNT(*)) OVER (PARTITION BY COALESCE(clean_merchant_name, merchant_name)) AS total_tx_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(clean_merchant_name, merchant_name)
+                        ORDER BY COUNT(*) DESC
+                    ) AS rank_order
+                FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.raw_transactions`
+                WHERE pending IS NOT TRUE
+                  AND COALESCE(clean_merchant_name, merchant_name) IS NOT NULL
+                  AND category_name IS NOT NULL
+                GROUP BY 1, 2
+            ),
+            dominant AS (
+                SELECT merchant, category_name AS dominant_category, cat_tx_count AS dominant_count, total_tx_count
+                FROM merchant_splits
+                WHERE rank_order = 1
+                  AND cat_tx_count >= 3
+            ),
+            fragmented AS (
+                SELECT 
+                    s.merchant,
+                    d.dominant_category AS target_category,
+                    s.category_name AS current_category,
+                    s.cat_tx_count AS count,
+                    s.cat_total_amount AS total_amount
+                FROM merchant_splits s
+                JOIN dominant d ON s.merchant = d.merchant
+                WHERE s.rank_order > 1
+                  AND s.cat_tx_count >= 2
+                  AND s.category_name != d.dominant_category
+                  AND (d.dominant_count * 1.0 / d.total_tx_count) >= 0.60
+            )
+            SELECT *
+            FROM fragmented
+            WHERE (@ex_pattern = '' OR LOWER(merchant) NOT LIKE @ex_pattern)
+            ORDER BY count DESC, total_amount DESC
+            LIMIT 1
+            """
+            rows2 = list(bq.query(general_frag_sql, job_config=job_config).result())
+            if rows2:
+                r2 = dict(rows2[0].items())
+                return {
+                    "merchant": r2["merchant"],
+                    "current_category": r2["current_category"],
+                    "target_category": r2["target_category"],
+                    "count": int(r2["count"]),
+                    "total_amount": float(r2["total_amount"]),
+                    "reason": f"Historical consensus: {r2['merchant']} transactions are predominantly categorized as {r2['target_category']}.",
+                }
+        except Exception as e:
+            logger.warning(f"Error querying next recategorization recommendation: {e}")
+        return None
+
+    return await asyncio.to_thread(_query_recommendations)
+
+
+def get_recategorization_recommendations(exclude_merchant: str | None = None) -> str:
+    """
+    Tool: Discovers high-confidence misclassified or fragmented transactions across recurring merchants.
+    Returns recommended batch recategorization candidates with transaction counts and spend amounts.
+    """
+    try:
+        res = _run_async(find_next_recategorization_recommendation_async(exclude_merchant))
+        if res:
+            return json.dumps({"status": "found", "recommendation": res})
+        return json.dumps({"status": "none_found", "message": "No high-confidence fragmented merchants found."})
+    except Exception as e:
+        logger.error(f"Failed to fetch recategorization recommendations: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str, str]]:

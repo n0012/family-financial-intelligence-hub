@@ -61,9 +61,11 @@ from app.monarch_service import (
     execute_guarded_recategorization,
     execute_sync,
     extract_card_action_parameters,
+    find_next_recategorization_recommendation_async,
     get_live_account_balance,
     get_live_transaction,
     get_monarch_client,
+    get_recategorization_recommendations,
     log_mutation_audit,
     mark_batch_status_async,
     propose_batch_recategorization,
@@ -446,6 +448,7 @@ def ask_gemini_brain(
             "12. Human-in-the-Loop Recategorizations: When the user requests to reclassify, recategorize, or fix transactions:\n"
             "    - For recurring merchants or multiple transactions (e.g. streaming services like Netflix, Hulu, Prime Video), call `propose_batch_recategorization(merchant_name, new_category, current_category)`. This prepares an interactive confirmation card in Google Chat that allows the user to reclassify all matching transactions in a single click.\n"
             "    - For a single specific transaction, call `propose_transaction_recategorization(transaction_id, new_category)`.\n"
+            "    - Proactive Next Recommendations: You are equipped with `get_recategorization_recommendations(exclude_merchant)`. After proposing or executing a batch recategorization, or when auditing transactions, proactively run this tool to identify the next high-confidence misclassified merchant and suggest fixing it.\n"
             "    - Never attempt to mutate transactions directly; both tools strictly prepare HMAC-signed confirmation cards requiring the user's interactive confirmation in Google Chat.\n"
             "13. Persistent User Preferences: You are equipped with `store_user_preference(preference_or_rule)` to remember the user's explicit goals, spending limits, debt acceleration targets, budget caps, or alert preferences. Whenever the user asks you to remember something, sets a budget cap, specifies a target date, or establishes a financial rule, call `store_user_preference` to persist it into their long-term Memory Bank.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
@@ -475,6 +478,7 @@ def ask_gemini_brain(
                     request_plaid_refresh,
                     propose_transaction_recategorization,
                     propose_batch_recategorization,
+                    get_recategorization_recommendations,
                     store_user_preference,
                     snooze_spend_alert,
                     get_daily_morning_brief,
@@ -1155,6 +1159,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             if batch_result.get("success"):
                 confirmed_cnt = batch_result.get("confirmed_count", count)
                 failed_cnt = batch_result.get("failed_count", 0)
+
+                # Query next high-confidence candidate to proactively suggest
+                next_rec = await find_next_recategorization_recommendation_async(exclude_merchant=merchant_name)
                 success_card = build_batch_recategorization_success_card(
                     batch_id=batch_id,
                     merchant_name=merchant_name,
@@ -1162,17 +1169,32 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                     confirmed_count=confirmed_cnt,
                     failed_count=failed_cnt,
                     total_amount=total_amount,
+                    next_recommendation=next_rec,
                 )
                 patch_text = f"✅ Batch recategorization completed: {confirmed_cnt} transactions reclassified."
+
+                rec_text = ""
+                if next_rec:
+                    rec_m = next_rec["merchant"]
+                    rec_c = next_rec["count"]
+                    rec_a = next_rec["total_amount"]
+                    rec_t = next_rec["target_category"]
+                    rec_cur = next_rec["current_category"]
+                    rec_text = (
+                        f"\n\n💡 *Next Recommended Batch:*\n"
+                        f"We found *{rec_c}* transactions for *{rec_m}* (${rec_a:,.2f}) currently filed under _{rec_cur}_ that belong in *{rec_t}*.\n"
+                        f"👉 Reply *\"Fix {rec_m}\"* to review and confirm this batch next!"
+                    )
+
+                resp_msg = (
+                    f"✅ Successfully reclassified *{confirmed_cnt}* transactions for *{merchant_name}* "
+                    f"(${total_amount:,.2f}) to *{cat_name}* in Monarch Money and BigQuery.{rec_text}"
+                )
+
                 if msg_name:
                     patch_chat_card(msg_name, [success_card], text=patch_text)
-                    return respond(
-                        f"✅ Successfully reclassified *{confirmed_cnt}* transactions for *{merchant_name}* (${total_amount:,.2f}) to *{cat_name}* in Monarch Money and BigQuery."
-                    )
-                return respond(
-                    f"✅ Successfully reclassified *{confirmed_cnt}* transactions for *{merchant_name}* (${total_amount:,.2f}) to *{cat_name}* in Monarch Money and BigQuery.",
-                    cards_v2=[success_card],
-                )
+                    return respond(resp_msg)
+                return respond(resp_msg, cards_v2=[success_card])
             else:
                 err = batch_result.get("error", "Unknown batch execution error")
                 return respond(f"⚠️ Failed to execute batch recategorization for *{merchant_name}*: {err}")
