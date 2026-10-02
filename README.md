@@ -27,7 +27,7 @@ FinSage documentation is broken out into dedicated guides:
 | **[BigQuery Analytical Views](docs/analytical-views.md)** | Deep dive into the 18+ BigQuery models: daily debt carry math, subscription price creep, grocery-to-dining ratios, and paycheck sweep algorithms. |
 | **[Google Chat Financial Advisor](docs/chat-advisor.md)** | FinSage bot architecture, slash command reference (`/brief`, `/sweep`, `/tax`, `/digest`), multimodal receipt ingestion, and guarded mutations. |
 | **[Configuration & Custom Rates](docs/configuration.md)** | Setting baseline APRs (Mortgage, HELOC, Loans), account overrides, decommissioned accounts, and Secret Manager resolution. |
-| **[Deployment & Operations](docs/deployment.md)** | Step-by-step setup with Terraform, Google Cloud Build, Cloud Run Jobs, Cloud Scheduler, and zero-ingress Pub/Sub configuration. |
+| **[Deployment & Operations](docs/deployment.md)** | Step-by-step setup with Terraform, Google Cloud Build, Cloud Run Jobs, Cloud Scheduler, and private Pub/Sub push configuration. |
 
 ---
 
@@ -37,12 +37,12 @@ FinSage documentation is broken out into dedicated guides:
 * **Paycheck Surplus Sweep & Debt Acceleration**: Automatically models 30-day fixed overhead burn baselines plus upcoming lump-sum bills. When payroll deposits land, FinSage calculates safe checking reserves and computes the exact sweep amount to pay down high-carry debt, reporting daily, monthly, and annual compound interest saved.
 * **Multimodal Vision & Tax Ingestion**: Paste receipts or invoices directly into Google Chat. Gemini Vision extracts itemized lines, scrubs sensitive PII (SSN, EIN, card numbers), categorizes tax deductibility (Schedule C, HSA/FSA, Charities), and asymmetrically matches against posted bank debits with tip authorization handling.
 * **Guarded Mutations & Cryptographic Confirmation**: When modifying transaction categories or updating records, FinSage requires physical confirmation via interactive Google Chat Cards v2 with HMAC-SHA256 tokens and an append-only BigQuery audit trail.
-* **Zero-Ingress Perimeter Security**: Cloud Run runs with `--ingress internal` and receives chat events exclusively through an asynchronous **Google Cloud Pub/Sub** streaming pull worker (`app/chat_worker.py`). The microservice opens connections outward and exposes zero listening ports to the public internet.
-* **Always-Free Tier Efficiency**: Operates entirely within Google Cloud's **Always Free Tier** (~**$0.37 / month** total infrastructure cost).
+* **Private-Ingress Perimeter Security**: Cloud Run runs with `--ingress internal` and `--no-allow-unauthenticated`. Chat events reach it only through a **Google Cloud Pub/Sub push subscription** (`monarch-chat-push` → `/chat/pubsub`) authenticated with an OIDC token, so the service has no public endpoint.
+* **Scale-to-Zero Efficiency**: The Cloud Run service runs with `--min-instances 0` and request-based CPU, so it costs nothing while idle. Batch work runs as short Cloud Run Jobs. See the [cost profile](docs/deployment.md#7-operating-cost-profile).
 
 ---
 
-## Architectural Workflow (Zero-Ingress Posture)
+## Architectural Workflow (Private-Ingress Posture)
 
 ```mermaid
 flowchart TD
@@ -63,9 +63,9 @@ flowchart TD
         Views["Analytical Optimization Views:<br/>• v_debt_daily_cost (Daily Compounding Debt)<br/>• v_debt_summary (Aggregated Liabilities)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_food_efficiency (Groceries vs Dining)<br/>• v_micro_transaction_leakage (Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)<br/>• v_paycheck_surplus_sweep (Multi-Debt Sweep Engine)<br/>• v_tax_deductible_summary (Schedule C / HSA)"]
     end
 
-    subgraph PrivateIngestion ["Private Inbound Chat (Zero Ingress Ports)"]
+    subgraph PrivateIngestion ["Private Inbound Chat (Internal Ingress Only)"]
         Topic["Pub/Sub Topic<br/>monarch-chat-incoming"]
-        Worker["Chat Pull Worker (chat_worker.py)<br/>Outbound Streaming Pull"]
+        Worker["Cloud Run /chat/pubsub<br/>Scale-to-Zero Push Endpoint"]
     end
 
     subgraph Intelligence ["Gemini Brain & Chat Interface (FinSage)"]
@@ -88,7 +88,7 @@ flowchart TD
     AdvisorEngine -->|"HTTPS Card v2 POST"| GoogleChat
 
     GoogleChat -->|"Inbound Event"| Topic
-    Topic -->|"Streaming Pull"| Worker
+    Topic -->|"OIDC Push"| Worker
     Worker --> MultimodalVision
     MultimodalVision --> GeminiFlash
     GeminiFlash -->|"Analytical SQL"| Views
