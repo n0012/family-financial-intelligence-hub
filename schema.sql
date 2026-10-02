@@ -70,6 +70,12 @@ CREATE TABLE IF NOT EXISTS `family_finance.alert_suppression` (
     reason STRING
 );
 
+-- 4b. Daily Brief History: which findings were posted and when, so they are not repeated every morning
+CREATE TABLE IF NOT EXISTS `family_finance.brief_history` (
+    finding_key STRING NOT NULL,
+    shown_at TIMESTAMP NOT NULL
+);
+
 -- 5. Mutation & Guardrail Audit Log Table (PR 10)
 CREATE TABLE IF NOT EXISTS `family_finance.mutation_audit_log` (
     mutation_id STRING NOT NULL,

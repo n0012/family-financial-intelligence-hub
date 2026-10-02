@@ -1,6 +1,7 @@
 import asyncio
 import os
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -985,9 +986,12 @@ class TestJobCLI(unittest.TestCase):
     def test_run_alerts_delegation(self):
         from app import job
 
-        with patch("app.alerts.execute_alert_scan", return_value={"status": "success", "alert_count": 0}) as mock_scan:
+        with (
+            patch("app.daily_brief.execute_daily_brief", return_value={"status": "success"}) as mock_brief,
+            patch("app.job.run_digest", return_value={"webhook_dispatched": True}),
+        ):
             res = asyncio.run(job.run_alerts())
-            mock_scan.assert_called_once()
+            mock_brief.assert_called_once()
             self.assertEqual(res["status"], "success")
 
     def test_job_main_sync_cli(self):
@@ -1673,32 +1677,24 @@ class TestChatWorker(unittest.TestCase):
             },
         }
 
-        mock_metrics = {
-            "date": "2026-09-11",
-            "day_of_month": 11,
-            "days_in_month": 30,
-            "liquid_balance": 15000.0,
-            "fixed_burn": 6000.0,
-            "total_debt_balance": 0.0,
-            "total_daily_debt_cost": 0.0,
-            "heloc_balance": 0.0,
-            "daily_interest_cost": 0.0,
-            "mtd_spend": 2200.0,
-            "coverage_ratio": 2.5,
-            "status_code": "ON_TRACK",
-            "status_badge": "🟢 ON TRACK",
-            "status_label": "Healthy reserves",
-            "pacing_percentage": 36.7,
-            "pacing_emoji": "🟢",
-            "pacing_desc": "~$200.00/day",
-            "focus_items": ["All systems normal"],
-            "focus_items_md": ["All systems normal"],
+        brief = {
+            "date": date(2026, 9, 11),
+            "recent": None,
+            "month": None,
+            "goals": [],
+            "findings": [],
+            "trends": [],
         }
 
-        with patch("app.main.execute_alert_scan", return_value={"alerts": [], "brief_synopsis": mock_metrics}):
+        with (
+            patch("app.main.get_bq_client"),
+            patch("app.daily_brief.generate_daily_brief", return_value=brief) as mock_generate,
+        ):
             res = asyncio.run(google_chat_webhook(sample_event))
             self.assertIn("cardsV2", res)
             self.assertIn("FinSage", res["text"])
+            # On-demand views must not record findings as shown
+            self.assertIs(mock_generate.call_args.args[4], False)
 
 
 if __name__ == "__main__":

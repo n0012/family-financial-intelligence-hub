@@ -104,7 +104,8 @@ flowchart TD
 
 | Command | Action | Primary Model / Tool |
 | :--- | :--- | :--- |
-| **`/brief`** or **`/alerts`** | Renders morning financial synopsis and active spend alerts. | `v_debt_summary`, `v_spend_classification` |
+| **`/brief`** | Shows today's summarized brief: recent activity, goal pacing, the most notable new findings, and 13-week trends. | `app/daily_brief.py`, `brief_history` |
+| **`/alerts`** | Runs every spend alert check and replies with the full list. | `v_duplicate_charges`, `v_subscription_price_creep`, and others |
 | **`/sweep`** | Computes safe paycheck surplus to sweep to high-rate variable debt. | `v_paycheck_surplus_allocation` |
 | **`/tax [YYYY]`** | Displays annual tax deductibility summary (Schedule C, HSA, Charities). | `v_tax_deductible_summary` |
 | **`/digest [weekly\|monthly]`** | Generates an executive CFO performance briefing. | `v_debt_summary`, `v_spend_classification` |
