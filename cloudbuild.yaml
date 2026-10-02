@@ -23,7 +23,8 @@ steps:
       - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest'
     id: 'push-latest-image'
 
-  # 3. Deploy new revision to Cloud Run (Economical cost-controlled configuration)
+  # 3. Deploy new revision to Cloud Run (scale-to-zero, request-based billing).
+  #    Chat events arrive by Pub/Sub push to /chat/pubsub, so no always-on instance is needed.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args:
@@ -37,16 +38,18 @@ steps:
       - '--service-account'
       - 'monarch-gemini-run@${PROJECT_ID}.iam.gserviceaccount.com'
       - '--min-instances'
-      - '1'
-      - '--no-cpu-throttling'
+      - '0'
+      - '--cpu-throttling'
       - '--max-instances'
       - '1'
+      - '--timeout'
+      - '600'
       - '--memory'
       - '1Gi'
       - '--cpu'
       - '1'
       - '--set-env-vars'
-      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION},ENABLE_CHAT_PULL_WORKER=true,CHAT_SUBSCRIPTION=monarch-chat-sub,VERTEX_MEMORY_BANK_NAME=${_MEMORY_BANK},DEFAULT_USER_EMAIL=${_DEFAULT_USER_EMAIL}'
+      - 'PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION},CHAT_AUDIENCE=https://${_SERVICE}-${PROJECT_NUMBER}.${_REGION}.run.app,VERTEX_MEMORY_BANK_NAME=${_MEMORY_BANK},DEFAULT_USER_EMAIL=${_DEFAULT_USER_EMAIL}'
       - '--set-secrets'
       - 'MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest,ALERT_WEBHOOK_URL=alert-webhook-url:latest,GEMINI_API_KEY=gemini-api-key:latest'
       - '--no-allow-unauthenticated'

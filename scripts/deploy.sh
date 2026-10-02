@@ -119,25 +119,43 @@ gcloud pubsub topics add-iam-policy-binding monarch-chat-incoming \
   --project="$PROJECT_ID" \
   --quiet
 
-if ! gcloud pubsub subscriptions describe monarch-chat-sub --project="$PROJECT_ID" &>/dev/null; then
-  echo "Creating pull subscription monarch-chat-sub..."
-  gcloud pubsub subscriptions create monarch-chat-sub \
-    --topic=monarch-chat-incoming \
-    --ack-deadline=60 \
-    --project="$PROJECT_ID"
-fi
 
 # 8. Deploy Cloud Run Service (Private & Locked Down: Internal Ingress & No Unauthenticated Access)
 echo "Deploying Cloud Run service with internal ingress and strict authentication..."
+# Scale-to-zero with request-based billing: Chat events arrive by Pub/Sub push, so no always-on instance.
+CHAT_AUDIENCE="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
   --no-allow-unauthenticated \
   --ingress internal \
   --service-account "$RUN_SA" \
-  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID",ENABLE_CHAT_PULL_WORKER=true,CHAT_SUBSCRIPTION=monarch-chat-sub \
-  --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest \
+  --min-instances 0 \
+  --max-instances 1 \
+  --cpu-throttling \
+  --timeout 600 \
+  --update-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID",CHAT_AUDIENCE="$CHAT_AUDIENCE" \
+  --update-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest,GEMINI_WRAPPER_KEY=gemini-wrapper-key:latest \
   --project="$PROJECT_ID"
+
+# Pub/Sub pushes Chat events to /chat/pubsub with an OIDC token minted for the run SA
+gcloud run services add-iam-policy-binding "$SERVICE" \
+  --region "$REGION" \
+  --member="serviceAccount:$RUN_SA" \
+  --role="roles/run.invoker" \
+  --project="$PROJECT_ID" \
+  --quiet
+
+if ! gcloud pubsub subscriptions describe monarch-chat-push --project="$PROJECT_ID" &>/dev/null; then
+  echo "Creating push subscription monarch-chat-push..."
+  gcloud pubsub subscriptions create monarch-chat-push \
+    --topic=monarch-chat-incoming \
+    --push-endpoint="${CHAT_AUDIENCE}/chat/pubsub" \
+    --push-auth-service-account="$RUN_SA" \
+    --push-auth-token-audience="$CHAT_AUDIENCE" \
+    --ack-deadline=600 \
+    --project="$PROJECT_ID"
+fi
 
 # 9. Deploy Cloud Run Jobs for Batch Operations (Zero Ingress, Zero HTTP Ports)
 echo "Deploying Cloud Run Jobs for batch ingestion and alerts..."
@@ -190,7 +208,7 @@ echo "Deployment Complete! (Zero Public Ingress Posture)"
 echo "Cloud Run Service: Locked down (--ingress internal, --no-allow-unauthenticated)"
 echo "Cloud Run Jobs:    monarch-sync-job, monarch-alerts-job"
 echo "Pub/Sub Topic:     projects/$PROJECT_ID/topics/monarch-chat-incoming"
-echo "Pub/Sub Sub:       projects/$PROJECT_ID/subscriptions/monarch-chat-sub"
+echo "Pub/Sub Sub:       projects/$PROJECT_ID/subscriptions/monarch-chat-push (push -> /chat/pubsub)"
 echo ""
 echo "Next steps:"
 echo "1. Run initial BigQuery sync via private Cloud Run Job:"
