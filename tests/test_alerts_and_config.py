@@ -457,10 +457,10 @@ class TestAlerts(unittest.TestCase):
         mock_row.liquid_balance = 14250.00
         mock_row.fixed_burn = 4120.00
         mock_row.heloc_name = "Primary HELOC"
-        mock_row.heloc_balance = 325096.16
+        mock_row.heloc_balance = 250000.00
         mock_row.heloc_apr = 0.0675
-        mock_row.daily_interest_cost = 60.12
-        mock_row.monthly_interest_cost = 1828.67
+        mock_row.daily_interest_cost = 46.23
+        mock_row.monthly_interest_cost = 1405.39
         mock_row.mtd_spend = 1420.50
         mock_row.mtd_count = 18
         mock_bq.query.return_value.result.return_value = [mock_row]
@@ -490,16 +490,16 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(synopsis["liquid_balance"], 14250.00)
         self.assertEqual(synopsis["fixed_burn"], 4120.00)
         self.assertEqual(synopsis["coverage_ratio"], 3.46)
-        self.assertEqual(synopsis["heloc_balance"], 325096.16)
-        self.assertEqual(synopsis["daily_interest_cost"], 60.12)
-        self.assertEqual(synopsis["monthly_interest_cost"], 1828.67)
+        self.assertEqual(synopsis["heloc_balance"], 250000.00)
+        self.assertEqual(synopsis["daily_interest_cost"], 46.23)
+        self.assertEqual(synopsis["monthly_interest_cost"], 1405.39)
         self.assertEqual(synopsis["mtd_spend"], 1420.50)
         self.assertEqual(synopsis["daily_burn_rate"], 129.14)
 
         self.assertIn("Liquid Cash", synopsis["posture_text"])
         self.assertIn("$14,250.00", synopsis["posture_text"])
         self.assertIn("HELOC Carry", synopsis["posture_text"])
-        self.assertIn("$60.12/day", synopsis["posture_text"])
+        self.assertIn("$46.23/day", synopsis["posture_text"])
         self.assertIn("Month-to-Date Spend", synopsis["posture_text"])
 
         # Check focus attention items
@@ -522,10 +522,10 @@ class TestAlerts(unittest.TestCase):
         ]
         mock_synopsis = {
             "date": "2026-09-11",
-            "posture_text": "🏦 <b>Liquid Cash:</b> $14,250.00<br>💳 <b>HELOC Carry:</b> $60.12/day",
+            "posture_text": "🏦 <b>Liquid Cash:</b> $14,250.00<br>💳 <b>HELOC Carry:</b> $46.23/day",
             "focus_items": [
                 "🔍 <b>Price Hike:</b> Xcel Energy increased +82.9%. Audit usage.",
-                "💳 <b>HELOC Paydown:</b> Running at $60.12/day. Sweep checking surplus.",
+                "💳 <b>HELOC Paydown:</b> Running at $46.23/day. Sweep checking surplus.",
             ],
         }
 
@@ -562,10 +562,10 @@ class TestAlerts(unittest.TestCase):
         ]
         mock_synopsis = {
             "date": "2026-09-11",
-            "posture_md": "• **Liquid Reserves**: $14,250.00\n• **HELOC Daily Carry**: $60.12/day",
+            "posture_md": "• **Liquid Reserves**: $14,250.00\n• **HELOC Daily Carry**: $46.23/day",
             "focus_items_md": [
                 "**Price Hike**: Xcel Energy. Audit usage.",
-                "**HELOC Paydown**: Running at $60.12/day.",
+                "**HELOC Paydown**: Running at $46.23/day.",
             ],
         }
 

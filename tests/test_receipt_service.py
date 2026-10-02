@@ -190,7 +190,7 @@ class TestReceiptTransactionMatching(unittest.TestCase):
         mock_row = SimpleNamespace(
             transaction_id="tx_dining_99",
             account_id="acc_cc_blue",
-            account_name="Sapphire Card",
+            account_name="Rewards Card",
             transaction_date=datetime.date(2026, 8, 1),
             amount=-50.00,  # Pre-tip subtotal
             merchant_name="Bistro Central",
