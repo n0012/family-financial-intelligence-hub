@@ -34,6 +34,6 @@ output "chat_pubsub_topic" {
 }
 
 output "chat_pubsub_subscription" {
-  value       = google_pubsub_subscription.chat_sub.id
-  description = "Pub/Sub subscription for the chat pull worker."
+  value       = google_pubsub_subscription.chat_push.id
+  description = "Pub/Sub push subscription delivering Chat events to /chat/pubsub."
 }
