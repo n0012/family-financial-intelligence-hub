@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import time
+from decimal import Decimal
 from typing import Any
 
 try:
@@ -27,10 +28,13 @@ logger = logging.getLogger("monarch-gemini.alerts")
 
 
 def _safe_float(row: Any, *keys: str, default: float = 0.0) -> float:
-    """Extracts first matching numeric or numeric-string attribute or dict value."""
+    """Extracts first matching numeric or numeric-string attribute or dict value.
+
+    BigQuery returns NUMERIC columns as Decimal, so Decimal must count as numeric.
+    """
     for k in keys:
         v = row.get(k) if isinstance(row, dict) else getattr(row, k, None)
-        if isinstance(v, (int, float)):
+        if isinstance(v, (int, float, Decimal)):
             return float(v)
         if isinstance(v, str):
             try:
@@ -46,7 +50,7 @@ def _safe_str(row: Any, *keys: str, default: str = "") -> str:
         v = row.get(k) if isinstance(row, dict) else getattr(row, k, None)
         if isinstance(v, str):
             return v
-        if isinstance(v, (int, float)):
+        if isinstance(v, (int, float, Decimal)):
             return str(v)
     return default
 
