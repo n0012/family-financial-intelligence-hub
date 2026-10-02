@@ -69,7 +69,7 @@ class TestMonarchReadTools(unittest.TestCase):
                     },
                     {
                         "id": "acc_200",
-                        "displayName": "Chase Sapphire Reserve",
+                        "displayName": "Rewards Visa",
                         "institution": {"name": "Chase"},
                         "currentBalance": 1250.50,
                         "availableBalance": 18749.50,
@@ -108,7 +108,7 @@ class TestMonarchReadTools(unittest.TestCase):
                 "amount": -45.50,
                 "merchant": {"name": "Trader Joe's"},
                 "category": {"name": "Groceries"},
-                "account": {"displayName": "Chase Sapphire"},
+                "account": {"displayName": "Rewards Visa"},
                 "pending": False,
                 "isRecurring": False,
                 "notes": "Weekly produce",

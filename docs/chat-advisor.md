@@ -60,7 +60,7 @@ The legacy streaming-pull worker (`app/chat_worker.py`) is still available by se
 Gemini automatically maps user intent to BigQuery analytical views using Automatic Function Calling (AFC):
 
 * *"What is our daily debt interest cost across mortgage and HELOC right now?"*  
-  → Queries `v_debt_summary` and reports total balance ($884k), daily carry ($113.74/day), and mortgage vs HELOC breakdowns.
+  → Queries `v_debt_summary` and reports total balance, daily carry, and mortgage vs HELOC breakdowns.
 * *"Which subscriptions increased in price over the last year?"*  
   → Queries `v_subscription_price_creep` and advises on the exact annualized increase.
 * *"How much did we spend on dining out vs groceries last month?"*  
@@ -81,7 +81,7 @@ Every morning at 08:00 AM (or on-demand via `/brief`), FinSage posts a two-tier 
      `████░░░░░░ Day 12/30 (40% elapsed) • MTD Outflow: $1,440.00 (Projected: $3,600.00)`
    * **Account Posture**: Real-time checking liquidity and coverage ratio against monthly fixed burn.
    * **Multi-Facility Debt Carry**: Total liability balance and exact daily carry:  
-     `$113.74/day across Mortgage ($53.62/day) & HELOC ($60.12/day)`
+     `$95.00/day across Mortgage ($40.00/day) & HELOC ($55.00/day)`
 2. **🎯 What to Pay Attention to Today**:
    * Proactive alert cards for price hikes, duplicate charges, habit leaks, or safe paycheck sweep opportunities.
    * Interactive **7-day snooze buttons** backed by HMAC-SHA256 signatures.

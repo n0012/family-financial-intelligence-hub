@@ -254,7 +254,7 @@ class TestMonarchMutations(unittest.TestCase):
         # 3. Google Workspace Add-on Pub/Sub topic shape
         pubsub_addon_payload = {
             "commonEventObject": {
-                "invokedFunction": "projects/sagely-family-finance/topics/monarch-chat-incoming",
+                "invokedFunction": "projects/family-finance-hub/topics/monarch-chat-incoming",
                 "parameters": {
                     "action": "confirm_recategorize",
                     "transaction_id": "txn_888",
@@ -269,7 +269,7 @@ class TestMonarchMutations(unittest.TestCase):
         # 4. Google Chat direct common shape with list of key/value params
         common_chat_payload = {
             "common": {
-                "invokedFunction": "projects/sagely-family-finance/topics/monarch-chat-incoming",
+                "invokedFunction": "projects/family-finance-hub/topics/monarch-chat-incoming",
                 "parameters": [
                     {"key": "action", "value": "snooze_alert"},
                     {"key": "alert_key", "value": "price_creep:netflix"},

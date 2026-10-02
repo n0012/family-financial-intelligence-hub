@@ -464,7 +464,7 @@ async def execute_sync(days_back: int | None = 30, mfa_code: str | None = None) 
 async def get_live_account_balance_async(account_identifier: str) -> dict:
     """
     Fetches the live balance, available credit, and sync recency directly from Monarch Money.
-    `account_identifier` can be an account ID or fuzzy display name (e.g. 'HELOC', 'Checking', 'Sapphire').
+    `account_identifier` can be an account ID or fuzzy display name (e.g. 'HELOC', 'Checking', 'Visa').
     """
     client = await get_monarch_client()
     raw = await client.get_accounts()
