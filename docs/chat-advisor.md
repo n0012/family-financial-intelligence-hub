@@ -78,7 +78,7 @@ Every morning at 08:00 AM (or on-demand via `/brief`), FinSage posts a two-tier 
 
 1. **🌅 Morning Financial Synopsis**:
    * **Pacing Thermometer**: Visual ASCII bar showing month elapsed vs MTD spend velocity:  
-     `████░░░░░░ Day 12/30 (40% elapsed) • MTD Outflow: $1,440.00 (Projected: $3,600.00)`
+     `████░░░░░░ Day 12/30 (40% elapsed) • MTD Outflow: $1,440 (Projected: $3,600)`
    * **Account Posture**: Real-time checking liquidity and coverage ratio against monthly fixed burn.
    * **Multi-Facility Debt Carry**: Total liability balance and exact daily carry:  
      `$95.00/day across Mortgage ($40.00/day) & HELOC ($55.00/day)`

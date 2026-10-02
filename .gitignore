@@ -22,3 +22,6 @@ __pycache__/
 venv/
 .cm_project
 uv.lock
+
+# Private-data guard: household denylist (never commit)
+.private-denylist

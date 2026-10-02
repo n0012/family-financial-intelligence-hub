@@ -566,7 +566,7 @@ class TestMonarchMutations(unittest.TestCase):
                     "category_id": "cat_cleaning",
                     "category_name": "House Cleaning",
                     "merchant_name": "Pat Example",
-                    "amount": "185.00",
+                    "amount": "120.00",
                     "timestamp": str(now_ts),
                     "user_email": "user@example.com",
                     "signature": sig,
@@ -613,8 +613,8 @@ class TestMonarchMutations(unittest.TestCase):
             return_value={
                 "getTransaction": {
                     "id": "txn_live_001",
-                    "amount": -185.0,
-                    "date": "2026-08-09",
+                    "amount": -120.0,
+                    "date": "2026-01-15",
                     "merchant": {"name": "Pat Example"},
                     "category": {"name": "Transfer"},
                     "account": {"displayName": "Checking"},
@@ -627,8 +627,8 @@ class TestMonarchMutations(unittest.TestCase):
         txn_data = asyncio.run(get_live_transaction_async("txn_live_001"))
         self.assertTrue(txn_data["found"])
         self.assertEqual(txn_data["merchant_name"], "Pat Example")
-        self.assertEqual(txn_data["amount"], -185.0)
-        self.assertEqual(txn_data["date"], "2026-08-09")
+        self.assertEqual(txn_data["amount"], -120.0)
+        self.assertEqual(txn_data["date"], "2026-01-15")
         self.assertEqual(txn_data["category_name"], "Transfer")
 
     @patch("app.monarch_service.get_bq_client")

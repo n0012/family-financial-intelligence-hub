@@ -1,0 +1,4 @@
+#!/bin/sh
+# Public, financial repo: block personal or confidential data in staged changes.
+# Enable once per clone: git config core.hooksPath .githooks
+exec python3 "$(git rev-parse --show-toplevel)/scripts/check_private_data.py" --staged
