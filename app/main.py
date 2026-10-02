@@ -621,9 +621,7 @@ def post_to_chat_thread(
             if resp.status_code == 200:
                 return True
             else:
-                logger.warning(
-                    f"Google Chat API async post returned {resp.status_code}: {resp.text}"
-                )
+                logger.warning(f"Google Chat API async post returned {resp.status_code}: {resp.text}")
         except Exception as e:
             logger.warning(f"Google Chat API async post encountered error: {e}; falling back to webhook.")
 
@@ -1120,7 +1118,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
             # 2. Addressee Validation
             if target_user and target_user != "unknown" and user_email.lower() != target_user.lower():
-                logger.warning(f"Batch mutation rejected: user {user_email} attempted to confirm batch assigned to {target_user}")
+                logger.warning(
+                    f"Batch mutation rejected: user {user_email} attempted to confirm batch assigned to {target_user}"
+                )
                 return respond(f"⛔ Only {target_user} can confirm this batch recategorization.")
 
             # 3. Timestamp Validation
@@ -1186,7 +1186,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                     rec_text = (
                         f"\n\n💡 *Next Recommended Batch:*\n"
                         f"We found *{rec_c}* transactions for *{rec_m}* (${rec_a:,.2f}) currently filed under _{rec_cur}_ that belong in *{rec_t}*.\n"
-                        f"👉 Reply *\"Fix {rec_m}\"* to review and confirm this batch next!"
+                        f'👉 Reply *"Fix {rec_m}"* to review and confirm this batch next!'
                     )
 
                 resp_msg = (
@@ -1215,8 +1215,12 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             )
             cancel_card = build_batch_recategorization_cancelled_card(batch_id, merchant_name)
             if msg_name:
-                patch_chat_card(msg_name, [cancel_card], text=f"🚫 Batch recategorization for {merchant_name} was cancelled.")
-            return respond(f"🚫 Batch recategorization proposal for *{merchant_name}* was cancelled. No changes were made.")
+                patch_chat_card(
+                    msg_name, [cancel_card], text=f"🚫 Batch recategorization for {merchant_name} was cancelled."
+                )
+            return respond(
+                f"🚫 Batch recategorization proposal for *{merchant_name}* was cancelled. No changes were made."
+            )
 
         elif action_name == "snooze_alert":
             alert_key = action_params.get("alert_key", "")
@@ -1413,27 +1417,32 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     is_brief_or_alerts_intent = clean_text.lower().startswith(("/brief", "brief", "/alerts", "alerts")) or any(
         phrase in lower_text for phrase in ["morning brief", "daily brief", "daily synopsis", "morning synopsis"]
     )
+    if is_brief_or_alerts_intent and any(term in lower_text for term in ["brief", "synopsis"]):
+        try:
+            from app.daily_brief import build_brief_card, generate_daily_brief
+
+            bq = get_bq_client(BQ_PROJECT_ID)
+            # Viewing the brief on demand must not use up today's findings for the scheduled post.
+            brief = await asyncio.to_thread(generate_daily_brief, bq, BQ_PROJECT_ID, BQ_DATASET_ID, user_email, False)
+            card_payload = build_brief_card(brief)
+            return respond(card_payload["text"], cards_v2=card_payload["cardsV2"])
+        except Exception as e:
+            return respond(f"⚠️ Daily brief failed: {e}")
+
     if is_brief_or_alerts_intent:
         try:
-            scan_res = await execute_alert_scan(user_email=user_email)
-            alerts_list = scan_res.get("alerts", [])
-            synopsis = scan_res.get("brief_synopsis")
+            # Full alert list, replied in-thread only (execute_alert_scan would also post to the space webhook).
+            bq = get_bq_client(BQ_PROJECT_ID)
+            alerts_list = await asyncio.to_thread(collect_all_alerts, bq, BQ_PROJECT_ID, BQ_DATASET_ID, user_email)
             active_alerts = [a for a in alerts_list if a.get("type") != "QUERY_ERROR"]
-            if any(term in lower_text for term in ["brief", "synopsis"]):
-                card_payload = build_chat_card_v2(active_alerts, synopsis=synopsis)
-                return respond(
-                    card_payload.get("text", "🌅 *FinSage Morning Financial Synopsis*"),
-                    cards_v2=card_payload.get("cardsV2"),
-                )
-            else:
-                if not active_alerts:
-                    return respond("✅ No active financial anomalies or spending leaks detected right now!")
-                card_payload = build_chat_card_v2(active_alerts)
-                return respond(
-                    card_payload.get("text", "🔔 *FinSage*: Alerts Scan completed."), cards_v2=card_payload.get("cardsV2")
-                )
+            if not active_alerts:
+                return respond("✅ No active financial anomalies or spending leaks detected right now!")
+            card_payload = build_chat_card_v2(active_alerts)
+            return respond(
+                card_payload.get("text", "🔔 *FinSage*: Alerts Scan completed."), cards_v2=card_payload.get("cardsV2")
+            )
         except Exception as e:
-            return respond(f"⚠️ Brief / Alert scan failed: {e}")
+            return respond(f"⚠️ Alert scan failed: {e}")
 
     # Command: /digest [weekly|monthly] or natural digest intent
     is_digest_intent = lower_text.startswith(("/digest", "digest")) or any(

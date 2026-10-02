@@ -79,7 +79,7 @@ steps:
           --image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_COMMIT_SHA}" \
           --region="${_REGION}" \
           --service-account="monarch-gemini-run@${PROJECT_ID}.iam.gserviceaccount.com" \
-          --set-env-vars="PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION}" \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID},BQ_DATASET_ID=${_DATASET_ID},REGION=${_REGION},VERTEX_MEMORY_BANK_NAME=${_MEMORY_BANK},DEFAULT_USER_EMAIL=${_DEFAULT_USER_EMAIL}" \
           --set-secrets="MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest" \
           --command="python" \
           --args="-m,app.job,alerts" \

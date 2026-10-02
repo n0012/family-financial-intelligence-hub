@@ -2,7 +2,7 @@
 """
 Batch entrypoint for Cloud Run Jobs.
 
-Runs the scheduled/manual workloads (Monarch -> BigQuery sync, spend alert scan)
+Runs the scheduled/manual workloads (Monarch -> BigQuery sync, daily brief, digests)
 without starting an HTTP server, so the workload has no network ingress at all.
 """
 
@@ -26,6 +26,20 @@ async def run_sync(days_back: int | None) -> dict:
 
 
 async def run_alerts() -> dict:
+    """Posts the summarized daily brief. On Mondays, also posts the weekly digest for standing context."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.daily_brief import TZ, execute_daily_brief
+
+    result = await execute_daily_brief()
+    if datetime.now(ZoneInfo(TZ)).weekday() == 0:
+        digest = await run_digest("weekly")
+        result["weekly_digest_dispatched"] = digest.get("webhook_dispatched")
+    return result
+
+
+async def run_full_scan() -> dict:
     from app.alerts import execute_alert_scan
 
     return await execute_alert_scan()
@@ -147,7 +161,8 @@ def main() -> int:
         help="How many days of transactions to sync; 0 means all history",
     )
 
-    sub.add_parser("alerts", help="Scan BigQuery views and dispatch spend alerts")
+    sub.add_parser("alerts", help="Post the summarized daily brief (plus the weekly digest on Mondays)")
+    sub.add_parser("full-scan", help="Run every spend alert check and post the full alert card")
 
     digest_cmd = sub.add_parser("digest", help="Generate and dispatch weekly or monthly executive CFO digest")
     digest_cmd.add_argument(
@@ -175,6 +190,8 @@ def main() -> int:
             result = asyncio.run(run_sync(days_back))
         elif args.task == "alerts":
             result = asyncio.run(run_alerts())
+        elif args.task == "full-scan":
+            result = asyncio.run(run_full_scan())
         elif args.task == "digest":
             result = asyncio.run(run_digest(args.period))
         elif args.task == "sweep":

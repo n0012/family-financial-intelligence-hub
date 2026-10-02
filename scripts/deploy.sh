@@ -175,11 +175,12 @@ gcloud run jobs deploy monarch-sync-job \
   --project="$PROJECT_ID"
 
 # B. Alerts Job
+# The daily brief reads goal caps from long-term memory; set these to enable goal pacing.
 gcloud run jobs deploy monarch-alerts-job \
   --image "$IMAGE" \
   --region "$REGION" \
   --service-account "$RUN_SA" \
-  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID" \
+  --set-env-vars PROJECT_ID="$PROJECT_ID",BQ_DATASET_ID="$DATASET_ID",VERTEX_MEMORY_BANK_NAME="${VERTEX_MEMORY_BANK_NAME:-}",DEFAULT_USER_EMAIL="${DEFAULT_USER_EMAIL:-}" \
   --set-secrets MONARCH_EMAIL=monarch-email:latest,MONARCH_PASSWORD=monarch-password:latest,MONARCH_MFA_SECRET=monarch-mfa-secret:latest \
   --command "python" \
   --args "-m,app.job,alerts" \

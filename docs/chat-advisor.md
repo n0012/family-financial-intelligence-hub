@@ -44,7 +44,8 @@ The legacy streaming-pull worker (`app/chat_worker.py`) is still available by se
 
 | Command | Action Description | Primary Tools / Views Used |
 | :--- | :--- | :--- |
-| **`/brief`** or **`/alerts`** | Renders today's executive Morning Financial Synopsis and active spend alerts. | `v_debt_summary`, `v_spend_classification`, `v_subscription_price_creep` |
+| **`/brief`** | Shows today's summarized brief: recent activity, goal pacing, the most notable new findings, and 13-week trends. Viewing it on demand does not use up the next scheduled brief's findings. | `app/daily_brief.py`, `brief_history` |
+| **`/alerts`** | Runs every spend alert check and replies with the full list in the thread. | `v_duplicate_charges`, `v_subscription_price_creep`, `v_annual_bill_radar` |
 | **`/sweep`** | Evaluates checking liquidity to calculate safe surplus sweeps to high-rate debt. | `v_paycheck_surplus_allocation`, `v_annual_bill_radar` |
 | **`/tax [YYYY]`** | Displays annual tax deductibility summary (Schedule C, HSA, Charities). | `v_tax_deductible_summary` |
 | **`/digest [weekly\|monthly]`** | Generates an executive CFO performance briefing. | `v_debt_summary`, `v_spend_classification` |
