@@ -99,7 +99,10 @@ gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
 
 FinSage runs two scheduled background jobs via Cloud Scheduler:
 * **Daily Ingestion (`monarch-daily-sync`)**: Runs daily at 04:00 AM to synchronize accounts, balances, and transactions into BigQuery.
-* **Daily Advisor Alerts (`monarch-daily-advisor-alerts`)**: Runs daily at 08:00 AM to generate the morning brief card and evaluate proactive spend alerts.
+* **Daily Brief (`monarch-daily-advisor-alerts`)**: Runs daily at 08:00 AM and posts the summarized daily brief (`python -m app.job alerts`). On Mondays it also posts the weekly digest.
+
+#### How the daily brief stays fresh
+The brief computes candidate findings each morning (category shifts against the median of the prior three 4-week windows, merchants visited twice as often as usual, first-ever merchants, accounts that have stopped reporting, and one-time alerts such as duplicate charges). It shows only the top two by dollar impact and records them in `brief_history`. A trend finding is not repeated for 14 days, and a one-time alert is shown once. Goal pacing reads spending caps and HELOC payoff dates from long-term memory, so the job needs `VERTEX_MEMORY_BANK_NAME` and `DEFAULT_USER_EMAIL` set. The previous full alert card is still available with `python -m app.job full-scan` or `/alerts` in Chat.
 
 You can trigger a job manually at any time:
 ```bash
