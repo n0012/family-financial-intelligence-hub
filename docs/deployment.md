@@ -33,7 +33,7 @@ cd ..
 ### Provisioned Resources:
 * **Artifact Registry**: Docker container repository (`monarch-repo`).
 * **BigQuery Dataset**: Data warehouse dataset (`family_finance`).
-* **Cloud Pub/Sub**: Inbound chat event topic (`monarch-chat-incoming`) and pull subscription (`monarch-chat-sub`).
+* **Cloud Pub/Sub**: Inbound chat event topic (`monarch-chat-incoming`) and push subscription (`monarch-chat-push` → `/chat/pubsub`).
 * **Cloud Scheduler**: Cron schedules for daily ingestion (`monarch-daily-sync`) and morning alerts (`monarch-daily-advisor-alerts`).
 * **Secret Manager**: Secure containers for all credentials.
 * **IAM Service Accounts**: Runtime identity (`monarch-gemini-run`) and scheduler identity (`monarch-scheduler-sa`).
@@ -54,7 +54,7 @@ cp .env.example .env.local
 
 ## 4. Build & Deploy via Google Cloud Build
 
-Trigger the automated build, container packaging, and zero-ingress deployment:
+Trigger the automated build, container packaging, and private-ingress deployment:
 
 ```bash
 gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
@@ -62,13 +62,15 @@ gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
 
 ### Cloud Build Pipeline:
 1. Compiles and tags the production container image in Artifact Registry.
-2. Deploys the hardened Cloud Run service (`--ingress internal`, `--no-allow-unauthenticated`).
+2. Deploys the hardened Cloud Run service (`--ingress internal`, `--no-allow-unauthenticated`, `--min-instances 0`, request-based CPU).
+
+> **Note:** `cloudbuild.yaml` uses `--set-env-vars`, which replaces every environment variable on the service. Pass your real `_MEMORY_BANK` and `_DEFAULT_USER_EMAIL` substitutions, or redeploy an existing service with `gcloud run deploy --image ... --update-env-vars ...` to keep its current values.
 3. Deploys the batch Cloud Run Jobs (`monarch-sync-job` and `monarch-alerts-job`).
 4. Executes and updates BigQuery analytical views and DDLs from `schema.sql`.
 
 ---
 
-## 5. Google Chat App Configuration (Zero Ingress)
+## 5. Google Chat App Configuration (Pub/Sub Push)
 
 1. Open the [Google Cloud Console → Google Chat API](https://console.cloud.google.com/apis/api/chat.googleapis.com).
 2. Navigate to **Configuration** and configure:
@@ -84,10 +86,11 @@ gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
      ```
    * **Visibility**: Set to your Google Workspace domain or personal Google account.
 3. Click **Save**.
-4. Start the zero-ingress Chat worker:
+4. Confirm the push subscription points at the service (`scripts/deploy.sh` and Terraform create it):
    ```bash
-   python -m app.chat_worker --project YOUR_PROJECT_ID --subscription monarch-chat-sub
+   gcloud pubsub subscriptions describe monarch-chat-push --format='value(pushConfig.pushEndpoint)'
    ```
+   The run service account needs `roles/run.invoker` on the service, and `CHAT_AUDIENCE` must match the subscription's OIDC audience (the service URL).
 5. In Google Chat, search for `FinSage` and add it to your space or direct message thread.
 
 ---
@@ -112,14 +115,16 @@ The entire system is designed to operate within Google Cloud's **Always Free Tie
 
 | Service | Tier / Usage | Estimated Monthly Cost |
 | :--- | :--- | :--- |
-| **Cloud Run** | 1 GiB RAM, 1 vCPU, scales to zero | **$0.00** (Free Tier covers 2M requests & 360k vCPU-s) |
+| **Cloud Run** | 1 GiB RAM, 1 vCPU, `--min-instances 0`, request-based CPU | **$0.00** (Free Tier covers 2M requests & 180k vCPU-s) |
 | **BigQuery Storage** | Active financial ledger (< 100 MB) | **$0.00** (Free Tier covers 10 GB storage) |
 | **BigQuery Analysis** | Partitioned views (~1.5 GB query scan/mo) | **$0.00** (Free Tier covers 1 TB queries/mo) |
 | **Cloud Scheduler** | 2 scheduled cron jobs | **$0.00** (Free Tier covers 3 jobs/mo) |
 | **Cloud Pub/Sub** | Inbound chat messages (< 10,000/mo) | **$0.00** (Free Tier covers 10 GB messages/mo) |
 | **Artifact Registry** | Container image storage (~150 MB) | **~$0.15** |
 | **Secret Manager** | Active secret versions | **~$0.22** (Free Tier covers 6 active secret versions) |
-| **Total Operating Cost** | | **~$0.37 / month** |
+| **Total Operating Cost** | | **~$0.37 / month** plus Gemini API usage |
+
+> **Keep `--min-instances 0`.** An always-on instance (`--min-instances 1 --no-cpu-throttling`) bills a full vCPU and its memory every second of the month, which outweighs everything else in this table.
 
 ---
 
@@ -127,7 +132,7 @@ The entire system is designed to operate within Google Cloud's **Always Free Tie
 
 FinSage is built from the ground up for strict family financial confidentiality:
 
-* **Zero Public Ingress**: The Cloud Run webhook worker operates with `--ingress internal` and `--no-allow-unauthenticated`. Inbound Google Chat interactions are ingested via **Cloud Pub/Sub pull subscriptions**, ensuring zero open HTTP ports or public endpoints exposed to the internet.
+* **Zero Public Ingress**: The Cloud Run webhook worker operates with `--ingress internal` and `--no-allow-unauthenticated`. Inbound Google Chat interactions arrive via an OIDC-authenticated **Cloud Pub/Sub push subscription**, so no public endpoint is exposed to the internet.
 * **Confidential Secret Storage**: Monarch credentials, MFA secrets, and API keys reside in **Google Cloud Secret Manager**. Secrets are fetched via Application Default Credentials (ADC) in memory and never logged or written to disk.
 * **Zero-PII Git Standard**: Real account numbers, balances, merchant addresses, lender identities, and household names are strictly prohibited in git commits, automated tests, and documentation.
 * **Guarded Financial Mutations**: While FinSage can recategorize transactions, split line items, and add notes, all mutations enforce an interactive **Two-Phase Confirmation** flow in Google Chat. The bot will never alter Monarch Money records without explicit user approval.
@@ -159,7 +164,7 @@ FinSage is built from the ground up for strict family financial confidentiality:
        ├─────────────────────────────────┐
        ▼ (Proactive Rule Engines)         ▼ (Advisory Queries & Tools)
 [Scheduled Daily Alerts Job]        [Chat Advisor (Gemini 2.5 Flash)]
-       │                                 ▲ (Pub/Sub Pull)
+       │                                 ▲ (Pub/Sub Push)
        ▼ (Webhook Dispatch)              │
 [Google Chat Space / Direct Message / Two-Phase Mutation Approval]
 ```

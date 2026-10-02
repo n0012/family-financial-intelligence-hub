@@ -4,9 +4,9 @@
 
 ---
 
-## 1. Zero-Ingress Chat Architecture
+## 1. Private-Ingress Chat Architecture
 
-FinSage connects to Google Chat with a **zero-ingress security posture**:
+FinSage connects to Google Chat without a public endpoint:
 
 ```mermaid
 sequenceDiagram
@@ -14,14 +14,14 @@ sequenceDiagram
     actor User as Household User (Google Chat)
     participant ChatAPI as Google Chat API
     participant PubSub as Cloud Pub/Sub (monarch-chat-incoming)
-    participant Worker as Chat Pull Worker (chat_worker.py)
+    participant Worker as Cloud Run /chat/pubsub
     participant Gemini as Gemini Flash Brain (AFC)
     participant BQ as BigQuery Warehouse
     participant Monarch as Monarch Money GraphQL
 
     User->>ChatAPI: Sends message or image (/brief, /sweep, receipt)
     ChatAPI->>PubSub: Publishes user event
-    PubSub->>Worker: Outbound streaming pull (No ingress port)
+    PubSub->>Worker: OIDC-authenticated push (internal ingress)
     Worker->>Gemini: Dispatches prompt + tools
     Gemini->>BQ: Calls run_readonly_sql_tool()
     BQ-->>Gemini: Deterministic SQL results
@@ -34,7 +34,9 @@ sequenceDiagram
     ChatAPI-->>User: Renders interactive response
 ```
 
-FinSage opens connections outward via an asynchronous **Pub/Sub streaming pull** (`python -m app.chat_worker`). The container exposes zero listening HTTP ports to the public internet, eliminating inbound attack surfaces.
+Chat events are delivered by a **Pub/Sub push subscription** (`monarch-chat-push`) to `/chat/pubsub`. The service accepts only internal traffic and verifies each request's OIDC token, so it has no public endpoint, and it scales to zero between messages. Answers that take longer than 12 seconds get an interim "Analyzing..." reply, and the full answer is posted to the thread before the push request is acknowledged.
+
+The legacy streaming-pull worker (`app/chat_worker.py`) is still available by setting `ENABLE_CHAT_PULL_WORKER=true`, but it needs an always-on instance (`--min-instances 1 --no-cpu-throttling`), which bills a full vCPU around the clock.
 
 ---
 
