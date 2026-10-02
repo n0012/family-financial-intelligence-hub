@@ -95,22 +95,22 @@ class TestAlertFindings(unittest.TestCase):
 
 class TestGoals(unittest.TestCase):
     def test_parse_heloc_target(self):
-        mem = ["Family target to completely eliminate the HELOC debt by December 31, 2026."]
-        self.assertEqual(parse_heloc_target(mem), date(2026, 12, 31))
-        self.assertIsNone(parse_heloc_target(["Dining cap is $450 by month end"]))
+        mem = ["Goal: pay off the HELOC by June 30, 2027."]
+        self.assertEqual(parse_heloc_target(mem), date(2027, 6, 30))
+        self.assertIsNone(parse_heloc_target(["Dining cap is $400 by month end"]))
 
     def test_heloc_months_left_includes_current_month(self):
-        g = describe_heloc({"balance": 300_000.0, "paid_mtd": 0.0}, date(2026, 12, 31), date(2026, 10, 2))
-        self.assertIn("$100,000/month", g["detail"])
+        g = describe_heloc({"balance": 300_000.0, "paid_mtd": 0.0}, date(2027, 3, 31), date(2026, 10, 2))
+        self.assertIn("$50,000/month", g["detail"])
 
     def test_cap_pacing_states(self):
-        today = date(2026, 10, 10)  # 10/31 of the month elapsed; on-pace spend is ~$145 of $450
-        self.assertIn("on pace", describe_cap("dining", 450, {"mtd": 140, "last_month": 442}, today)["line"])
-        ahead = describe_cap("dining", 450, {"mtd": 300, "last_month": 442}, today)
+        today = date(2026, 10, 10)  # 10/31 of the month elapsed; on-pace spend is ~$129 of $400
+        self.assertIn("on pace", describe_cap("dining", 400, {"mtd": 120, "last_month": 390}, today)["line"])
+        ahead = describe_cap("dining", 400, {"mtd": 300, "last_month": 390}, today)
         self.assertIn("ahead of pace", ahead["line"])
-        over = describe_cap("dining", 450, {"mtd": 500, "last_month": 520}, today)
+        over = describe_cap("dining", 400, {"mtd": 450, "last_month": 470}, today)
         self.assertIn("over by $50.00", over["line"])
-        self.assertIn("September finished at $520, over by $70.00", over["detail"])
+        self.assertIn("September finished at $470, over by $70.00", over["detail"])
 
 
 class TestRendering(unittest.TestCase):
@@ -127,7 +127,7 @@ class TestRendering(unittest.TestCase):
                 "top_history_count": 12,
             },
             "month": {"mtd": 61.0, "last_month_same_point": 120.0},
-            "goals": [describe_cap("dining", 450, {"mtd": 61, "last_month": 442}, date(2026, 10, 2))],
+            "goals": [describe_cap("dining", 400, {"mtd": 61, "last_month": 390}, date(2026, 10, 2))],
             "findings": findings,
             "trends": [{"category": "Groceries", "weekly": [100.0] * 9 + [200.0] * 4}],
         }

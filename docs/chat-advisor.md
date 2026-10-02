@@ -60,7 +60,7 @@ The legacy streaming-pull worker (`app/chat_worker.py`) is still available by se
 Gemini automatically maps user intent to BigQuery analytical views using Automatic Function Calling (AFC):
 
 * *"What is our daily debt interest cost across mortgage and HELOC right now?"*  
-  → Queries `v_debt_summary` and reports total balance ($500k), daily carry ($95.00/day), and mortgage vs HELOC breakdowns.
+  → Queries `v_debt_summary` and reports total balance, daily carry, and mortgage vs HELOC breakdowns.
 * *"Which subscriptions increased in price over the last year?"*  
   → Queries `v_subscription_price_creep` and advises on the exact annualized increase.
 * *"How much did we spend on dining out vs groceries last month?"*  

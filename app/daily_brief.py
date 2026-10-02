@@ -69,7 +69,7 @@ GOAL_FILTERS = {
     "groceries": (
         "(LOWER(category_name) IN ('groceries', 'supermarkets', 'grocery')"
         " OR LOWER(merchant_name) LIKE '%whole foods%' OR LOWER(merchant_name) LIKE '%trader joe%'"
-        " OR LOWER(merchant_name) LIKE '%costco%' OR LOWER(merchant_name) LIKE '%grocery mart%')"
+        " OR LOWER(merchant_name) LIKE '%costco%')"
     ),
 }
 
@@ -290,7 +290,7 @@ _DATE_RE = re.compile(
 
 
 def parse_heloc_target(memories: list[str]) -> date | None:
-    """Finds a payoff date like 'eliminate the HELOC by December 31, 2026'."""
+    """Finds a payoff date like 'pay off the HELOC by June 30, 2027'."""
     for mem in memories:
         if "heloc" not in mem.lower():
             continue

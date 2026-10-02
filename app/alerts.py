@@ -738,7 +738,6 @@ def check_memory_budget_limits(
             OR LOWER(merchant_name) LIKE '%trader joe%'
             OR LOWER(merchant_name) LIKE '%kroger%'
             OR LOWER(merchant_name) LIKE '%safeway%'
-            OR LOWER(merchant_name) LIKE '%grocery mart%'
             OR LOWER(merchant_name) LIKE '%costco%'
             OR LOWER(merchant_name) LIKE '%sprouts%'
         )

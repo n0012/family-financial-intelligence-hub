@@ -69,7 +69,7 @@ class TestMonarchReadTools(unittest.TestCase):
                     },
                     {
                         "id": "acc_200",
-                        "displayName": "Rewards Visa Reserve",
+                        "displayName": "Rewards Visa",
                         "institution": {"name": "Chase"},
                         "currentBalance": 1250.50,
                         "availableBalance": 18749.50,
