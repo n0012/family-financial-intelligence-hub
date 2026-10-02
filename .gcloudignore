@@ -17,3 +17,6 @@ __pycache__/
 venv/
 .pytest_cache/
 .coverage
+
+# Private-data guard: household denylist (never upload)
+.private-denylist
