@@ -1,0 +1,3 @@
+#!/bin/sh
+# Commit messages are public too.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/check_private_data.py" --message-file "$1"
