@@ -1,0 +1,48 @@
+name: private-data
+
+# This repository is public and about household finances. Every push and pull request is
+# scanned for personal or confidential data, so a skipped local hook is still caught here.
+on:
+  push:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan full tree
+        env:
+          PRIVATE_DENYLIST: ${{ secrets.PRIVATE_DENYLIST }}
+        run: python3 scripts/check_private_data.py --all --require-denylist
+
+      - name: Scan added lines and commit messages
+        env:
+          PRIVATE_DENYLIST: ${{ secrets.PRIVATE_DENYLIST }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="$(git rev-list --max-parents=0 "$HEAD" | tail -1)"
+          fi
+          python3 scripts/check_private_data.py --range "$BASE..$HEAD" --require-denylist
+          for c in $(git rev-list "$BASE..$HEAD"); do
+            git log -1 --format=%B "$c" > /tmp/msg
+            python3 scripts/check_private_data.py --message-file /tmp/msg --require-denylist || { echo "in commit $c"; exit 1; }
+          done
+
+      - name: Scan pull request title and body
+        if: github.event_name == 'pull_request'
+        env:
+          PRIVATE_DENYLIST: ${{ secrets.PRIVATE_DENYLIST }}
+          PR_TEXT: |
+            ${{ github.event.pull_request.title }}
+            ${{ github.event.pull_request.body }}
+        run: python3 scripts/check_private_data.py --text-env PR_TEXT --require-denylist
