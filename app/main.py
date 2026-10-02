@@ -96,13 +96,16 @@ logger = logging.getLogger("monarch-gemini")
 
 is_prod = IS_PROD
 
+# Chat answers slower than this get an interim notice and the full reply posted to the thread.
+CHAT_SYNC_BUDGET_SECONDS = 12.0
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker = None
-    should_run_worker = os.getenv("ENABLE_CHAT_PULL_WORKER", "false").lower() in ("true", "1", "yes") or (
-        os.getenv("K_SERVICE") and os.getenv("DISABLE_CHAT_PULL_WORKER", "false").lower() not in ("true", "1", "yes")
-    )
+    # Opt-in only: the pull worker needs an always-on instance (min-instances=1, no CPU throttling).
+    # Default deployments use a Pub/Sub push subscription to /chat/pubsub so the service can scale to zero.
+    should_run_worker = os.getenv("ENABLE_CHAT_PULL_WORKER", "false").lower() in ("true", "1", "yes")
     if should_run_worker:
         try:
             from app.chat_worker import start_chat_worker_background
@@ -1567,7 +1570,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     )
 
     try:
-        result = await asyncio.wait_for(asyncio.shield(analysis_future), timeout=12.0)
+        result = await asyncio.wait_for(asyncio.shield(analysis_future), timeout=CHAT_SYNC_BUDGET_SECONDS)
         answer = result.get("answer", "No response generated.")
         sql = result.get("sql")
         suggestions = result.get("suggestions", [])
@@ -1580,7 +1583,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         return respond(format_advisory_reply(answer, sql, suggestions), cards_v2=cards_list)
     except TimeoutError:
         logger.info(
-            f"Query '{clean_text}' exceeded 12s budget; continuing in background to post to {space_name} (thread={thread_name})"
+            f"Query '{clean_text}' exceeded {CHAT_SYNC_BUDGET_SECONDS:.0f}s budget; continuing to post to {space_name} (thread={thread_name})"
         )
 
         async def complete_and_post():
@@ -1601,6 +1604,15 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             except Exception as ex:
                 logger.error(f"Background query post failed: {ex}")
                 post_to_chat_thread(f"⚠️ Query processing failed: {ex}", thread_name, space_name)
+
+        if is_pubsub and not is_pubsub_override:
+            # Push delivery: CPU is only allocated while this request is open, so a detached task
+            # would stall. Post the interim notice, then finish the analysis before acking.
+            respond(
+                "⏳ *Analyzing...* Deep scan in progress across your BigQuery models. Posting full recommendation to this thread in just a few moments!"
+            )
+            await complete_and_post()
+            return {"status": "ok"}
 
         asyncio.create_task(complete_and_post())
         return respond(

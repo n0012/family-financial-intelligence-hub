@@ -225,18 +225,25 @@ resource "google_pubsub_topic_iam_member" "gsuite_addons_publisher" {
   member  = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
 }
 
-resource "google_pubsub_subscription" "chat_sub" {
-  name                 = "monarch-chat-sub"
-  topic                = google_pubsub_topic.chat_incoming.name
-  project              = var.project_id
-  ack_deadline_seconds = 60
+# Push delivery lets the Cloud Run service scale to zero (no always-on pull worker).
+# The service itself is deployed by scripts/deploy.sh, which also grants the run SA roles/run.invoker.
+locals {
+  chat_audience = "https://${var.service_name}-${data.google_project.current.number}.${var.region}.run.app"
 }
 
-resource "google_pubsub_subscription_iam_member" "run_subscriber" {
-  subscription = google_pubsub_subscription.chat_sub.name
-  project      = var.project_id
-  role         = "roles/pubsub.subscriber"
-  member       = "serviceAccount:${google_service_account.monarch_run.email}"
+resource "google_pubsub_subscription" "chat_push" {
+  name                 = "monarch-chat-push"
+  topic                = google_pubsub_topic.chat_incoming.name
+  project              = var.project_id
+  ack_deadline_seconds = 600
+
+  push_config {
+    push_endpoint = "${local.chat_audience}/chat/pubsub"
+    oidc_token {
+      service_account_email = google_service_account.monarch_run.email
+      audience              = local.chat_audience
+    }
+  }
 }
 
 # 10. Cloud Scheduler Jobs for Automated Ingestion & Alerting (Via Cloud Run Jobs API)
