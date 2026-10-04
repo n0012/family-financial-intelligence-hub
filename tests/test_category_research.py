@@ -69,6 +69,8 @@ class TestCandidates(unittest.TestCase):
             "txn_count": 3,
             "total_amount": Decimal("36.00"),
             "typical_amount": Decimal("12.00"),
+            "misfiled_amount": Decimal("36.00"),
+            "impact_score": Decimal("54.00"),
             "uncategorized_count": 3,
             "is_recurring": False,
             "categories": [{"category_name": "Uncategorized", "n": 3}],
@@ -77,8 +79,18 @@ class TestCandidates(unittest.TestCase):
         bq.query.return_value.result.return_value = [row]
         cands = cr.find_review_candidates(bq)
         self.assertEqual(cands[0]["typical_amount"], 12.0)
+        self.assertEqual(cands[0]["impact_score"], 54.0)
         json.dumps(cands)
         cr.build_research_prompt(cands, CATEGORIES, [])
+
+    def test_ranked_by_impact_with_uncategorized_weighted_up(self):
+        bq = MagicMock()
+        bq.query.return_value.result.return_value = []
+        cr.find_review_candidates(bq)
+        sql = bq.query.call_args[0][0]
+        self.assertIn("ORDER BY s.impact_score DESC", sql)
+        self.assertIn(f"{cr.UNCATEGORIZED_WEIGHT} * SUM(IF(is_uncategorized, weighted_amt, 0))", sql)
+        self.assertIn(f"INTERVAL {cr.RECENT_DAYS} DAY", sql)
 
 
 class TestResearch(unittest.TestCase):
@@ -277,13 +289,21 @@ class TestPropose(unittest.TestCase):
             patch.object(cr, "load_categories", return_value=CATEGORIES),
             patch.object(cr, "load_decisions", return_value=decisions),
             patch.object(cr, "find_review_candidates", return_value=cands),
-            patch.object(cr, "_transaction_ids_to_change", side_effect=lambda bq, m, c: [f"{m}-1", f"{m}-2"]),
+            patch.object(
+                cr,
+                "_transactions_to_change",
+                side_effect=lambda bq, m, c: ([f"{m}-1", f"{m}-2"], 400.0 if m == "Corner Cafe" else 60.0),
+            ),
             patch.object(cr, "save_review") as save,
             patch.object(cr, "record_decisions"),
         ):
             res = cr.propose_category_review("user@example.com", 10, bq=MagicMock(), research_client=client)
         self.assertEqual(res["status"], "confirmation_required")
-        self.assertEqual([s["merchant"] for s in res["suggestions"]], ["Stream Co", "Corner Cafe"])
+        # A remembered category no longer jumps the queue: the bigger fix comes first.
+        self.assertEqual([s["merchant"] for s in res["suggestions"]], ["Corner Cafe", "Stream Co"])
+        self.assertEqual(res["amount"], 460.0)
+        top = res["card"]["card"]["sections"][0]["widgets"][0]["decoratedText"]["topLabel"]
+        self.assertTrue(top.startswith("$400 · 2 txns"), top)
         # Only the unknown merchant was researched.
         prompt = client.models.generate_content.call_args.kwargs["contents"]
         self.assertIn('"merchant": "Corner Cafe"', prompt)
@@ -300,6 +320,36 @@ class TestPropose(unittest.TestCase):
                 review["review_id"], 2, "user@example.com", int(params["timestamp"]), params["signature"]
             )[0]
         )
+
+    def test_low_impact_remembered_merchant_waits_its_turn(self):
+        # Candidates arrive ranked by impact; a remembered merchant below the research pool is not pulled forward.
+        cands = [_cand(f"Shop {i}", {"Uncategorized": 3}) for i in range(cr.RESEARCH_CHUNK_SIZE + 1)]
+        cands.append(_cand("Stream Co", {"Entertainment": 2, "Subscriptions": 5}))
+        decisions = [
+            {
+                "merchant": "Stream Co",
+                "category_id": "c_subs",
+                "category_name": "Subscriptions",
+                "decision": "ACCEPTED",
+                "decided_at": datetime.now(UTC),
+            }
+        ]
+        client = MagicMock()
+        client.models.generate_content.return_value.text = json.dumps({"suggestions": []})
+        with (
+            patch.object(cr, "ensure_review_tables"),
+            patch.object(cr, "load_from_monarch", AsyncMock(return_value=([], []))),
+            patch.object(cr, "load_categories", return_value=CATEGORIES),
+            patch.object(cr, "load_decisions", return_value=decisions),
+            patch.object(cr, "find_review_candidates", return_value=cands),
+            patch.object(cr, "_transactions_to_change", return_value=(["t1"], 12.0)),
+            patch.object(cr, "save_review"),
+            patch.object(cr, "record_decisions"),
+        ):
+            res = cr.propose_category_review("user@example.com", 1, bq=MagicMock(), research_client=client)
+        self.assertEqual(res["status"], "none_found")
+        prompts = " ".join(c.kwargs["contents"] for c in client.models.generate_content.call_args_list)
+        self.assertIn('"merchant": "Shop 5"', prompts)
 
 
 class TestApply(unittest.TestCase):
@@ -624,7 +674,7 @@ class TestMonarchRules(unittest.TestCase):
             patch.object(cr, "load_categories") as synced_cats,
             patch.object(cr, "load_decisions", return_value=[]),
             patch.object(cr, "find_review_candidates", return_value=cands),
-            patch.object(cr, "_transaction_ids_to_change", return_value=["t1"]),
+            patch.object(cr, "_transactions_to_change", return_value=(["t1"], 12.0)),
             patch.object(cr, "save_review"),
             patch.object(cr, "record_decisions"),
         ):
