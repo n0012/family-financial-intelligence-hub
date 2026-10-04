@@ -57,6 +57,23 @@ class TestChatPushDelivery(unittest.TestCase):
         self.assertIn("Analyzing", self.posted[0])
         self.assertIn("Netflix", self.posted[1])
 
+    def test_gemini_tools_see_the_chat_sender(self):
+        # Tools run in an executor thread; they must still see who is asking, since confirmation
+        # cards are signed for that user and only that user may confirm them.
+        from app.monarch_service import CURRENT_USER_EMAIL
+
+        def brain_reporting_user(*_args, **_kwargs):
+            return {"answer": f"tool sees {CURRENT_USER_EMAIL.get()}", "sql": None, "suggestions": []}
+
+        with (
+            patch.object(main, "CHAT_SYNC_BUDGET_SECONDS", 5),
+            patch("app.main.ask_gemini_brain", side_effect=brain_reporting_user),
+        ):
+            asyncio.run(main.google_chat_webhook(_push_envelope(_chat_event("recategorize my last coffee"))))
+
+        self.assertEqual(len(self.posted), 1)
+        self.assertIn("tool sees user@example.com", self.posted[0])
+
     def test_lifespan_does_not_start_pull_worker_on_cloud_run_by_default(self):
         async def run_lifespan():
             async with main.lifespan(main.app):

@@ -1466,6 +1466,8 @@ async def propose_transaction_recategorization_async(
 
     # 5. Sign proposal with HMAC
     user_email = CURRENT_USER_EMAIL.get()
+    if not user_email or user_email == "unknown":
+        return {"status": "error", "message": "Cannot attribute this proposal to a Chat user, so it was not created."}
     timestamp = int(datetime.now(UTC).timestamp())
     sig = generate_mutation_signature(cleaned_id, new_cat_id, user_email, timestamp)
 
@@ -1770,6 +1772,8 @@ async def propose_batch_recategorization_async(
     total_amount = sum(abs(float(t.get("amount") or 0.0)) for t in txns)
     batch_id = uuid.uuid4().hex[:12]
     user_email = CURRENT_USER_EMAIL.get()
+    if not user_email or user_email == "unknown":
+        return {"status": "error", "message": "Cannot attribute this proposal to a Chat user, so it was not created."}
     timestamp = int(datetime.now(UTC).timestamp())
     sig = generate_batch_signature(batch_id, new_cat_id, len(txn_ids), user_email, timestamp)
 
