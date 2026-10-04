@@ -1138,6 +1138,20 @@ class TestChatAuthorization(unittest.TestCase):
         mock_exec.assert_not_called()
         self.assertEqual(mock_audit.call_args[1]["status"], "REJECTED")
 
+    def test_confirm_recategorize_rejects_unattributed_card(self):
+        # A card signed for "unknown" must not be confirmable by whoever clicks it.
+        now_ts = int(datetime.now(UTC).timestamp())
+        sig = generate_mutation_signature("txn_200", "cat_200", "unknown", now_ts)
+        payload = _confirm_payload("partner@example.com", "unknown", sig)
+        payload["commonEventObject"]["parameters"]["timestamp"] = str(now_ts)
+        with (
+            patch("app.main.execute_guarded_recategorization", AsyncMock()) as mock_exec,
+            patch("app.main.log_mutation_audit"),
+        ):
+            text = _reply_text(asyncio.run(main.google_chat_webhook(payload)))
+        self.assertIn("can confirm", text)
+        mock_exec.assert_not_called()
+
 
 class TestMutationSigningSecret(unittest.TestCase):
     def test_unconfigured_secret_is_random_not_a_constant(self):

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -970,7 +971,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 return respond(f"⛔ {rate_msg}")
 
             # 2. Addressee Validation (only the user the card was issued to may confirm it)
-            if target_user and target_user != "unknown" and user_email.lower() != target_user.lower():
+            if not target_user or target_user == "unknown" or user_email.lower() != target_user.lower():
                 logger.warning(
                     f"Mutation rejected: user {user_email} attempted to confirm txn #{txn_id} assigned to {target_user}"
                 )
@@ -1137,7 +1138,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 return respond(f"⛔ {rate_msg}")
 
             # 2. Addressee Validation
-            if target_user and target_user != "unknown" and user_email.lower() != target_user.lower():
+            if not target_user or target_user == "unknown" or user_email.lower() != target_user.lower():
                 logger.warning(
                     f"Batch mutation rejected: user {user_email} attempted to confirm batch assigned to {target_user}"
                 )
@@ -1605,8 +1606,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     CURRENT_PROPOSED_CARD.set(None)
 
     loop = asyncio.get_event_loop()
+    # run_in_executor does not carry contextvars into the worker; without this copy the Gemini
+    # tools see CURRENT_USER_EMAIL as "unknown" and sign confirmation cards for nobody.
+    request_ctx = contextvars.copy_context()
     analysis_future = loop.run_in_executor(
-        None, ask_gemini_brain, clean_text, session_history, downloaded_images, user_email
+        None, request_ctx.run, ask_gemini_brain, clean_text, session_history, downloaded_images, user_email
     )
 
     try:

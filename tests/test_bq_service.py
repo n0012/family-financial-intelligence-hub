@@ -48,11 +48,50 @@ class TestRunReadonlySql(unittest.TestCase):
         query = "SELECT account_id, current_balance, display_name FROM `family_finance.raw_accounts`"
         result = bq_service.run_readonly_sql(query, client=self.mock_client)
 
-        self.mock_client.query.assert_called_once()
+        # One free dry run (table check) plus the real query.
+        self.assertEqual(self.mock_client.query.call_count, 2)
+        self.assertTrue(self.mock_client.query.call_args_list[0].kwargs["job_config"].dry_run)
         parsed = json.loads(result)
         self.assertEqual(len(parsed), 2)
         self.assertEqual(parsed[0]["display_name"], "Checking")
         self.assertEqual(parsed[1]["current_balance"], -25000.00)
+
+    def _dry_run_reading(self, *tables, project="test-project", dataset="family_finance"):
+        self.mock_client.project = project
+        dry_job = MagicMock()
+        dry_job.referenced_tables = [MagicMock(project=project, dataset_id=dataset, table_id=t) for t in tables]
+        real_job = MagicMock()
+        real_job.result.return_value = [{"n": 1}]
+        self.mock_client.query.side_effect = [dry_job, real_job]
+
+    def test_operational_tables_are_blocked(self):
+        for table in (
+            "chat_history",
+            "user_preferences",
+            "mutation_audit_log",
+            "pending_batches",
+            "INFORMATION_SCHEMA.TABLES",
+        ):
+            with self.subTest(table=table):
+                self.mock_client.reset_mock()
+                self._dry_run_reading("raw_transactions", table)
+                result = bq_service.run_readonly_sql(f"SELECT * FROM family_finance.{table}", client=self.mock_client)
+                self.assertIn("outside the financial data", result)
+                self.assertIn(table, result)
+                self.assertEqual(self.mock_client.query.call_count, 1)
+
+    def test_other_dataset_is_blocked(self):
+        self._dry_run_reading("raw_transactions", dataset="some_other_dataset")
+        result = bq_service.run_readonly_sql(
+            "SELECT * FROM some_other_dataset.raw_transactions", client=self.mock_client
+        )
+        self.assertIn("outside the financial data", result)
+
+    def test_views_resolving_to_allowed_tables_run(self):
+        self._dry_run_reading("raw_accounts", "raw_transactions")
+        result = bq_service.run_readonly_sql("SELECT * FROM family_finance.v_debt_summary", client=self.mock_client)
+        self.assertEqual(json.loads(result), [{"n": 1}])
+        self.assertEqual(self.mock_client.query.call_count, 2)
 
     def test_legitimate_select_empty_rows(self):
         mock_job = MagicMock()
