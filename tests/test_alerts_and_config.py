@@ -1696,6 +1696,29 @@ class TestChatWorker(unittest.TestCase):
             # On-demand views must not record findings as shown
             self.assertIs(mock_generate.call_args.args[4], False)
 
+    def test_chat_webhook_natural_summary_request_returns_brief(self):
+        """'Show me today's summary' gets the daily brief card, not a free-form Gemini answer."""
+        from app.main import google_chat_webhook
+
+        brief = {"date": date(2026, 9, 11), "recent": None, "month": None, "goals": [], "findings": [], "trends": []}
+        for text in ["show me today's summary", "can you show me today’s summary", "daily summary please"]:
+            event = {
+                "type": "MESSAGE",
+                "space": {"name": "spaces/test_space", "type": "DM"},
+                "message": {
+                    "name": "spaces/test_space/messages/msg_summary",
+                    "text": text,
+                    "sender": {"displayName": "FinSage User", "email": "user@example.com"},
+                },
+            }
+            with (
+                patch("app.main.get_bq_client"),
+                patch("app.daily_brief.generate_daily_brief", return_value=brief) as mock_generate,
+            ):
+                res = asyncio.run(google_chat_webhook(event))
+                self.assertIn("cardsV2", res, text)
+                mock_generate.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

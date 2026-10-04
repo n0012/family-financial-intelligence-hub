@@ -45,7 +45,7 @@ The legacy streaming-pull worker (`app/chat_worker.py`) is still available by se
 | Command | Action Description | Primary Tools / Views Used |
 | :--- | :--- | :--- |
 | **`/brief`** | Shows today's summarized brief: recent activity, goal pacing, the most notable new findings, and 13-week trends. Viewing it on demand does not use up the next scheduled brief's findings. | `app/daily_brief.py`, `brief_history` |
-| **`/alerts`** | Runs every spend alert check and replies with the full list in the thread. | `v_duplicate_charges`, `v_subscription_price_creep`, `v_annual_bill_radar` |
+| **`/alerts`** | Runs every spend alert check and replies in the thread with the full list, each with a 7-day snooze button. | `v_duplicate_charges`, `v_subscription_price_creep`, `v_annual_bill_radar` |
 | **`/sweep`** | Evaluates checking liquidity to calculate safe surplus sweeps to high-rate debt. | `v_paycheck_surplus_allocation`, `v_annual_bill_radar` |
 | **`/tax [YYYY]`** | Displays annual tax deductibility summary (Schedule C, HSA, Charities). | `v_tax_deductible_summary` |
 | **`/digest [weekly\|monthly]`** | Generates an executive CFO performance briefing. | `v_debt_summary`, `v_spend_classification` |
@@ -68,23 +68,29 @@ Gemini automatically maps user intent to BigQuery analytical views using Automat
 * *"Where are our top micro-transaction leaks under $35?"*  
   → Queries `v_micro_transaction_leakage` for coffee shops and convenience spending.
 * *"How much safe surplus can we sweep from checking to pay down debt today?"*  
-  → Queries `v_paycheck_surplus_allocation` to determine safe paydown allocation.
+  → Queries `v_paycheck_surplus_allocation` to determin## 4. Daily Brief (`/brief`) and Full Alert Scan (`/alerts`)
+
+Every morning at 08:00 AM the `monarch-alerts-job` posts a short **daily brief** card. Ask for it any time with `/brief`, or in plain words (*"show me today's summary"*, *"daily brief"*). The card has four sections:
+
+1. **Recent activity**: transactions in the past three days, the biggest one compared with what you usually spend at that merchant, and month-to-date spend against the same point last month.
+2. **🎯 Goals**: spending caps and the HELOC payoff date read from long-term memory, with a progress bar and pacing, for example `██░░░░░░░░ $100 of $400 · ahead of pace`.
+3. **🔍 Worth a look**: at most two findings, chosen by dollar impact from:
+   * categories running well above the median of the prior three 4-week windows (or well below),
+   * merchants visited about twice as often as usual,
+   * first-ever merchants,
+   * accounts that have stopped reporting transactions,
+   * one-time alerts such as duplicate charges.
+
+   Shown findings are recorded in `brief_history`. A trend is not repeated for 14 days, a stale account for 7, and a one-time alert for a year, so each day surfaces something new. A quiet day says so instead of repeating old items.
+4. **📈 13-week trends**: weekly sparklines for your three largest spending categories, each with an up or down arrow.
+
+Viewing the brief on demand does not record its findings, so it never uses up the next scheduled brief. On Mondays the job also posts the weekly digest.
+
+**`/alerts`** is the exhaustive view: it runs every alert check and replies in the thread with each alert and a **7-day snooze button** (HMAC-SHA256 signed). `python -m app.job full-scan` posts the same alerts to the space together with the older synopsis (pacing thermometer, cash posture and debt carry), which is also available from the `/advisor/morning-brief` API.
 
 ---
 
-## 4. Daily Morning Financial Synopsis (`/brief`, `/alerts`)
-
-Every morning at 08:00 AM (or on-demand via `/brief`), FinSage posts a two-tier **Google Chat Card v2**:
-
-1. **🌅 Morning Financial Synopsis**:
-   * **Pacing Thermometer**: Visual ASCII bar showing month elapsed vs MTD spend velocity:  
-     `████░░░░░░ Day 12/30 (40% elapsed) • MTD Outflow: $1,440 (Projected: $3,600)`
-   * **Account Posture**: Real-time checking liquidity and coverage ratio against monthly fixed burn.
-   * **Multi-Facility Debt Carry**: Total liability balance and exact daily carry:  
-     `$95.00/day across Mortgage ($40.00/day) & HELOC ($55.00/day)`
-2. **🎯 What to Pay Attention to Today**:
-   * Proactive alert cards for price hikes, duplicate charges, habit leaks, or safe paycheck sweep opportunities.
-   * Interactive **7-day snooze buttons** backed by HMAC-SHA256 signatures.
+by HMAC-SHA256 signatures.
 
 ---
 
