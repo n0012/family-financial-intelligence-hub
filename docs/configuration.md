@@ -110,6 +110,7 @@ In Google Cloud production, credentials and configuration are stored in **Secret
 | `CHAT_AUDIENCE` (`chat-audience`) | Expected OIDC audience on Pub/Sub push requests: the Cloud Run service URL | Yes (push) | `CLOUD_RUN_URL` |
 | `ENABLE_CHAT_PULL_WORKER` | Run the legacy streaming-pull worker instead of push. Needs `--min-instances 1 --no-cpu-throttling`, which bills an always-on instance. | No | `false` |
 | `CHAT_SUBSCRIPTION` | Pull subscription used only when `ENABLE_CHAT_PULL_WORKER=true` | No | `monarch-chat-sub` |
+| `CATEGORY_RESEARCH_MODEL` | Model that researches merchants for `/categorize` (needs Google Search grounding) | No | `gemini-3.8-flash` |
 | `GEMINI_VISION_MODEL` | Model for receipt and invoice extraction | No | `gemini-2.5-flash` |
 
 ---

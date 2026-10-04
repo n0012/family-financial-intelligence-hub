@@ -105,6 +105,28 @@ CREATE TABLE IF NOT EXISTS `family_finance.pending_batches` (
     signature STRING NOT NULL
 );
 
+-- 7. Researched Category Reviews (one signed card proposing fixes for several merchants)
+CREATE TABLE IF NOT EXISTS `family_finance.pending_category_reviews` (
+    review_id STRING NOT NULL,
+    user_email STRING NOT NULL,
+    items_json STRING NOT NULL,      -- merchants, proposed categories and the transaction ids to change
+    created_at TIMESTAMP NOT NULL,
+    status STRING NOT NULL,          -- 'PENDING', 'PROCESSING', 'APPLIED', 'PARTIAL_SUCCESS', 'REJECTED', 'FAILED'
+    signature STRING NOT NULL
+);
+
+-- 8. Merchant Category Decisions (household rules and suppressed suggestions)
+CREATE TABLE IF NOT EXISTS `family_finance.merchant_category_decisions` (
+    merchant STRING NOT NULL,
+    category_id STRING,
+    category_name STRING,
+    decision STRING NOT NULL,        -- 'ACCEPTED' (becomes a rule), 'REJECTED', 'AI_SKIPPED'
+    source STRING,                   -- 'review', 'research'
+    review_id STRING,
+    user_email STRING,
+    decided_at TIMESTAMP NOT NULL
+);
+
 -- ==============================================================================
 -- Analytical & Optimization Views for Conversational Analytics Agent
 -- ==============================================================================

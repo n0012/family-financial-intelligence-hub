@@ -38,6 +38,12 @@ from app.bq_service import (
     run_readonly_sql,
     save_session_history,
 )
+from app.category_research import (
+    apply_category_review,
+    propose_category_review,
+    start_category_review,
+    verify_review_signature,
+)
 from app.config import (
     BQ_DATASET_ID,
     BQ_PROJECT_ID,
@@ -62,6 +68,7 @@ from app.monarch_service import (
     execute_guarded_recategorization,
     execute_sync,
     extract_card_action_parameters,
+    extract_card_form_values,
     find_next_recategorization_recommendation_async,
     get_live_account_balance,
     get_live_transaction,
@@ -453,6 +460,7 @@ def ask_gemini_brain(
             "    - For recurring merchants or multiple transactions (e.g. streaming services like Netflix, Hulu, Prime Video), call `propose_batch_recategorization(merchant_name, new_category, current_category)`. This prepares an interactive confirmation card in Google Chat that allows the user to reclassify all matching transactions in a single click.\n"
             "    - For a single specific transaction, call `propose_transaction_recategorization(transaction_id, new_category)`.\n"
             "    - Proactive Next Recommendations: You are equipped with `get_recategorization_recommendations(exclude_merchant)`. After proposing or executing a batch recategorization, or when auditing transactions, proactively run this tool to identify the next high-confidence misclassified merchant and suggest fixing it.\n"
+            "    - Category clean-up across many merchants (e.g. 'review my categories', 'fix uncategorized transactions'): call `start_category_review(max_merchants)`. It researches each merchant on the web and posts one review card where the user ticks the fixes to apply. Summarize its suggestions briefly; do not repeat the card.\n"
             "    - Never attempt to mutate transactions directly; both tools strictly prepare HMAC-signed confirmation cards requiring the user's interactive confirmation in Google Chat.\n"
             "13. Persistent User Preferences & Memory Consolidation: You are equipped with `store_user_preference(preference_or_rule)` to persist family goals, spending limits, debt acceleration targets, budget caps, categorization guidelines, or alert preferences into the long-term Memory Bank. Proactively call this tool whenever the user sets a budget cap, establishes a payoff target, establishes a merchant categorization rule, asks you to remember something, or defines an enduring financial preference.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
@@ -483,6 +491,7 @@ def ask_gemini_brain(
                     propose_transaction_recategorization,
                     propose_batch_recategorization,
                     get_recategorization_recommendations,
+                    start_category_review,
                     store_user_preference,
                     snooze_spend_alert,
                     get_daily_morning_brief,
@@ -1332,6 +1341,82 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 )
                 return respond(f"⚠️ Failed to snooze alert '{alert_key}'.")
 
+        elif action_name in ("apply_category_review", "reject_category_review"):
+            review_id = action_params.get("review_id", "")
+            target_user = action_params.get("user_email", "unknown")
+            sig = action_params.get("signature", "")
+            is_apply = action_name == "apply_category_review"
+
+            allowed, rate_msg = check_mutation_rate_limit(user_email)
+            if not allowed:
+                log_mutation_audit(
+                    action_type="CATEGORY_REVIEW",
+                    target_id=review_id,
+                    user_email=user_email,
+                    status="RATE_LIMITED",
+                    details=rate_msg,
+                )
+                return respond(f"⛔ {rate_msg}")
+
+            if not target_user or target_user == "unknown" or user_email.lower() != target_user.lower():
+                log_mutation_audit(
+                    action_type="CATEGORY_REVIEW",
+                    target_id=review_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    details=f"Review action attempted by a user other than {target_user}",
+                )
+                return respond(f"⛔ Only {target_user} can act on this category review.")
+
+            try:
+                ts = int(action_params.get("timestamp", "0"))
+                item_count = int(action_params.get("item_count", "0"))
+            except ValueError:
+                ts, item_count = 0, -1
+            is_valid, reason = verify_review_signature(review_id, item_count, target_user, ts, sig)
+            if not is_valid:
+                log_mutation_audit(
+                    action_type="CATEGORY_REVIEW",
+                    target_id=review_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    signature_valid=False,
+                    details=reason,
+                )
+                return respond(f"⛔ Category review rejected: {reason}")
+
+            indexes: list[int] = []
+            if is_apply:
+                ticked = extract_card_form_values(raw_payload, "selected")
+                if ticked is None:
+                    return respond(
+                        "⚠️ I couldn't read which suggestions you ticked, so nothing was changed. "
+                        "Tick at least one and press *Apply selected* again, or use *Reject all*."
+                    )
+                indexes = [int(v) for v in ticked if v.isdigit()]
+                if not indexes:
+                    return respond(
+                        "Nothing was ticked, so nothing changed. Use *Reject all* to dismiss these suggestions."
+                    )
+
+            result = await apply_category_review(review_id, indexes if is_apply else None, user_email)
+            if not result.get("success"):
+                return respond(f"⚠️ {result.get('error', 'Category review failed.')}")
+
+            applied = result["applied"]
+            summary = (
+                f"✅ Recategorized {sum(i['applied_count'] for i in applied)} transactions across "
+                f"{len(applied)} merchants in Monarch Money."
+                if applied
+                else "🚫 Category suggestions dismissed. I won't propose them again."
+            )
+            if result.get("failed_count"):
+                summary += f" {result['failed_count']} update(s) failed and will be offered again."
+            if msg_name:
+                patch_chat_card(msg_name, [result["card"]], text=summary)
+                return respond(summary)
+            return respond(summary, cards_v2=[result["card"]])
+
         return respond("ℹ️ Action received.")
 
     # 1. Bot added to space or 1:1 DM
@@ -1385,6 +1470,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             "• `/digest` for weekly or monthly executive CFO brief\n"
             "• `/sweep` to calculate safe surplus cash to pay down variable debt (HELOC)\n"
             "• `/tax` to review annual tax-deductible expense summaries\n"
+            "• `/categorize` to research and fix miscategorized merchants in one batch\n"
             "• *You can also paste receipts, invoices, or financial documents!*"
         )
         return respond(help_text)
@@ -1593,6 +1679,51 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             return respond(summary_text)
         except Exception as e:
             return respond(f"⚠️ Failed to retrieve tax deduction summary: {e}")
+
+    # Command: /categorize or category clean-up intent
+    is_category_review_intent = lower_text.startswith(("/categorize", "/categorise")) or any(
+        phrase in lower_text
+        for phrase in [
+            "review categories",
+            "review my categories",
+            "category review",
+            "fix categories",
+            "fix my categories",
+            "clean up categories",
+            "clean up my categories",
+            "categorize my transactions",
+        ]
+    )
+    if is_category_review_intent:
+        size_match = re.search(r"\b(\d{1,2})\b", lower_text)
+        review_size = int(size_match.group(1)) if size_match else 10
+        interim = "🔎 *Researching merchants...* Checking uncategorized and split merchants on the web. The review card will follow in this thread."
+
+        async def build_category_review() -> tuple[str, list | None]:
+            try:
+                res = await asyncio.to_thread(propose_category_review, user_email, review_size)
+            except Exception as e:
+                logger.error(f"Category review failed: {e}", exc_info=True)
+                return f"⚠️ Category review failed: {e}", None
+            if res.get("card"):
+                return (
+                    f"🗂️ *Category review*: {res['merchant_count']} merchants, {res['transaction_count']} transactions. "
+                    "Untick anything that looks wrong, then press *Apply selected*.",
+                    [res["card"]],
+                )
+            return f"✅ {res.get('message', 'No category fixes found.')}", None
+
+        if is_pubsub and not is_pubsub_override:
+            respond(interim)
+            review_text, review_cards = await build_category_review()
+            return respond(review_text, cards_v2=review_cards)
+
+        async def post_category_review():
+            review_text, review_cards = await build_category_review()
+            post_to_chat_thread(review_text, thread_name, space_name, cards_v2=review_cards)
+
+        asyncio.create_task(post_category_review())
+        return respond(interim)
 
     # Natural language query -> Conversational Analytics Agent
     # If the response completes within 20s, return synchronously.
