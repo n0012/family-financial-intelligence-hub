@@ -25,7 +25,10 @@ from app.daily_brief import (
 
 
 def _win_rows(key: str, amounts: list[float], counts: list[int]) -> list[dict]:
-    return [{"k": key, "win": i, "amt": Decimal(str(a)), "n": n} for i, (a, n) in enumerate(zip(amounts, counts, strict=True))]
+    return [
+        {"k": key, "win": i, "amt": Decimal(str(a)), "n": n}
+        for i, (a, n) in enumerate(zip(amounts, counts, strict=True))
+    ]
 
 
 class TestCategoryShifts(unittest.TestCase):

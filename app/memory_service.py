@@ -165,9 +165,7 @@ def retrieve_user_memories(user_email: str | None = None, client=None) -> list[s
             ORDER BY created_at ASC
         """
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("email", "STRING", target_user)
-            ]
+            query_parameters=[bigquery.ScalarQueryParameter("email", "STRING", target_user)]
         )
         rows = list(bq.query(query, job_config=job_config).result())
         for r in rows:
@@ -325,7 +323,9 @@ def save_user_preference(
             resp_data = _call_memory_bank_api(":generate", gen_payload)
             if resp_data is not None:
                 mb_saved = True
-                logger.info(f"Successfully consolidated preference into Vertex Memory Bank REST API for '{target_user}': {clean_fact}")
+                logger.info(
+                    f"Successfully consolidated preference into Vertex Memory Bank REST API for '{target_user}': {clean_fact}"
+                )
         except Exception as e:
             logger.error(f"Failed to generate memory in Memory Bank REST API for '{target_user}': {e}")
 

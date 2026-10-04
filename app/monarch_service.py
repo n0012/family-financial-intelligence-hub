@@ -568,9 +568,7 @@ async def get_live_transaction_async(transaction_id: str) -> dict:
                     f"WHERE transaction_id = @txn_id LIMIT 1"
                 )
                 job_config = bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("txn_id", "STRING", str(transaction_id))
-                    ]
+                    query_parameters=[bigquery.ScalarQueryParameter("txn_id", "STRING", str(transaction_id))]
                 )
                 bq_rows = list(bq_client.query(query, job_config=job_config).result(max_results=1))
                 if bq_rows:
@@ -1331,9 +1329,7 @@ def build_batch_recategorization_success_card(
     esc_cat = html.escape(str(category_name))
     esc_merch = html.escape(str(merchant_name))
     amt_str = f" (${abs(total_amount):,.2f})" if total_amount is not None else ""
-    status_text = (
-        f"✅ <b>{confirmed_count}</b> transactions for <b>{esc_merch}</b>{amt_str} were successfully reclassified to <b>{esc_cat}</b>."
-    )
+    status_text = f"✅ <b>{confirmed_count}</b> transactions for <b>{esc_merch}</b>{amt_str} were successfully reclassified to <b>{esc_cat}</b>."
     if failed_count > 0:
         status_text += f" (⚠️ {failed_count} transactions could not be updated)."
 
@@ -1884,6 +1880,7 @@ async def execute_guarded_batch_recategorization(
 
     # Bulk update BigQuery for confirmed transactions
     if confirmed_ids:
+
         def _bq_bulk_update():
             try:
                 bq = get_bq_client(BQ_PROJECT_ID)
@@ -1918,12 +1915,14 @@ async def execute_guarded_batch_recategorization(
         previous_value=f"{len(txn_ids)} txns for {merchant_name}",
         new_value=cat_name,
         signature_valid=True,
-        details=json.dumps({
-            "attempted": len(txn_ids),
-            "succeeded": len(confirmed_ids),
-            "failed_count": len(failed_items),
-            "failed_samples": failed_items[:5],
-        }),
+        details=json.dumps(
+            {
+                "attempted": len(txn_ids),
+                "succeeded": len(confirmed_ids),
+                "failed_count": len(failed_items),
+                "failed_samples": failed_items[:5],
+            }
+        ),
     )
 
     return {
@@ -1946,13 +1945,14 @@ async def find_next_recategorization_recommendation_async(
     or fragmented transactions, prioritizing well-known digital subscriptions and
     merchants with high historical category consensus.
     """
+
     def _query_recommendations():
         try:
             bq = get_bq_client(BQ_PROJECT_ID)
             ex_pattern = f"%{str(exclude_merchant or '').strip().lower()}%" if exclude_merchant else ""
 
             # 1. Known Streaming & Subscription services frequently misclassified under Entertainment/General
-            known_streaming_sql = fr"""
+            known_streaming_sql = rf"""
             SELECT
                 COALESCE(clean_merchant_name, merchant_name) AS merchant,
                 category_name AS current_category,
@@ -2084,7 +2084,9 @@ def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str,
                     params_dict[str(item["key"])] = str(item.get("value", ""))
 
         # If action_name is a pubsub topic path or missing, fallback to explicit "action" parameter
-        if (not action_name or "/topics/" in str(action_name) or str(action_name).startswith("projects/")) and "action" in params_dict:
+        if (
+            not action_name or "/topics/" in str(action_name) or str(action_name).startswith("projects/")
+        ) and "action" in params_dict:
             action_name = params_dict["action"]
 
         return action_name, params_dict
@@ -2102,7 +2104,9 @@ def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str,
         elif isinstance(raw_params, dict):
             params_dict = {str(k): str(v) for k, v in raw_params.items()}
 
-        if (not action_name or "/topics/" in str(action_name) or str(action_name).startswith("projects/")) and "action" in params_dict:
+        if (
+            not action_name or "/topics/" in str(action_name) or str(action_name).startswith("projects/")
+        ) and "action" in params_dict:
             action_name = params_dict["action"]
 
         return action_name, params_dict

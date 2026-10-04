@@ -213,9 +213,7 @@ def get_session_history(
             LIMIT {limit}
         """
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("sessions", "STRING", sessions)
-            ]
+            query_parameters=[bigquery.ArrayQueryParameter("sessions", "STRING", sessions)]
         )
         rows = list(bq.query(query, job_config=job_config).result())
         history = []

@@ -1445,7 +1445,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         "morning summary",
     ]
     asks_for_brief = any(phrase in lower_text for phrase in brief_phrases)
-    is_brief_or_alerts_intent = clean_text.lower().startswith(("/brief", "brief", "/alerts", "alerts")) or asks_for_brief
+    is_brief_or_alerts_intent = (
+        clean_text.lower().startswith(("/brief", "brief", "/alerts", "alerts")) or asks_for_brief
+    )
     if is_brief_or_alerts_intent and (asks_for_brief or any(term in lower_text for term in ["brief", "synopsis"])):
         try:
             from app.daily_brief import build_brief_card, generate_daily_brief
