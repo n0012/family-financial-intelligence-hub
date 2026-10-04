@@ -109,7 +109,9 @@ RULES = [
     (
         "card number",
         re.compile(r"\b(?:\d[ -]?){13,19}\b"),
-        lambda m: (d := re.sub(r"\D", "", m.group(0))) and len(d) >= 13 and _luhn_ok(d) and not _is_placeholder_number(d),
+        lambda m: (
+            (d := re.sub(r"\D", "", m.group(0))) and len(d) >= 13 and _luhn_ok(d) and not _is_placeholder_number(d)
+        ),
         None,
     ),
     (

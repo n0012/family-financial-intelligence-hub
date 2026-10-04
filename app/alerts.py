@@ -413,7 +413,9 @@ def check_paycheck_surplus_sweep(bq: Any, project_id: str, dataset_id: str) -> l
         target_name = _safe_str(r, "target_debt_name", "heloc_name", default="HELOC")
         target_bal = _safe_float(r, "target_debt_balance", "heloc_balance")
         target_apr = _safe_float(r, "target_debt_apr", "heloc_apr")
-        total_debt_bal = _safe_float(r, "total_debt_balance", "target_debt_balance", "heloc_balance", default=target_bal)
+        total_debt_bal = _safe_float(
+            r, "total_debt_balance", "target_debt_balance", "heloc_balance", default=target_bal
+        )
         total_daily_cost = _safe_float(r, "total_daily_debt_cost")
 
         liquid_bal = _safe_float(r, "liquid_balance")
@@ -1121,7 +1123,11 @@ def generate_daily_brief_synopsis(
                     f"💳 <b>Debt Daily Carry:</b> ${total_daily_debt_cost:,.2f}/day (${total_monthly_debt_cost:,.2f}/mo) • "
                     f"Total: ${total_debt_balance:,.2f} (Mortgage: ${mortgage_daily_cost:,.2f}/day • HELOC Carry: ${daily_interest_cost:,.2f}/day{other_str})"
                 )
-                other_md_str = f"\n  - **Other / Loans**: ${other_debt_daily_cost:,.2f}/day on ${other_debt_balance:,.2f}" if other_debt_balance > 0 else ""
+                other_md_str = (
+                    f"\n  - **Other / Loans**: ${other_debt_daily_cost:,.2f}/day on ${other_debt_balance:,.2f}"
+                    if other_debt_balance > 0
+                    else ""
+                )
                 posture_md_lines.append(
                     f"• **Debt Daily Carry**: ${total_daily_debt_cost:,.2f}/day (${total_monthly_debt_cost:,.2f}/mo) on ${total_debt_balance:,.2f} total debt\n"
                     f"  - **Mortgage**: ${mortgage_daily_cost:,.2f}/day on ${mortgage_balance:,.2f}\n"
@@ -2395,7 +2401,9 @@ def get_paycheck_surplus_analysis(
             ]
         )
         if total_debt_bal > target_bal and total_daily_debt_cost > 0:
-            lines.append(f"• **Total Portfolio Debt**: ${total_debt_bal:,.2f} (${total_daily_debt_cost:,.2f}/day total carry)")
+            lines.append(
+                f"• **Total Portfolio Debt**: ${total_debt_bal:,.2f} (${total_daily_debt_cost:,.2f}/day total carry)"
+            )
 
         if recommended_sweep >= 250.00 and target_bal > 0:
             lines.extend(
