@@ -101,6 +101,18 @@ if [ -n "$EXCLUDED_INSTITUTIONS" ]; then
   echo "Done."
 fi
 
+# 9. Chat user allowlist (required on Cloud Run: an unset list denies every chat user)
+if [ -n "$ALLOWED_CHAT_USERS" ]; then
+  echo -n "Updating secret [allowed-chat-users]... "
+  gcloud secrets describe allowed-chat-users --project="$PROJECT" >/dev/null 2>&1 || \
+    gcloud secrets create allowed-chat-users --replication-policy="automatic" --project="$PROJECT" --quiet >/dev/null
+  echo -n "$ALLOWED_CHAT_USERS" | gcloud secrets versions add allowed-chat-users \
+    --data-file=- --project="$PROJECT" --quiet > /dev/null
+  echo "Done."
+else
+  echo "Warning: ALLOWED_CHAT_USERS is empty; the deployed Chat app will refuse every user."
+fi
+
 echo ""
 echo "================================================================="
 echo "Secrets sync completed successfully!"

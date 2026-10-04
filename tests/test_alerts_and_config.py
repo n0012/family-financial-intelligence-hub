@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -430,7 +431,9 @@ class TestAlerts(unittest.TestCase):
 
     def test_main_card_clicked_snooze_alert(self):
         from app import main
+        from app.monarch_service import generate_snooze_signature
 
+        ts = int(time.time())
         card_event = {
             "type": "CARD_CLICKED",
             "action": {
@@ -439,6 +442,8 @@ class TestAlerts(unittest.TestCase):
                     {"key": "alert_key", "value": "price_creep:hulu"},
                     {"key": "alert_type", "value": "PRICE_CREEP"},
                     {"key": "days", "value": "7"},
+                    {"key": "ts", "value": str(ts)},
+                    {"key": "sig", "value": generate_snooze_signature("price_creep:hulu", 7, ts)},
                 ],
             },
             "user": {"email": "user@example.com"},
@@ -448,6 +453,30 @@ class TestAlerts(unittest.TestCase):
             self.assertIn("cardsV2", res)
             self.assertIn("Price Creep", res.get("text", ""))
             mock_suppress.assert_called_once()
+
+    def test_main_card_clicked_snooze_alert_rejects_unsigned(self):
+        from app import main
+
+        card_event = {
+            "type": "CARD_CLICKED",
+            "action": {
+                "actionMethodName": "snooze_alert",
+                "parameters": [
+                    {"key": "alert_key", "value": "price_creep:hulu"},
+                    {"key": "alert_type", "value": "PRICE_CREEP"},
+                    {"key": "days", "value": "90"},
+                ],
+            },
+            "user": {"email": "user@example.com"},
+        }
+        with (
+            patch("app.main.suppress_alert", return_value=True) as mock_suppress,
+            patch("app.main.log_mutation_audit") as mock_audit,
+        ):
+            res = asyncio.run(main.google_chat_webhook(card_event))
+            self.assertIn("⛔", res.get("text", ""))
+            mock_suppress.assert_not_called()
+            self.assertEqual(mock_audit.call_args[1]["status"], "REJECTED")
 
     def test_generate_daily_brief_synopsis(self):
         mock_bq = MagicMock()

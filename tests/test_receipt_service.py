@@ -44,6 +44,16 @@ class TestReceiptPiiScrubbing(unittest.TestCase):
         self.assertNotIn("123-45-6789", scrubbed)
         self.assertIn("[REDACTED_SSN]", scrubbed)
 
+    def test_scrub_ssn_unformatted_and_spaced(self):
+        for ssn in ("123456789", "123 45 6789"):
+            scrubbed = scrub_pii(f"Member ID {ssn} on file.")
+            self.assertNotIn(ssn, scrubbed)
+            self.assertIn("[REDACTED_SSN]", scrubbed)
+
+    def test_scrub_leaves_dates_and_amounts(self):
+        text = "Total $123.45 on 2026-01-15, qty 12."
+        self.assertEqual(scrub_pii(text), text)
+
     def test_scrub_ein(self):
         text = "Charity Tax ID: 12-3456789 (501c3 exempt organization)."
         scrubbed = scrub_pii(text)

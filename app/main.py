@@ -923,13 +923,18 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         logger.info(f"Outgoing Chat Response: {json.dumps(resp)}")
         return resp
 
-    # Enforce family member allowlist if configured
-    allowed_users_raw = resolve_secret("allowed-chat-users", "ALLOWED_CHAT_USERS")
-    if allowed_users_raw:
-        allowed_users = [u.strip().lower() for u in allowed_users_raw.split(",") if u.strip()]
-        if allowed_users and user_email.lower() not in allowed_users:
-            logger.warning(f"Unauthorized chat access attempt from '{user_email}'")
-            return respond(f"🔒 Access Denied: User '{user_email}' is not authorized to query family finances.")
+    # Enforce the family member allowlist. On Cloud Run an unset list denies everyone;
+    # "*" is the explicit opt-in to let any Chat user through.
+    allowed_users_raw = resolve_secret("allowed-chat-users", "ALLOWED_CHAT_USERS") or ""
+    allowed_users = [u.strip().lower() for u in allowed_users_raw.split(",") if u.strip()]
+    if not allowed_users:
+        if IS_PROD:
+            logger.error("ALLOWED_CHAT_USERS is not configured; refusing all chat events")
+            return respond("🔒 Access Denied: this deployment has no authorized users configured.")
+        logger.warning("ALLOWED_CHAT_USERS is not configured; allowing all users (non-production only)")
+    elif "*" not in allowed_users and user_email.lower() not in allowed_users:
+        logger.warning(f"Unauthorized chat access attempt from '{user_email}'")
+        return respond(f"🔒 Access Denied: User '{user_email}' is not authorized to query family finances.")
 
     # 0. Interactive Card Action Click (Guarded recategorization confirmation)
     if event_type == "CARD_CLICKED":
@@ -964,7 +969,22 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 )
                 return respond(f"⛔ {rate_msg}")
 
-            # 2. Timestamp Validation
+            # 2. Addressee Validation (only the user the card was issued to may confirm it)
+            if target_user and target_user != "unknown" and user_email.lower() != target_user.lower():
+                logger.warning(
+                    f"Mutation rejected: user {user_email} attempted to confirm txn #{txn_id} assigned to {target_user}"
+                )
+                log_mutation_audit(
+                    action_type="RECATEGORIZE_TRANSACTION",
+                    target_id=txn_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    new_value=cat_name,
+                    details=f"Confirmation attempted by a user other than {target_user}",
+                )
+                return respond(f"⛔ Only {target_user} can confirm this recategorization.")
+
+            # 3. Timestamp Validation
             try:
                 ts = int(ts_str)
             except ValueError:
@@ -979,7 +999,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 )
                 return respond("⛔ Invalid timestamp in confirmation card.")
 
-            # 3. Cryptographic Signature & Freshness Validation
+            # 4. Cryptographic Signature & Freshness Validation
             is_valid, reason = verify_mutation_signature(txn_id, cat_id, target_user, ts, sig)
             if not is_valid:
                 logger.warning(f"Mutation signature rejected: {reason} (txn={txn_id}, user={user_email})")
@@ -994,7 +1014,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 )
                 return respond(f"⛔ Confirmation rejected: {reason}")
 
-            # 4. Idempotency Check (prevent duplicate replay mutations for authenticated requests)
+            # 5. Idempotency Check (prevent duplicate replay mutations for authenticated requests)
             cached_result = check_mutation_idempotency(user_email, "RECATEGORIZE_TRANSACTION", txn_id, cat_id)
             if cached_result:
                 logger.info(f"Idempotent replay detected for txn #{txn_id} to category #{cat_id}")
@@ -1021,7 +1041,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                     cards_v2=[success_card],
                 )
 
-            # 5. Execute Guarded Mutation
+            # 6. Execute Guarded Mutation
             mutation_result = await execute_guarded_recategorization(
                 transaction_id=txn_id,
                 category_id=cat_id,
@@ -1235,36 +1255,35 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             # Clamp days strictly between 1 and 90
             days = max(1, min(days, 90))
 
-            # Cryptographically verify snooze action if signature parameters are provided
+            # Every snooze card is signed; unsigned or tampered actions are rejected.
             sig_valid = None
-            if sig and ts_str:
-                try:
-                    ts = int(ts_str)
-                    from app.monarch_service import verify_snooze_signature
+            try:
+                ts = int(ts_str)
+                from app.monarch_service import verify_snooze_signature
 
-                    is_valid, reason = verify_snooze_signature(alert_key, days, ts, sig)
-                    sig_valid = is_valid
-                    if not is_valid:
-                        logger.warning(f"Snooze signature rejected: {reason} (key={alert_key})")
-                        log_mutation_audit(
-                            action_type="SNOOZE_ALERT",
-                            target_id=alert_key,
-                            user_email=user_email,
-                            status="REJECTED",
-                            signature_valid=False,
-                            details=reason,
-                        )
-                        return respond(f"⛔ Snooze rejected: {reason}")
-                except (ValueError, TypeError):
+                is_valid, reason = verify_snooze_signature(alert_key, days, ts, sig)
+                sig_valid = is_valid
+                if not is_valid:
+                    logger.warning(f"Snooze signature rejected: {reason} (key={alert_key})")
                     log_mutation_audit(
                         action_type="SNOOZE_ALERT",
                         target_id=alert_key,
                         user_email=user_email,
                         status="REJECTED",
                         signature_valid=False,
-                        details="Invalid timestamp in snooze action",
+                        details=reason,
                     )
-                    return respond("⛔ Invalid timestamp in snooze action.")
+                    return respond(f"⛔ Snooze rejected: {reason}")
+            except (ValueError, TypeError):
+                log_mutation_audit(
+                    action_type="SNOOZE_ALERT",
+                    target_id=alert_key,
+                    user_email=user_email,
+                    status="REJECTED",
+                    signature_valid=False,
+                    details="Invalid timestamp in snooze action",
+                )
+                return respond("⛔ Invalid timestamp in snooze action.")
 
             logger.info(
                 f"Snoozing alert from Card v2: key={alert_key}, type={alert_type}, days={days}, user={user_email}"
