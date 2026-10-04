@@ -203,7 +203,7 @@ class TestSigningAndCard(unittest.TestCase):
         self.assertEqual(params["item_count"], "2")
         self.assertEqual(params["user_email"], "user@example.com")
         self.assertIn("4 transactions", card["card"]["header"]["subtitle"])
-        self.assertIn("your rule", json.dumps(card))
+        self.assertIn("confirmed before", json.dumps(card))
 
 
 class TestFormValues(unittest.TestCase):
@@ -251,6 +251,7 @@ class TestPropose(unittest.TestCase):
         )
         with (
             patch.object(cr, "ensure_review_tables"),
+            patch.object(cr, "load_from_monarch", AsyncMock(return_value=([], []))),
             patch.object(cr, "load_categories", return_value=CATEGORIES),
             patch.object(cr, "load_decisions", return_value=decisions),
             patch.object(cr, "find_review_candidates", return_value=cands),
@@ -465,6 +466,252 @@ class TestChatHandlers(unittest.TestCase):
         self.assertEqual(post.call_count, 2)
         self.assertIn("Researching merchants", post.call_args_list[0].args[0])
         self.assertEqual(post.call_args_list[1].kwargs["cards_v2"], [proposal["card"]])
+
+
+MONARCH_RULES_RAW = [
+    {  # merchant-only rule: counts
+        "id": "rule_1",
+        "merchantNameCriteria": [{"operator": "eq", "value": "Stream Co"}],
+        "setCategoryAction": {"id": "c_subs", "name": "Subscriptions"},
+    },
+    {  # legacy merchant field with contains
+        "id": "rule_2",
+        "merchantCriteria": [{"operator": "contains", "value": "burger"}],
+        "setCategoryAction": {"id": "c_rest", "name": "Restaurants & Bars"},
+    },
+    {  # conditional on amount: only covers some transactions, ignored
+        "id": "rule_3",
+        "merchantNameCriteria": [{"operator": "eq", "value": "Corner Cafe"}],
+        "amountCriteria": {"operator": "gt"},
+        "setCategoryAction": {"id": "c_rest", "name": "Restaurants & Bars"},
+    },
+    {  # renames only, no category: ignored
+        "id": "rule_4",
+        "merchantNameCriteria": [{"operator": "eq", "value": "Big Box"}],
+        "setCategoryAction": None,
+    },
+]
+
+
+class TestMonarchRules(unittest.TestCase):
+    def test_parse_keeps_unconditional_category_rules(self):
+        rules = cr.parse_monarch_rules(MONARCH_RULES_RAW)
+        self.assertEqual([r["id"] for r in rules], ["rule_1", "rule_2"])
+
+    def test_matching(self):
+        rules = cr.parse_monarch_rules(MONARCH_RULES_RAW)
+        self.assertEqual(cr.matching_monarch_rule("stream co", rules)["id"], "rule_1")
+        self.assertEqual(cr.matching_monarch_rule("Burger Barn #12", rules)["id"], "rule_2")
+        self.assertIsNone(cr.matching_monarch_rule("Stream Company", rules))
+        self.assertIsNone(cr.matching_monarch_rule("Corner Cafe", rules))
+
+    def test_precedence(self):
+        now = datetime(2026, 6, 1, tzinfo=UTC)
+        rules = cr.parse_monarch_rules(MONARCH_RULES_RAW)
+        cands = [
+            _cand("Stream Co", {"Entertainment": 2}),
+            _cand("Burger Barn", {"Uncategorized": 2}),
+            _cand("Corner Cafe", {"Uncategorized": 2}),
+        ]
+        decisions = [
+            # an older confirmation loses to the live Monarch rule
+            {
+                "merchant": "Stream Co",
+                "category_id": "c_coffee",
+                "category_name": "Coffee Shops",
+                "decision": "ACCEPTED",
+                "decided_at": now - timedelta(days=30),
+            },
+            # a recent rejection beats the Monarch rule
+            {"merchant": "Burger Barn", "decision": "REJECTED", "decided_at": now - timedelta(days=3)},
+        ]
+        rule_based, to_research = cr.split_by_memory(cands, decisions, now, monarch_rules=rules)
+        self.assertEqual(
+            [(r["merchant"], r["category_id"], r["source"]) for r in rule_based],
+            [("Stream Co", "c_subs", "monarch_rule")],
+        )
+        self.assertEqual(rule_based[0]["monarch_rule_id"], "rule_1")
+        self.assertEqual([c["merchant"] for c in to_research], ["Corner Cafe"])
+
+    def test_create_rule_sends_merchant_equals_and_category(self):
+        client = MagicMock()
+        client.gql_call = AsyncMock(
+            return_value={"createTransactionRuleV2": {"transactionRule": {"id": "new_rule"}, "errors": None}}
+        )
+        rule_id = asyncio.run(cr.create_monarch_rule(client, "Corner Cafe", "c_coffee"))
+        self.assertEqual(rule_id, "new_rule")
+        sent = client.gql_call.call_args.kwargs["variables"]["input"]
+        self.assertEqual(sent["merchantNameCriteria"], [{"operator": "eq", "value": "Corner Cafe"}])
+        self.assertEqual(sent["setCategoryAction"], "c_coffee")
+        self.assertFalse(sent["applyToExistingTransactions"])
+
+    def test_create_rule_raises_on_monarch_errors(self):
+        client = MagicMock()
+        client.gql_call = AsyncMock(
+            return_value={
+                "createTransactionRuleV2": {
+                    "transactionRule": None,
+                    "errors": {"message": "Invalid", "fieldErrors": []},
+                }
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            asyncio.run(cr.create_monarch_rule(client, "Corner Cafe", "c_coffee"))
+
+    def test_live_categories_mark_income_groups(self):
+        client = MagicMock()
+        client.get_transaction_categories = AsyncMock(
+            return_value={
+                "categories": [
+                    {"id": "1", "name": "Coffee Shops", "group": {"name": "Food & Dining", "type": "expense"}},
+                    {"id": "2", "name": "Paychecks", "group": {"name": "Income", "type": "income"}},
+                ]
+            }
+        )
+        cats = asyncio.run(cr.fetch_live_categories(client))
+        self.assertEqual(
+            [(c["category_name"], c["is_income"]) for c in cats], [("Coffee Shops", False), ("Paychecks", True)]
+        )
+
+    def test_propose_uses_monarch_rules_and_live_categories(self):
+        live_cats = [
+            {"category_id": "live_coffee", "category_name": "Coffee & Tea", "group_name": "Food", "is_income": False}
+        ]
+        client = MagicMock()
+        client.models.generate_content.return_value.text = json.dumps(
+            {
+                "suggestions": [
+                    {
+                        "merchant": "Corner Cafe",
+                        "action": "recategorize",
+                        "category": "Coffee & Tea",
+                        "confidence": 0.9,
+                        "reason": "A cafe.",
+                    }
+                ]
+            }
+        )
+        cands = [_cand("Stream Co", {"Entertainment": 2}), _cand("Corner Cafe", {"Uncategorized": 3})]
+        with (
+            patch.object(cr, "ensure_review_tables"),
+            patch.object(
+                cr, "load_from_monarch", AsyncMock(return_value=(cr.parse_monarch_rules(MONARCH_RULES_RAW), live_cats))
+            ),
+            patch.object(cr, "load_categories") as synced_cats,
+            patch.object(cr, "load_decisions", return_value=[]),
+            patch.object(cr, "find_review_candidates", return_value=cands),
+            patch.object(cr, "_transaction_ids_to_change", return_value=["t1"]),
+            patch.object(cr, "save_review"),
+            patch.object(cr, "record_decisions"),
+        ):
+            res = cr.propose_category_review("user@example.com", 10, bq=MagicMock(), research_client=client)
+        synced_cats.assert_not_called()
+        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("Coffee & Tea", prompt)
+        self.assertIn("Stream Co -> Subscriptions", prompt)  # Monarch rules guide the research
+        card = json.dumps(res["card"])
+        self.assertIn("your Monarch rule", card)
+        self.assertIn("adds Monarch rule", card)  # only the researched merchant gets a new rule
+        self.assertEqual(card.count("adds Monarch rule"), 1)
+
+    def test_monarch_unreachable_falls_back_to_synced_categories(self):
+        with (
+            patch.object(cr, "ensure_review_tables"),
+            patch.object(cr, "load_from_monarch", AsyncMock(side_effect=RuntimeError("down"))),
+            patch.object(cr, "load_categories", return_value=CATEGORIES) as synced_cats,
+            patch.object(cr, "load_decisions", return_value=[]),
+            patch.object(cr, "find_review_candidates", return_value=[]),
+        ):
+            res = cr.propose_category_review("user@example.com", 10, bq=MagicMock())
+        synced_cats.assert_called_once()
+        self.assertEqual(res["status"], "none_found")
+
+
+class TestApplyCreatesRules(unittest.TestCase):
+    def setUp(self):
+        cr._PENDING_REVIEWS.clear()
+        cr._PENDING_REVIEWS["r2"] = {
+            "review_id": "r2",
+            "user_email": "user@example.com",
+            "status": "PENDING",
+            "items": [
+                {
+                    "merchant": "Corner Cafe",
+                    "category_id": "c_coffee",
+                    "category_name": "Coffee Shops",
+                    "transaction_ids": ["t1"],
+                    "create_rule": True,
+                },
+                {
+                    "merchant": "Stream Co",
+                    "category_id": "c_subs",
+                    "category_name": "Subscriptions",
+                    "transaction_ids": ["t2"],
+                    "create_rule": False,
+                    "source": "monarch_rule",
+                    "monarch_rule_id": "rule_1",
+                },
+                {
+                    "merchant": "Burger Barn",
+                    "category_id": "c_rest",
+                    "category_name": "Restaurants & Bars",
+                    "transaction_ids": ["t3"],
+                    "create_rule": True,
+                },
+            ],
+        }
+
+    def _apply(self, client):
+        with (
+            patch.object(cr, "record_decisions") as rec,
+            patch.object(cr, "_mirror_to_bq"),
+            patch.object(cr, "log_mutation_audit"),
+        ):
+            res = asyncio.run(
+                cr.apply_category_review("r2", [0, 1, 2], "user@example.com", bq=MagicMock(), client=client)
+            )
+        return res, rec
+
+    def _client(self, create_result):
+        client = MagicMock()
+        client.update_transaction = AsyncMock()
+
+        async def gql_call(operation, graphql_query, variables=None):
+            if operation == "GetTransactionRules":
+                return {"transactionRules": MONARCH_RULES_RAW}
+            if isinstance(create_result, Exception):
+                raise create_result
+            return create_result
+
+        client.gql_call = AsyncMock(side_effect=gql_call)
+        return client
+
+    def test_rules_created_only_where_missing(self):
+        client = self._client({"createTransactionRuleV2": {"transactionRule": {"id": "new_rule"}, "errors": None}})
+        res, rec = self._apply(client)
+        by_merchant = {i["merchant"]: i for i in res["applied"]}
+        self.assertEqual(by_merchant["Corner Cafe"]["rule_status"], "created")
+        self.assertEqual(by_merchant["Corner Cafe"]["monarch_rule_id"], "new_rule")
+        # Burger Barn is already covered by a Monarch "contains burger" rule.
+        self.assertEqual(by_merchant["Burger Barn"]["rule_status"], "exists")
+        self.assertNotIn("rule_status", by_merchant["Stream Co"])
+        creates = [c for c in client.gql_call.call_args_list if c.kwargs["operation"] != "GetTransactionRules"]
+        self.assertEqual(len(creates), 1)
+        accepted = next(c.args[1] for c in rec.call_args_list if c.args[2] == "ACCEPTED")
+        self.assertEqual(
+            {i["merchant"]: i.get("monarch_rule_id") for i in accepted},
+            {"Corner Cafe": "new_rule", "Stream Co": "rule_1", "Burger Barn": "rule_2"},
+        )
+        self.assertIn("Monarch rule added", json.dumps(res["card"]))
+
+    def test_rule_failure_keeps_the_transaction_fixes(self):
+        client = self._client(RuntimeError("schema changed"))
+        res, _ = self._apply(client)
+        self.assertEqual(res["status"], "APPLIED")
+        self.assertEqual(client.update_transaction.call_count, 3)
+        by_merchant = {i["merchant"]: i for i in res["applied"]}
+        self.assertEqual(by_merchant["Corner Cafe"]["rule_status"], "failed")
+        self.assertIn("Monarch rule not added", json.dumps(res["card"]))
 
 
 if __name__ == "__main__":

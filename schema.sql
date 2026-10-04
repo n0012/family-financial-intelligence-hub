@@ -124,7 +124,8 @@ CREATE TABLE IF NOT EXISTS `family_finance.merchant_category_decisions` (
     source STRING,                   -- 'review', 'research'
     review_id STRING,
     user_email STRING,
-    decided_at TIMESTAMP NOT NULL
+    decided_at TIMESTAMP NOT NULL,
+    monarch_rule_id STRING           -- Monarch rule created or found for an ACCEPTED merchant
 );
 
 -- ==============================================================================

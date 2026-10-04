@@ -1,11 +1,12 @@
 """
 Researched category reviews.
 
-Finds merchants whose transactions are uncategorized or split across categories, researches what
-each business is with Gemini grounded on Google Search, and proposes one category per merchant in a
-single signed review card. The user ticks the suggestions to apply; applied ones are written back to
-Monarch Money, and every decision (applied or rejected) is remembered so the same merchant is not
-proposed again and confirmed merchants become household rules that skip research next time.
+Finds merchants whose transactions are uncategorized or split across categories, looks up the
+household's live Monarch categories and transaction rules, researches the remaining businesses with
+Gemini grounded on Google Search, and proposes one category per merchant in a single signed review
+card. The user ticks the suggestions to apply. Applying recategorizes the merchant's transactions in
+Monarch Money and creates a Monarch rule so future transactions are categorized at the source. Every
+decision (applied or rejected) is remembered so the same merchant is not proposed again.
 
 Only merchant names, category labels, counts and typical amounts are sent to the model. Searches are
 limited to the merchant name.
@@ -24,12 +25,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from google.cloud import bigquery
+from gql import gql
 
 from app.bq_service import get_bq_client
 from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, get_chat_action_target, resolve_secret
 from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
     CURRENT_USER_EMAIL,
+    _run_async,
     get_monarch_client,
     get_mutation_hmac_secret,
     log_mutation_audit,
@@ -86,8 +89,10 @@ def ensure_review_tables(bq: bigquery.Client) -> None:
             source STRING,
             review_id STRING,
             user_email STRING,
-            decided_at TIMESTAMP NOT NULL
+            decided_at TIMESTAMP NOT NULL,
+            monarch_rule_id STRING
         );
+        ALTER TABLE {_table("merchant_category_decisions")} ADD COLUMN IF NOT EXISTS monarch_rule_id STRING;
         """
     ).result()
     _TABLES_READY = True
@@ -122,6 +127,138 @@ def verify_review_signature(
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch. Review parameters may have been altered."
     return True, "Valid"
+
+
+# -----------------------------------------------------------------------------
+# Monarch lookup: live categories and transaction rules
+# -----------------------------------------------------------------------------
+
+# Monarch's web app uses these operations; the Python client has no wrapper for rules.
+_RULES_QUERY = gql(
+    """
+    query GetTransactionRules {
+      transactionRules {
+        id
+        merchantCriteria { operator value }
+        merchantNameCriteria { operator value }
+        originalStatementCriteria { operator value }
+        amountCriteria { operator }
+        categoryIds
+        accountIds
+        setCategoryAction { id name }
+      }
+    }
+    """
+)
+_CREATE_RULE_MUTATION = gql(
+    """
+    mutation Common_CreateTransactionRuleMutationV2($input: CreateTransactionRuleInput!) {
+      createTransactionRuleV2(input: $input) {
+        transactionRule { id }
+        errors { message code fieldErrors { field messages } }
+      }
+    }
+    """
+)
+
+
+def parse_monarch_rules(raw_rules: list[dict]) -> list[dict]:
+    """
+    Keeps the rules that categorize by merchant name alone. Rules that also filter on amount,
+    account, current category or statement text only cover some of a merchant's transactions, so
+    they are not treated as the merchant's category.
+    """
+    rules = []
+    for r in raw_rules or []:
+        action = r.get("setCategoryAction") or {}
+        criteria = (r.get("merchantNameCriteria") or []) + (r.get("merchantCriteria") or [])
+        conditional = any(
+            r.get(k) for k in ("originalStatementCriteria", "amountCriteria", "categoryIds", "accountIds")
+        )
+        if not action.get("id") or not criteria or conditional:
+            continue
+        rules.append(
+            {
+                "id": str(r.get("id")),
+                "category_id": str(action["id"]),
+                "category_name": action.get("name") or "",
+                "criteria": [(str(c.get("operator", "")).lower(), str(c.get("value", ""))) for c in criteria],
+            }
+        )
+    return rules
+
+
+def matching_monarch_rule(merchant: str, rules: list[dict]) -> dict | None:
+    """The first Monarch rule whose merchant criteria match this merchant name."""
+    name = merchant.strip().lower()
+    for rule in rules:
+        for op, value in rule["criteria"]:
+            v = value.strip().lower()
+            if v and ((op == "eq" and name == v) or (op == "contains" and v in name)):
+                return rule
+    return None
+
+
+async def fetch_monarch_rules(client) -> list[dict]:
+    resp = await client.gql_call(operation="GetTransactionRules", graphql_query=_RULES_QUERY)
+    return parse_monarch_rules(resp.get("transactionRules") or [])
+
+
+async def fetch_live_categories(client) -> list[dict]:
+    """Categories as they exist in Monarch right now, in the same shape as load_categories."""
+    raw = await client.get_transaction_categories()
+    cats = []
+    for c in raw.get("categories", []):
+        group = c.get("group") or {}
+        group_name = group.get("name") if isinstance(group, dict) else str(group or "")
+        group_type = str(group.get("type", "")).lower() if isinstance(group, dict) else ""
+        cats.append(
+            {
+                "category_id": str(c.get("id")),
+                "category_name": str(c.get("name")),
+                "group_name": group_name,
+                "is_income": group_type == "income" or str(group_name).lower() == "income",
+            }
+        )
+    return [c for c in cats if c["category_id"] and c["category_name"]]
+
+
+async def load_from_monarch() -> tuple[list[dict], list[dict]]:
+    """(rules, categories) from Monarch. Either may be empty if Monarch is unreachable."""
+    client = await get_monarch_client()
+    rules, categories = [], []
+    try:
+        rules = await fetch_monarch_rules(client)
+    except Exception as e:
+        logger.warning(f"Could not read Monarch transaction rules: {e}")
+    try:
+        categories = await fetch_live_categories(client)
+    except Exception as e:
+        logger.warning(f"Could not read Monarch categories: {e}")
+    return rules, categories
+
+
+async def create_monarch_rule(client, merchant: str, category_id: str) -> str:
+    """Creates a Monarch rule: merchant name equals `merchant` -> category. Returns the rule id."""
+    rule_input = {
+        "merchantNameCriteria": [{"operator": "eq", "value": merchant}],
+        "setCategoryAction": category_id,
+        # Past transactions are updated one by one by the review itself, so they can be counted.
+        "applyToExistingTransactions": False,
+    }
+    resp = await client.gql_call(
+        operation="Common_CreateTransactionRuleMutationV2",
+        graphql_query=_CREATE_RULE_MUTATION,
+        variables={"input": rule_input},
+    )
+    payload = resp.get("createTransactionRuleV2") or {}
+    errors = payload.get("errors") or {}
+    if errors.get("message") or errors.get("fieldErrors"):
+        raise RuntimeError(errors.get("message") or str(errors.get("fieldErrors")))
+    rule_id = (payload.get("transactionRule") or {}).get("id")
+    if not rule_id:
+        raise RuntimeError("Monarch returned no rule id")
+    return str(rule_id)
 
 
 # -----------------------------------------------------------------------------
@@ -216,23 +353,43 @@ def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dic
     return rows
 
 
-def split_by_memory(candidates: list[dict], decisions: list[dict], now: datetime | None = None):
+def split_by_memory(
+    candidates: list[dict],
+    decisions: list[dict],
+    now: datetime | None = None,
+    monarch_rules: list[dict] | None = None,
+):
     """
-    Returns (rule_based, to_research). A merchant the household already confirmed gets that category
-    without research; recently rejected or model-skipped merchants are dropped.
+    Returns (rule_based, to_research). Order of precedence for each merchant:
+    a recent rejection drops it; an existing Monarch rule supplies the category; a category the
+    household confirmed in an earlier review supplies it; a recent "leave it" from the model drops it;
+    anything else is researched.
     """
     now = now or datetime.now(UTC)
     latest = {str(d["merchant"]).strip().lower(): d for d in decisions}
     rule_based, to_research = [], []
     for cand in candidates:
-        d = latest.get(str(cand["merchant"]).strip().lower())
-        if not d:
-            to_research.append(cand)
-            continue
+        d = latest.get(str(cand["merchant"]).strip().lower()) or {}
         decided_at = d.get("decided_at")
         age_days = (now - decided_at).days if isinstance(decided_at, datetime) else 0
         decision = d.get("decision")
-        if decision == "ACCEPTED" and d.get("category_id"):
+        monarch_rule = matching_monarch_rule(cand["merchant"], monarch_rules or [])
+
+        if decision == "REJECTED" and age_days < REJECTION_MEMORY_DAYS:
+            continue
+        if monarch_rule:
+            rule_based.append(
+                {
+                    **cand,
+                    "category_id": monarch_rule["category_id"],
+                    "category_name": monarch_rule["category_name"],
+                    "confidence": 1.0,
+                    "reason": "Your Monarch rule files this merchant here; older transactions predate it.",
+                    "source": "monarch_rule",
+                    "monarch_rule_id": monarch_rule["id"],
+                }
+            )
+        elif decision == "ACCEPTED" and d.get("category_id"):
             rule_based.append(
                 {
                     **cand,
@@ -243,8 +400,6 @@ def split_by_memory(candidates: list[dict], decisions: list[dict], now: datetime
                     "source": "rule",
                 }
             )
-        elif decision == "REJECTED" and age_days < REJECTION_MEMORY_DAYS:
-            continue
         elif decision == "AI_SKIPPED" and age_days < AI_SKIP_MEMORY_DAYS:
             continue
         else:
@@ -433,6 +588,7 @@ def record_decisions(bq: bigquery.Client, items: list[dict], decision: str, sour
             "review_id": review_id,
             "user_email": user_email,
             "decided_at": now,
+            "monarch_rule_id": i.get("monarch_rule_id"),
         }
         for i in items
     ]
@@ -545,21 +701,32 @@ def propose_category_review(
     bq = bq or get_bq_client(BQ_PROJECT_ID)
     ensure_review_tables(bq)
 
-    categories = load_categories(bq)
+    # Start from what is in Monarch now: its categories and the household's own rules.
+    monarch_rules, live_categories = [], []
+    try:
+        monarch_rules, live_categories = _run_async(load_from_monarch())
+    except Exception as e:
+        logger.warning(f"Monarch lookup failed; using the last synced categories and no rules: {e}")
+    categories = live_categories or load_categories(bq)
     decisions = load_decisions(bq)
-    rules = [d for d in decisions if d.get("decision") == "ACCEPTED" and d.get("category_name")]
-    rule_based, to_research = split_by_memory(find_review_candidates(bq), decisions)
+    conventions = [d for d in decisions if d.get("decision") == "ACCEPTED" and d.get("category_name")]
+    conventions += [
+        {"merchant": value, "category_name": r["category_name"]} for r in monarch_rules for _, value in r["criteria"]
+    ]
+    rule_based, to_research = split_by_memory(find_review_candidates(bq), decisions, monarch_rules=monarch_rules)
 
     items = rule_based[:max_merchants]
     if len(items) < max_merchants and to_research:
         # Research a few extra: some will come back as "leave" or low confidence.
         batch = to_research[: (max_merchants - len(items)) + RESEARCH_CHUNK_SIZE]
-        researched, skipped = research_candidates(batch, categories, rules, research_client)
+        researched, skipped = research_candidates(batch, categories, conventions, research_client)
         items += researched[: max_merchants - len(items)]
         record_decisions(bq, skipped, "AI_SKIPPED", "research", None, user_email)
 
     for item in items:
         item["transaction_ids"] = _transaction_ids_to_change(bq, item["merchant"], item["category_id"])
+        # A merchant already covered by a Monarch rule needs no new one.
+        item["create_rule"] = item.get("source") != "monarch_rule"
     items = [i for i in items if i["transaction_ids"]]
     if not items:
         return {"status": "none_found", "message": "No confident category fixes found right now."}
@@ -590,9 +757,10 @@ def propose_category_review(
 
 def start_category_review(max_merchants: int = 10) -> str:
     """
-    Tool: Researches merchants whose transactions are uncategorized or split across categories, using
-    web search to identify each business, and posts one review card listing up to max_merchants
-    suggested category fixes. The user ticks which to apply; nothing changes until they do.
+    Tool: Looks up the household's Monarch categories and rules, researches merchants whose transactions
+    are uncategorized or split across categories using web search, and posts one review card listing
+    up to max_merchants suggested category fixes. The user ticks which to apply; applying updates the
+    transactions in Monarch and adds a Monarch rule for future ones. Nothing changes until they do.
     """
     try:
         res = propose_category_review(CURRENT_USER_EMAIL.get(), max_merchants)
@@ -617,7 +785,11 @@ def build_review_card(review_id: str, items: list[dict], user_email: str, timest
     widgets = []
     for item in items:
         current = ", ".join(f"{c['category_name']} ({c['n']})" for c in item["categories"][:3])
-        badge = "✔ your rule" if item.get("source") == "rule" else f"{int(item['confidence'] * 100)}% sure"
+        badge = {"monarch_rule": "✔ your Monarch rule", "rule": "✔ confirmed before"}.get(
+            item.get("source"), f"{int(item['confidence'] * 100)}% sure"
+        )
+        if item.get("create_rule"):
+            badge += " · adds Monarch rule"
         widgets.append(
             {
                 "decoratedText": {
@@ -676,7 +848,12 @@ def build_review_card(review_id: str, items: list[dict], user_email: str, timest
         }
     )
     widgets.append(
-        {"textParagraph": {"text": "<i>Unticked suggestions are remembered and won't be proposed again.</i>"}}
+        {
+            "textParagraph": {
+                "text": "<i>Applying updates these transactions in Monarch and adds a Monarch rule so future ones "
+                "are categorized automatically. Unticked suggestions won't be proposed again.</i>"
+            }
+        }
     )
     return {
         "cardId": f"category_review_{review_id}",
@@ -693,8 +870,14 @@ def build_review_card(review_id: str, items: list[dict], user_email: str, timest
 
 
 def build_review_result_card(review_id: str, applied: list[dict], rejected: list[dict], failed: int) -> dict:
+    rule_note = {
+        "created": " · Monarch rule added",
+        "exists": " · Monarch rule already in place",
+        "failed": " · ⚠️ Monarch rule not added",
+    }
     lines = [
         f"✅ <b>{html.escape(i['merchant'])}</b> → {html.escape(i['category_name'])} ({i['applied_count']} txns)"
+        f"{rule_note.get(i.get('rule_status'), '')}"
         for i in applied
     ]
     lines += [f"🚫 {html.escape(i['merchant'])} (kept as is)" for i in rejected]
@@ -755,13 +938,33 @@ async def apply_category_review(
                             return False
                         await asyncio.sleep(0.5)
 
+        existing_rules = []
+        if any(i.get("create_rule") for i in selected):
+            try:
+                existing_rules = await fetch_monarch_rules(client)
+            except Exception as e:
+                logger.warning(f"Category review {review_id}: could not re-read Monarch rules: {e}")
+
         for item in selected:
             results = await asyncio.gather(*(_update(t, item["category_id"]) for t in item["transaction_ids"]))
             ok_ids = [t for t, ok in zip(item["transaction_ids"], results, strict=True) if ok]
             failed_total += len(item["transaction_ids"]) - len(ok_ids)
-            if ok_ids:
-                await asyncio.to_thread(_mirror_to_bq, bq, ok_ids, item["category_id"], item["category_name"])
-                applied.append({**item, "applied_count": len(ok_ids)})
+            if not ok_ids:
+                continue
+            await asyncio.to_thread(_mirror_to_bq, bq, ok_ids, item["category_id"], item["category_name"])
+            done = {**item, "applied_count": len(ok_ids)}
+            if item.get("create_rule"):
+                covering = matching_monarch_rule(item["merchant"], existing_rules)
+                if covering:
+                    done.update(monarch_rule_id=covering["id"], rule_status="exists")
+                else:
+                    try:
+                        rule_id = await create_monarch_rule(client, item["merchant"], item["category_id"])
+                        done.update(monarch_rule_id=rule_id, rule_status="created")
+                    except Exception as e:
+                        logger.warning(f"Category review {review_id}: Monarch rule not created: {e}")
+                        done["rule_status"] = "failed"
+            applied.append(done)
 
     await asyncio.to_thread(record_decisions, bq, applied, "ACCEPTED", "review", review_id, user_email)
     await asyncio.to_thread(record_decisions, bq, rejected, "REJECTED", "review", review_id, user_email)
@@ -780,7 +983,10 @@ async def apply_category_review(
         signature_valid=True,
         details=json.dumps(
             {
-                "applied": [{"merchant": i["merchant"], "count": i["applied_count"]} for i in applied],
+                "applied": [
+                    {"merchant": i["merchant"], "count": i["applied_count"], "rule": i.get("rule_status")}
+                    for i in applied
+                ],
                 "rejected": len(rejected),
                 "failed_transactions": failed_total,
             }
