@@ -113,6 +113,16 @@ else
   echo "Warning: ALLOWED_CHAT_USERS is empty; the deployed Chat app will refuse every user."
 fi
 
+# 10. Card signing key: created once with a random value; only replaced when MUTATION_HMAC_SECRET is set
+if [ -n "$MUTATION_HMAC_SECRET" ] || ! gcloud secrets describe mutation-hmac-secret --project="$PROJECT" >/dev/null 2>&1; then
+  echo -n "Updating secret [mutation-hmac-secret]... "
+  gcloud secrets describe mutation-hmac-secret --project="$PROJECT" >/dev/null 2>&1 || \
+    gcloud secrets create mutation-hmac-secret --replication-policy="automatic" --project="$PROJECT" --quiet >/dev/null
+  echo -n "${MUTATION_HMAC_SECRET:-$(openssl rand -hex 32)}" | gcloud secrets versions add mutation-hmac-secret \
+    --data-file=- --project="$PROJECT" --quiet > /dev/null
+  echo "Done."
+fi
+
 echo ""
 echo "================================================================="
 echo "Secrets sync completed successfully!"

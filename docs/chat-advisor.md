@@ -36,6 +36,10 @@ sequenceDiagram
 
 Chat events are delivered by a **Pub/Sub push subscription** (`monarch-chat-push`) to `/chat/pubsub`. The service accepts only internal traffic and verifies each request's OIDC token, so it has no public endpoint, and it scales to zero between messages. Answers that take longer than 12 seconds get an interim "Analyzing..." reply, and the full answer is posted to the thread before the push request is acknowledged.
 
+Only emails in `ALLOWED_CHAT_USERS` can use the app; on Cloud Run an unset list refuses everyone.
+
+The SQL tool runs read-only queries, and a free dry run first checks every table the query would read. Only the financial tables (`raw_accounts`, `raw_categories`, `raw_transactions`, `receipt_records`, `brief_history`) and the `v_*` views over them are allowed; chat history, preferences, the audit log and `INFORMATION_SCHEMA` are refused.
+
 The legacy streaming-pull worker (`app/chat_worker.py`) is still available by setting `ENABLE_CHAT_PULL_WORKER=true`, but it needs an always-on instance (`--min-instances 1 --no-cpu-throttling`), which bills a full vCPU around the clock.
 
 ---
@@ -88,9 +92,6 @@ Viewing the brief on demand does not record its findings, so it never uses up th
 
 **`/alerts`** is the exhaustive view: it runs every alert check and replies in the thread with each alert and a **7-day snooze button** (HMAC-SHA256 signed). `python -m app.job full-scan` posts the same alerts to the space together with the older synopsis (pacing thermometer, cash posture and debt carry), which is also available from the `/advisor/morning-brief` API.
 
----
-
-by HMAC-SHA256 signatures.
 
 ---
 
@@ -120,7 +121,9 @@ Users can paste photos or PDFs of receipts and invoices directly into Google Cha
 
 When modifying categories or making ledger changes in Monarch Money, FinSage enforces physical confirmation:
 * **Interactive Card v2 Confirmation Widget**: Shows transaction details, original category, and proposed new category.
-* **Cryptographic Tamper Protection**: Action buttons include an HMAC-SHA256 signature containing transaction ID, category ID, and timestamp. Signatures expire in 15 minutes.
+* **Cryptographic Tamper Protection**: Action buttons include an HMAC-SHA256 signature containing transaction ID, category ID, the requesting user, and timestamp. Signatures expire in 15 minutes. The key is `mutation-hmac-secret`.
+* **Bound to the requester**: Only the person who asked for the change can confirm it, even in a shared space. A proposal that can't be attributed to a Chat user is never created.
+* **Signed snoozes**: Alert snooze buttons carry the same kind of signature, and unsigned or expired snoozes are rejected.
 * **Audit Trail**: Every confirmed or canceled mutation is permanently recorded in BigQuery `mutation_audit_log`.
 
 ---
@@ -130,4 +133,4 @@ When modifying categories or making ledger changes in Monarch Money, FinSage enf
 FinSage integrates with Vertex AI Agent Platform to persist family financial preferences across conversation threads:
 * Remembers user-specific targets (e.g. *"Our dining goal is under $600/month"*, *"Prioritize paying off the HELOC before the auto loan"*).
 * Resolves conflicting preferences autonomously.
-* Injects consolidated financial rules directly into Gemini's reasoning context.
+* Injects consolidated financial rules directly into Gemini's reasoning context. Stored facts are sanitized and presented as data, not instructions, so a saved "preference" can't rewrite the prompt.
