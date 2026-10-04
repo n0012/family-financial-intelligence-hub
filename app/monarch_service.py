@@ -2116,3 +2116,17 @@ def extract_card_action_parameters(payload: dict) -> tuple[str | None, dict[str,
         return action_name, params_dict
 
     return None, {}
+
+
+def extract_card_form_values(payload: dict, field_name: str) -> list[str] | None:
+    """
+    Returns the values submitted for a card form field (checkboxes, dropdowns), or None when the
+    event carries no form inputs at all, so callers can tell "nothing ticked" from "not readable".
+    """
+    for container in (payload.get("commonEventObject"), payload.get("common")):
+        if not isinstance(container, dict) or "formInputs" not in container:
+            continue
+        field = (container.get("formInputs") or {}).get(field_name) or {}
+        values = (field.get("stringInputs") or {}).get("value") or []
+        return [str(v) for v in values]
+    return None

@@ -53,6 +53,7 @@ The legacy streaming-pull worker (`app/chat_worker.py`) is still available by se
 | **`/sweep`** | Evaluates checking liquidity to calculate safe surplus sweeps to high-rate debt. | `v_paycheck_surplus_allocation`, `v_annual_bill_radar` |
 | **`/tax [YYYY]`** | Displays annual tax deductibility summary (Schedule C, HSA, Charities). | `v_tax_deductible_summary` |
 | **`/digest [weekly\|monthly]`** | Generates an executive CFO performance briefing. | `v_debt_summary`, `v_spend_classification` |
+| **`/categorize [N]`** | Researches up to N (default 10) uncategorized or split merchants on the web and posts one review card of category fixes to tick and apply. | `app/category_research.py`, `merchant_category_decisions` |
 | **`/sync`** | Triggers immediate Monarch Money ingestion into BigQuery. | `monarch_service.sync_accounts_to_bq()` |
 | **`/receipt`** *(with image)* | Extracts line items, scrubs PII, classifies tax deductibility, and matches bank ledger. | Gemini Vision, `raw_transactions` |
 | **`/help`** | Displays quick command reference and suggested natural language prompts. | Built-in |
@@ -128,7 +129,21 @@ When modifying categories or making ledger changes in Monarch Money, FinSage enf
 
 ---
 
-## 8. Vertex AI Long-Term Memory Bank
+## 8. Researched Category Reviews (`/categorize`)
+
+`/categorize` (or *"review my categories"*) cleans up categories in batches:
+
+1. **Candidates**: merchants with uncategorized transactions or transactions split across categories, largest first. Merchants touching transfer or income categories are skipped.
+2. **What Monarch already says**: the review reads your live Monarch categories and transaction rules. A merchant covered by one of your Monarch rules (merchant name only, no amount or account conditions) gets that rule's category, so older transactions that predate the rule are brought in line. A merchant you confirmed in an earlier review gets that category too. Neither needs research.
+3. **Web research**: the remaining merchants go to Gemini grounded on Google Search, a few at a time in parallel. It strips payment-processor prefixes (`SQ *`, `TST*`), searches the merchant name only (never amounts), follows the conventions in your existing rules, and picks one of your Monarch categories with a confidence and a one-line reason. It can also say a split is legitimate and should be left alone. Suggestions below 75% confidence are dropped.
+4. **One review card**: up to 10 merchants, each ticked by default, showing the transaction count, current categories, proposed category and reason. **Apply selected** recategorizes the ticked merchants' transactions in Monarch Money (and BigQuery) and adds a Monarch rule (*merchant name equals …* → category) for any merchant not already covered, so future transactions are categorized by Monarch itself. The rule is created with *apply to existing transactions* off, because the review has already updated those one by one. If a rule can't be created, the transaction fixes still apply and the result card says so. **Reject all** dismisses the review.
+5. **Memory**: applied merchants are recorded with the Monarch rule ID, unticked ones are not proposed again for 180 days, and merchants the model left alone are not re-researched for 90 days (`merchant_category_decisions`).
+
+The card carries the same protections as other mutations: it is signed for the requester, expires after an hour, can only be applied once, and every outcome is written to `mutation_audit_log`. Gemini can also start a review itself through the `start_category_review` tool. Each review runs a handful of grounded searches, which Vertex AI bills per query. Monarch's Python client has no rules API, so rules are read and created with the same GraphQL operations Monarch's web app uses (`GetTransactionRules`, `createTransactionRuleV2`); a change on Monarch's side could break rule creation without affecting the transaction updates.
+
+---
+
+## 9. Vertex AI Long-Term Memory Bank
 
 FinSage integrates with Vertex AI Agent Platform to persist family financial preferences across conversation threads:
 * Remembers user-specific targets (e.g. *"Our dining goal is under $600/month"*, *"Prioritize paying off the HELOC before the auto loan"*).
