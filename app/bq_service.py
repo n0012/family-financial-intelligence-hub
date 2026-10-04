@@ -19,6 +19,13 @@ logger = logging.getLogger("monarch-gemini.bq")
 
 FORBIDDEN_SQL_PATTERN = r"\b(insert|update|delete|drop|truncate|alter|create|merge|grant|revoke|export\s+data|call|execute\s+immediate|declare)\b"
 
+# Base tables the Gemini SQL tool may read. A dry run resolves views to these, so every v_* view
+# over them works, while operational tables (chat history, preferences, audit log, pending
+# batches, suppressions, staging) and INFORMATION_SCHEMA stay out of reach.
+SQL_TOOL_ALLOWED_TABLES = frozenset(
+    {"raw_accounts", "raw_categories", "raw_transactions", "receipt_records", "brief_history"}
+)
+
 _bq_client: bigquery.Client | None = None
 
 # In-memory caches for fast multi-turn responses within container lifetime
@@ -81,6 +88,22 @@ def run_readonly_sql(
     try:
         logger.info(f"Executing Gemini SQL tool call: {sql_query}")
         bq = client or get_bq_client(project_id)
+
+        # Free dry run: BigQuery reports the base tables the query would read.
+        dry_job = bq.query(sql_query, job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False))
+        dataset = get_target_dataset()
+        blocked = sorted(
+            f"{t.dataset_id}.{t.table_id}"
+            for t in (dry_job.referenced_tables or [])
+            if t.project != bq.project or t.dataset_id != dataset or t.table_id not in SQL_TOOL_ALLOWED_TABLES
+        )
+        if blocked:
+            logger.warning(f"Gemini SQL tool blocked from reading: {', '.join(blocked)}")
+            return (
+                f"Error: Query reads tables outside the financial data the assistant may use: {', '.join(blocked)}. "
+                "Query the v_* views or raw_accounts, raw_categories, raw_transactions, receipt_records."
+            )
+
         job_config = bigquery.QueryJobConfig(
             maximum_bytes_billed=max_bytes_billed  # Default 100 MB scan budget safety cap
         )
