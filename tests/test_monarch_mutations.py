@@ -590,7 +590,7 @@ class TestMonarchMutations(unittest.TestCase):
                 AsyncMock(return_value={"success": True, "transaction_id": "txn_card_btn"}),
             ),
             patch("app.main.patch_chat_card", return_value=True) as mock_patch,
-            patch("app.main.post_to_chat_thread", return_value=True) as mock_post_thread,
+            patch("app.main.post_to_chat_thread", return_value=True),
             patch("app.main.log_mutation_audit") as mock_audit,
         ):
             resp = asyncio.run(main.google_chat_webhook(payload))
@@ -761,8 +761,8 @@ class TestMonarchMutations(unittest.TestCase):
     def test_batch_card_builders(self):
         """Tests card builder generation and HTML escaping for batch actions."""
         from app.monarch_service import (
-            build_batch_recategorization_card,
             build_batch_recategorization_cancelled_card,
+            build_batch_recategorization_card,
             build_batch_recategorization_success_card,
         )
 
@@ -887,24 +887,11 @@ class TestMonarchMutations(unittest.TestCase):
 
     def test_webhook_confirm_batch_recategorize(self):
         """Tests Google Chat webhook CARD_CLICKED confirm_batch_recategorize flow."""
-        from app.monarch_service import generate_batch_signature, save_pending_batch_async
+        from app.monarch_service import generate_batch_signature
 
         batch_id = "batch_hook_1"
         now = int(datetime.now(UTC).timestamp())
         sig = generate_batch_signature(batch_id, "cat_sub_id", 2, "user@example.com", now)
-
-        batch_record = {
-            "batch_id": batch_id,
-            "user_email": "user@example.com",
-            "merchant_name": "Netflix",
-            "category_id": "cat_sub_id",
-            "category_name": "Subscriptions",
-            "transaction_ids": ["txn_1", "txn_2"],
-            "transaction_count": 2,
-            "total_amount": 49.78,
-            "status": "PENDING",
-            "signature": sig,
-        }
 
         payload = {
             "commonEventObject": {
@@ -947,7 +934,7 @@ class TestMonarchMutations(unittest.TestCase):
         with (
             patch("app.main.execute_guarded_batch_recategorization", AsyncMock(return_value=mock_batch_res)),
             patch("app.main.patch_chat_card", return_value=True) as mock_patch,
-            patch("app.main.log_mutation_audit") as mock_audit,
+            patch("app.main.log_mutation_audit"),
         ):
             resp = asyncio.run(main.google_chat_webhook(payload))
             mock_patch.assert_called_once()
@@ -1083,7 +1070,90 @@ class TestMonarchMutations(unittest.TestCase):
             self.assertIn("Fix Prime Video", msg["text"])
 
 
+def _confirm_payload(clicker: str, card_user: str, signature: str = "bad-signature") -> dict:
+    now_ts = int(datetime.now(UTC).timestamp())
+    return {
+        "type": "CARD_CLICKED",
+        "chat": {"user": {"email": clicker, "displayName": "User"}},
+        "commonEventObject": {
+            "invokedFunction": "confirm_recategorize",
+            "parameters": {
+                "transaction_id": "txn_200",
+                "category_id": "cat_200",
+                "category_name": "Groceries",
+                "timestamp": str(now_ts),
+                "user_email": card_user,
+                "signature": signature,
+            },
+        },
+    }
+
+
+def _reply_text(resp: dict) -> str:
+    return resp["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]["text"]
+
+
+class TestChatAuthorization(unittest.TestCase):
+    def _run(self, payload: dict, allowlist: str | None, is_prod: bool) -> str:
+        def fake_secret(name, env_var):
+            return allowlist if name == "allowed-chat-users" else None
+
+        with (
+            patch("app.main.resolve_secret", side_effect=fake_secret),
+            patch("app.main.IS_PROD", is_prod),
+            patch("app.main.log_mutation_audit"),
+        ):
+            return _reply_text(asyncio.run(main.google_chat_webhook(payload)))
+
+    def test_unset_allowlist_denies_everyone_in_production(self):
+        text = self._run(_confirm_payload("user@example.com", "user@example.com"), None, is_prod=True)
+        self.assertIn("no authorized users configured", text)
+
+    def test_unset_allowlist_allows_outside_production(self):
+        text = self._run(_confirm_payload("user@example.com", "user@example.com"), None, is_prod=False)
+        self.assertNotIn("Access Denied", text)
+
+    def test_allowlisted_user_passes_and_others_are_denied(self):
+        allowlist = "user@example.com, Partner@Example.com"
+        ok = self._run(_confirm_payload("partner@example.com", "partner@example.com"), allowlist, is_prod=True)
+        self.assertNotIn("Access Denied", ok)
+        denied = self._run(_confirm_payload("stranger@example.com", "stranger@example.com"), allowlist, is_prod=True)
+        self.assertIn("Access Denied", denied)
+
+    def test_wildcard_allowlist_admits_any_user(self):
+        text = self._run(_confirm_payload("stranger@example.com", "stranger@example.com"), "*", is_prod=True)
+        self.assertNotIn("Access Denied", text)
+
+    def test_confirm_recategorize_rejects_other_users_card(self):
+        now_ts = int(datetime.now(UTC).timestamp())
+        sig = generate_mutation_signature("txn_200", "cat_200", "user@example.com", now_ts)
+        payload = _confirm_payload("partner@example.com", "user@example.com", sig)
+        payload["commonEventObject"]["parameters"]["timestamp"] = str(now_ts)
+        with (
+            patch("app.main.execute_guarded_recategorization", AsyncMock()) as mock_exec,
+            patch("app.main.log_mutation_audit") as mock_audit,
+        ):
+            text = _reply_text(asyncio.run(main.google_chat_webhook(payload)))
+        self.assertIn("Only user@example.com can confirm", text)
+        mock_exec.assert_not_called()
+        self.assertEqual(mock_audit.call_args[1]["status"], "REJECTED")
+
+
+class TestMutationSigningSecret(unittest.TestCase):
+    def test_unconfigured_secret_is_random_not_a_constant(self):
+        with patch("app.monarch_service.resolve_secret", return_value=None):
+            key = monarch_service.get_mutation_hmac_secret()
+        self.assertEqual(key, monarch_service._EPHEMERAL_HMAC_SECRET)
+        self.assertEqual(len(key), 64)
+        self.assertNotIn("secret", key)
+
+    def test_configured_secret_wins(self):
+        def fake_secret(name, env_var):
+            return "configured-key" if name == "gemini-wrapper-key" else None
+
+        with patch("app.monarch_service.resolve_secret", side_effect=fake_secret):
+            self.assertEqual(monarch_service.get_mutation_hmac_secret(), "configured-key")
+
+
 if __name__ == "__main__":
     unittest.main()
-
-

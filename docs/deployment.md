@@ -46,9 +46,11 @@ Create your local credentials file and synchronize it to Secret Manager:
 
 ```bash
 cp .env.example .env.local
-# Fill in MONARCH_EMAIL, MONARCH_PASSWORD, MONARCH_MFA_SECRET, and ALERT_WEBHOOK_URL
+# Fill in MONARCH_EMAIL, MONARCH_PASSWORD, MONARCH_MFA_SECRET, ALERT_WEBHOOK_URL, and ALLOWED_CHAT_USERS
 ./scripts/sync_secrets_to_gcp.sh
 ```
+
+**`ALLOWED_CHAT_USERS` is required.** The deployed service refuses every Chat event until it lists at least one email (or `*` to allow anyone who can reach the app). The value is cached per instance, so after changing it roll a new revision, for example `gcloud run services update SERVICE --update-labels chat-allowlist=v2`.
 
 ---
 

@@ -695,14 +695,22 @@ def request_plaid_refresh(institution_name: str) -> str:
 # -------------------------------------------------------------------------
 
 
+# Used only when no signing secret is configured. Random per process, so cards signed by one
+# instance (or before a restart) fail verification instead of being forgeable from a public constant.
+_EPHEMERAL_HMAC_SECRET = secrets.token_hex(32)
+
+
 def get_mutation_hmac_secret() -> str:
     """Retrieves or derives the secret key used to sign mutation confirmation cards."""
-    return (
+    configured = (
         resolve_secret("mutation-hmac-secret", "MUTATION_HMAC_SECRET")
         or resolve_secret("chat-verification-token", "CHAT_VERIFICATION_TOKEN")
         or resolve_secret("gemini-wrapper-key", "GEMINI_WRAPPER_KEY")
-        or "sage-guarded-mutation-signing-secret"
     )
+    if configured:
+        return configured
+    logger.warning("No mutation signing secret configured; using an ephemeral per-process key")
+    return _EPHEMERAL_HMAC_SECRET
 
 
 def generate_mutation_signature(
@@ -2005,7 +2013,7 @@ async def find_next_recategorization_recommendation_async(
                   AND cat_tx_count >= 3
             ),
             fragmented AS (
-                SELECT 
+                SELECT
                     s.merchant,
                     d.dominant_category AS target_category,
                     s.category_name AS current_category,

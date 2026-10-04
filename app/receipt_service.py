@@ -39,7 +39,8 @@ except ImportError:
 logger = logging.getLogger("monarch-gemini.receipt_service")
 
 # Regex scrubbing patterns for Zero-PII compliance
-SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+# Dashed, space-separated, or bare 9-digit SSNs (bare 9-digit runs are redacted deliberately).
+SSN_PATTERN = re.compile(r"\b\d{3}([- ]?)\d{2}\1\d{4}\b")
 EIN_PATTERN = re.compile(r"\b\d{2}-\d{7}\b")
 CARD_PAN_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
 
@@ -67,9 +68,10 @@ def scrub_pii(text: str | None) -> str:
     """Deterministically scrub SSNs, EINs, and credit card PANs from text before storage or logging."""
     if not text:
         return ""
-    scrubbed = SSN_PATTERN.sub("[REDACTED_SSN]", text)
+    # Cards first, so a 16-digit PAN is never partially consumed by the SSN pattern.
+    scrubbed = CARD_PAN_PATTERN.sub("[REDACTED_CARD]", text)
+    scrubbed = SSN_PATTERN.sub("[REDACTED_SSN]", scrubbed)
     scrubbed = EIN_PATTERN.sub("[REDACTED_EIN]", scrubbed)
-    scrubbed = CARD_PAN_PATTERN.sub("[REDACTED_CARD]", scrubbed)
     return scrubbed
 
 
