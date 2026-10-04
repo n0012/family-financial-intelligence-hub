@@ -62,7 +62,26 @@ resource "google_artifact_registry_repository" "monarch_repo" {
   repository_id = var.artifact_repo_name
   description   = "Docker repository for Monarch Money Gemini & BigQuery Hub"
   format        = "DOCKER"
-  depends_on    = [google_project_service.enabled_apis]
+
+  # Every deploy pushes a new image; keep the five newest (current plus rollbacks) and expire the rest.
+  cleanup_policy_dry_run = false
+  cleanup_policies {
+    id     = "keep-5-most-recent"
+    action = "KEEP"
+    most_recent_versions {
+      keep_count = 5
+    }
+  }
+  cleanup_policies {
+    id     = "delete-older-than-14d"
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "1209600s"
+    }
+  }
+
+  depends_on = [google_project_service.enabled_apis]
 }
 
 # 4. BigQuery Dataset
