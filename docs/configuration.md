@@ -75,7 +75,7 @@ excluded_institutions:
   - "legacy_credit_union"
 
 # 5. Household Partner Aliases
-# Used in chat synopsis cards and weekly briefings.
+# Reserved for household display names; not read by the app yet.
 partners:
   partner_a: "Partner A"
   partner_b: "Partner B"
@@ -103,6 +103,12 @@ In Google Cloud production, credentials and configuration are stored in **Secret
 | `ACCOUNT_OVERRIDES_JSON` (`account-overrides`) | JSON string of account overrides (e.g. custom APRs) | Optional | `{}` |
 | `DECOMMISSIONED_ACCOUNT_IDS` (`decommissioned-account-ids`) | CSV or JSON array of closed account IDs to ignore | Optional | `[]` |
 | `EXCLUDED_INSTITUTIONS` (`excluded-institutions`) | CSV of institution keywords to exclude (e.g. merged banks) | Optional | `[]` |
+| `VERTEX_MEMORY_BANK_NAME` | Vertex AI Memory Bank resource (`projects/PROJECT_NUMBER/locations/REGION/reasoningEngines/ID`). The Chat service and the alerts job read goals (spending caps, payoff dates) from it. | For goals | — |
+| `DEFAULT_USER_EMAIL` | Whose memories the scheduled brief reads, since no Chat sender is present in a job | For goals | `user@example.com` |
+| `CHAT_AUDIENCE` (`chat-audience`) | Expected OIDC audience on Pub/Sub push requests: the Cloud Run service URL | Yes (push) | `CLOUD_RUN_URL` |
+| `ENABLE_CHAT_PULL_WORKER` | Run the legacy streaming-pull worker instead of push. Needs `--min-instances 1 --no-cpu-throttling`, which bills an always-on instance. | No | `false` |
+| `CHAT_SUBSCRIPTION` | Pull subscription used only when `ENABLE_CHAT_PULL_WORKER=true` | No | `monarch-chat-sub` |
+| `GEMINI_VISION_MODEL` | Model for receipt and invoice extraction | No | `gemini-2.5-flash` |
 
 ---
 

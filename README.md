@@ -7,7 +7,7 @@
 [![Google BigQuery](https://img.shields.io/badge/Warehouse-Google%20BigQuery-669DF6.svg)](https://cloud.google.com/bigquery)
 [![Gemini Flash](https://img.shields.io/badge/AI%20Model-Gemini%20Flash-8E24AA.svg)](https://deepmind.google/technologies/gemini/)
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC.svg)](https://www.terraform.io/)
-[![Tests: 148 Passing](https://img.shields.io/badge/Tests-148%20Passing-brightgreen.svg)](tests/)
+[![Tests: 192 Passing](https://img.shields.io/badge/Tests-192%20Passing-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
@@ -48,18 +48,18 @@ FinSage documentation is broken out into dedicated guides:
 flowchart TD
     subgraph Scheduling ["Automated Schedules (Cloud Scheduler)"]
         CronSync["Daily Ingestion (04:00 AM)<br/>monarch-daily-sync"]
-        CronAlert["Daily Proactive Scan (08:00 AM)<br/>monarch-daily-advisor-alerts"]
+        CronAlert["Daily Brief (08:00 AM)<br/>monarch-daily-advisor-alerts"]
     end
 
     subgraph BatchLayer ["Serverless Batch Layer (Cloud Run Jobs)"]
         JobSync["monarch-sync-job<br/>(python -m app.job sync)"]
         JobAlert["monarch-alerts-job<br/>(python -m app.job alerts)"]
         MMClient["MonarchMoney GraphQL Client<br/>+ Automated Base32 TOTP (pyotp)"]
-        AdvisorEngine["Proactive Spend Alert Engine"]
+        AdvisorEngine["Daily Brief Engine<br/>(top new findings, goal pacing, trends)"]
     end
 
     subgraph DataWarehouse ["Google BigQuery Data Warehouse"]
-        RawTables["Tables:<br/>• raw_accounts<br/>• raw_transactions<br/>• raw_categories<br/>• receipt_records<br/>• alert_suppression<br/>• mutation_audit_log"]
+        RawTables["Tables:<br/>• raw_accounts<br/>• raw_transactions<br/>• raw_categories<br/>• receipt_records<br/>• alert_suppression<br/>• brief_history<br/>• mutation_audit_log"]
         Views["Analytical Optimization Views:<br/>• v_debt_daily_cost (Daily Compounding Debt)<br/>• v_debt_summary (Aggregated Liabilities)<br/>• v_subscription_price_creep (Sequential LAG Hikes)<br/>• v_subscription_overlap (Domain Redundancies)<br/>• v_food_efficiency (Groceries vs Dining)<br/>• v_micro_transaction_leakage (Habit Leaks)<br/>• v_spend_classification (Fixed vs Discretionary)<br/>• v_paycheck_surplus_sweep (Multi-Debt Sweep Engine)<br/>• v_tax_deductible_summary (Schedule C / HSA)"]
     end
 
@@ -121,18 +121,28 @@ flowchart TD
 # 1. Clone repository and install dependencies
 git clone https://github.com/n0012/family-financial-intelligence-hub.git
 cd family-financial-intelligence-hub
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
+uv venv && uv pip install -r requirements.txt -r requirements-dev.txt
 
-# 2. Configure credentials & custom interest rates
+# 2. Enable the private-data hooks (this is a public repo; see AGENTS.md)
+git config core.hooksPath .githooks
+
+# 3. Configure credentials & custom interest rates
 cp .env.example .env.local
 cp config.example.yaml config.yaml
 
-# 3. Run automated test suite
-PYTHONPATH=. ./.venv/bin/pytest -v
+# 4. Run automated test suite
+uv run python -m pytest -v
 ```
 
 For complete deployment instructions, see the **[Deployment & Operations Guide](docs/deployment.md)**.
+
+---
+
+## Contributing & Privacy
+
+This repository is public and models a household's finances, so no personal or confidential data may be committed: no names, emails, project IDs, account numbers, balances, merchants or real figures, in code, tests, docs, commit messages or pull requests. [`AGENTS.md`](AGENTS.md) holds the full rules for human and AI contributors.
+
+`scripts/check_private_data.py` enforces them in the pre-commit, commit-msg and pre-push hooks and in the `private-data` GitHub workflow, which also scans PR titles and descriptions. Run it by hand with `python3 scripts/check_private_data.py --all`.
 
 ---
 

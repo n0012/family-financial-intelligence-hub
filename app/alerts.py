@@ -875,6 +875,9 @@ def generate_daily_brief_synopsis(
     from datetime import date
 
     today = date.today()
+    # The month used for pacing; replaced by BigQuery's America/New_York brief_date when available,
+    # since the container clock is UTC and can already be in the next month.
+    month_anchor = today
     brief_date_str = today.strftime("%A, %b %-d, %Y")
     day_of_month = today.day
 
@@ -991,6 +994,10 @@ def generate_daily_brief_synopsis(
             brief_val = _safe_str(r, "brief_date")
             if brief_val:
                 brief_date_str = brief_val
+                try:
+                    month_anchor = date.fromisoformat(brief_val[:10])
+                except ValueError:
+                    pass
             day_val = _safe_float(r, "day_of_month")
             if day_val:
                 day_of_month = int(day_val)
@@ -1028,7 +1035,7 @@ def generate_daily_brief_synopsis(
 
     import calendar
 
-    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    days_in_month = calendar.monthrange(month_anchor.year, month_anchor.month)[1]
     month_pct = (day_of_month / days_in_month * 100.0) if days_in_month > 0 else 0.0
     projected_monthly_spend = daily_burn_rate * days_in_month
 

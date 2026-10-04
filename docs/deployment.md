@@ -63,10 +63,16 @@ gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
 ### Cloud Build Pipeline:
 1. Compiles and tags the production container image in Artifact Registry.
 2. Deploys the hardened Cloud Run service (`--ingress internal`, `--no-allow-unauthenticated`, `--min-instances 0`, request-based CPU).
-
-> **Note:** `cloudbuild.yaml` uses `--set-env-vars`, which replaces every environment variable on the service. Pass your real `_MEMORY_BANK` and `_DEFAULT_USER_EMAIL` substitutions, or redeploy an existing service with `gcloud run deploy --image ... --update-env-vars ...` to keep its current values.
 3. Deploys the batch Cloud Run Jobs (`monarch-sync-job` and `monarch-alerts-job`).
 4. Executes and updates BigQuery analytical views and DDLs from `schema.sql`.
+
+> **Note:** `cloudbuild.yaml` uses `--set-env-vars`, which replaces every environment variable on the service. Pass your real `_MEMORY_BANK` and `_DEFAULT_USER_EMAIL` substitutions, or update an existing deployment image-only so its current values are kept:
+> ```bash
+> gcloud run deploy monarch-gemini-wrapper --region=us-central1 --image=IMAGE
+> gcloud run jobs update monarch-alerts-job --region=us-central1 --image=IMAGE
+> gcloud run jobs update monarch-sync-job --region=us-central1 --image=IMAGE
+> ```
+> Build `IMAGE` from a clean checkout (for example `git archive main`) so untracked local files never reach Cloud Build.
 
 ---
 
@@ -102,7 +108,7 @@ FinSage runs two scheduled background jobs via Cloud Scheduler:
 * **Daily Brief (`monarch-daily-advisor-alerts`)**: Runs daily at 08:00 AM and posts the summarized daily brief (`python -m app.job alerts`). On Mondays it also posts the weekly digest.
 
 #### How the daily brief stays fresh
-The brief computes candidate findings each morning (category shifts against the median of the prior three 4-week windows, merchants visited twice as often as usual, first-ever merchants, accounts that have stopped reporting, and one-time alerts such as duplicate charges). It shows only the top two by dollar impact and records them in `brief_history`. A trend finding is not repeated for 14 days, and a one-time alert is shown once. Goal pacing reads spending caps and HELOC payoff dates from long-term memory, so the job needs `VERTEX_MEMORY_BANK_NAME` and `DEFAULT_USER_EMAIL` set. The previous full alert card is still available with `python -m app.job full-scan` or `/alerts` in Chat.
+The brief computes candidate findings each morning (category shifts against the median of the prior three 4-week windows, merchants visited twice as often as usual, first-ever merchants, accounts that have stopped reporting, and one-time alerts such as duplicate charges). It shows only the top two by dollar impact and records them in `brief_history`. A trend finding is not repeated for 14 days, a stale-account warning for 7, and a one-time alert for a year. Goal pacing reads spending caps and HELOC payoff dates from long-term memory, so the job needs `VERTEX_MEMORY_BANK_NAME` and `DEFAULT_USER_EMAIL` set. The exhaustive alert list is still available: `/alerts` in Chat replies with every alert and a snooze button, and `python -m app.job full-scan` posts the alerts with the older synopsis card to the space.
 
 You can trigger a job manually at any time:
 ```bash
@@ -137,7 +143,7 @@ FinSage is built from the ground up for strict family financial confidentiality:
 
 * **Zero Public Ingress**: The Cloud Run webhook worker operates with `--ingress internal` and `--no-allow-unauthenticated`. Inbound Google Chat interactions arrive via an OIDC-authenticated **Cloud Pub/Sub push subscription**, so no public endpoint is exposed to the internet.
 * **Confidential Secret Storage**: Monarch credentials, MFA secrets, and API keys reside in **Google Cloud Secret Manager**. Secrets are fetched via Application Default Credentials (ADC) in memory and never logged or written to disk.
-* **Zero-PII Git Standard**: Real account numbers, balances, merchant addresses, lender identities, and household names are strictly prohibited in git commits, automated tests, and documentation.
+* **Zero-PII Git Standard**: Real account numbers, balances, merchants, lender identities, and household names are prohibited in commits, tests, documentation, and pull requests. `scripts/check_private_data.py` enforces this in git hooks and CI; see [`AGENTS.md`](../AGENTS.md).
 * **Guarded Financial Mutations**: While FinSage can recategorize transactions, split line items, and add notes, all mutations enforce an interactive **Two-Phase Confirmation** flow in Google Chat. The bot will never alter Monarch Money records without explicit user approval.
 * **Deterministic Isolation**: Calculations (balances, burns, APRs, debt carry, safety buffers) are computed strictly in deterministic BigQuery SQL. LLMs (Gemini Flash) are never permitted to estimate or hallucinate financial figures.
 
@@ -149,7 +155,7 @@ FinSage is built from the ground up for strict family financial confidentiality:
 [Monarch Money API]
        │
        ▼ (Automated Pull / Ingestion)
-[Cloud Run Ingestion Service]
+[Cloud Run Sync Job]
        │
        ▼ (Append / Upsert)
 [BigQuery Raw Storage]
@@ -166,7 +172,7 @@ FinSage is built from the ground up for strict family financial confidentiality:
        │
        ├─────────────────────────────────┐
        ▼ (Proactive Rule Engines)         ▼ (Advisory Queries & Tools)
-[Scheduled Daily Alerts Job]        [Chat Advisor (Gemini 2.5 Flash)]
+[Scheduled Daily Brief Job]         [Chat Advisor (Gemini Flash)]
        │                                 ▲ (Pub/Sub Push)
        ▼ (Webhook Dispatch)              │
 [Google Chat Space / Direct Message / Two-Phase Mutation Approval]
@@ -179,16 +185,19 @@ FinSage is built from the ground up for strict family financial confidentiality:
 Run tests and style checks locally:
 
 ```bash
-# Create and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+# Create the virtual environment and install dependencies
+uv venv
+uv pip install -r requirements.txt -r requirements-dev.txt
 
-# Install dependencies
-pip install -r requirements.txt -r requirements-dev.txt
+# Enable the private-data git hooks (once per clone)
+git config core.hooksPath .githooks
 
 # Run lint checks
-./.venv/bin/ruff check .
+uv run ruff check .
 
-# Run pytest test suite (151 tests)
-PYTHONPATH=. ./.venv/bin/pytest -v
+# Run the test suite
+uv run python -m pytest -v
+
+# Scan the whole tree for personal or confidential data
+python3 scripts/check_private_data.py --all
 ```

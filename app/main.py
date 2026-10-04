@@ -1414,10 +1414,20 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             return respond(f"⚠️ Sync failed: {e}")
 
     # Command: /brief, /alerts
-    is_brief_or_alerts_intent = clean_text.lower().startswith(("/brief", "brief", "/alerts", "alerts")) or any(
-        phrase in lower_text for phrase in ["morning brief", "daily brief", "daily synopsis", "morning synopsis"]
-    )
-    if is_brief_or_alerts_intent and any(term in lower_text for term in ["brief", "synopsis"]):
+    brief_phrases = [
+        "morning brief",
+        "daily brief",
+        "daily synopsis",
+        "morning synopsis",
+        "today's summary",
+        "todays summary",
+        "today’s summary",
+        "daily summary",
+        "morning summary",
+    ]
+    asks_for_brief = any(phrase in lower_text for phrase in brief_phrases)
+    is_brief_or_alerts_intent = clean_text.lower().startswith(("/brief", "brief", "/alerts", "alerts")) or asks_for_brief
+    if is_brief_or_alerts_intent and (asks_for_brief or any(term in lower_text for term in ["brief", "synopsis"])):
         try:
             from app.daily_brief import build_brief_card, generate_daily_brief
 
