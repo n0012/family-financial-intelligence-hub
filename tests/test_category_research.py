@@ -565,12 +565,14 @@ class TestMonarchRules(unittest.TestCase):
                 "categories": [
                     {"id": "1", "name": "Coffee Shops", "group": {"name": "Food & Dining", "type": "expense"}},
                     {"id": "2", "name": "Paychecks", "group": {"name": "Income", "type": "income"}},
+                    {"id": "3", "name": "Credit Card Payment", "group": {"name": "Transfers", "type": "transfer"}},
                 ]
             }
         )
         cats = asyncio.run(cr.fetch_live_categories(client))
         self.assertEqual(
-            [(c["category_name"], c["is_income"]) for c in cats], [("Coffee Shops", False), ("Paychecks", True)]
+            [(c["category_name"], c["is_income"]) for c in cats],
+            [("Coffee Shops", False), ("Paychecks", True), ("Credit Card Payment", True)],
         )
 
     def test_propose_uses_monarch_rules_and_live_categories(self):

@@ -217,7 +217,8 @@ async def fetch_live_categories(client) -> list[dict]:
                 "category_id": str(c.get("id")),
                 "category_name": str(c.get("name")),
                 "group_name": group_name,
-                "is_income": group_type == "income" or str(group_name).lower() == "income",
+                # Income and transfer categories are never offered for a purchase.
+                "is_income": group_type in ("income", "transfer") or str(group_name).lower() in ("income", "transfers"),
             }
         )
     return [c for c in cats if c["category_id"] and c["category_name"]]
@@ -271,7 +272,8 @@ def load_categories(bq: bigquery.Client) -> list[dict]:
     sql = f"""
     SELECT category_id, category_name, group_name,
         -- Monarch files paychecks under an "Income" group without always setting is_income.
-        COALESCE(is_income, FALSE) OR LOWER(COALESCE(group_name, '')) = 'income' AS is_income
+        -- Transfer categories are excluded the same way: they are never right for a purchase.
+        COALESCE(is_income, FALSE) OR LOWER(COALESCE(group_name, '')) IN ('income', 'transfers') AS is_income
     FROM {_table("raw_categories")}
     WHERE category_id IS NOT NULL AND category_name IS NOT NULL
     ORDER BY group_name, category_name
