@@ -57,6 +57,11 @@ MAX_TXNS_PER_MERCHANT = 200
 REJECTION_MEMORY_DAYS = 180  # a rejected merchant is not proposed again for this long
 AI_SKIP_MEMORY_DAYS = 90  # merchants the model left alone are not re-researched for this long
 LOOKBACK_DAYS = 730
+# Impact ranking: spend in the last RECENT_DAYS counts in full, older spend at OLDER_SPEND_WEIGHT, and
+# uncategorized spend is multiplied by UNCATEGORIZED_WEIGHT.
+RECENT_DAYS = 365
+OLDER_SPEND_WEIGHT = 0.5
+UNCATEGORIZED_WEIGHT = 1.5
 
 _PENDING_REVIEWS: dict[str, dict] = {}
 _TABLES_READY = False
@@ -293,7 +298,10 @@ def load_decisions(bq: bigquery.Client) -> list[dict]:
 
 def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dict]:
     """
-    Merchants with uncategorized transactions or transactions split across categories, largest first.
+    Merchants with uncategorized transactions or transactions split across categories, ranked by
+    impact: dollars that are uncategorized or filed away from the merchant's main category. The last
+    12 months count in full and older spend at half; uncategorized spend counts 1.5x, because it is
+    missing from every category report rather than sitting in a slightly wrong one.
     Merchants that touch transfer or income categories are left out: those are payments between
     accounts and paychecks, not purchases.
     """
@@ -304,6 +312,10 @@ def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dic
             t.category_id,
             COALESCE(t.category_name, 'Uncategorized') AS category_name,
             ABS(t.amount) AS amt,
+            ABS(t.amount) * IF(t.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL {RECENT_DAYS} DAY),
+                               1.0, {OLDER_SPEND_WEIGHT}) AS weighted_amt,
+            t.category_id IS NULL OR LOWER(COALESCE(t.category_name, 'Uncategorized')) = 'uncategorized'
+                AS is_uncategorized,
             t.is_recurring,
             c.group_name,
             c.is_income
@@ -314,12 +326,22 @@ def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dic
           AND t.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL {LOOKBACK_DAYS} DAY)
     ),
     by_cat AS (
-        SELECT merchant, category_name, COUNT(*) AS n
+        SELECT
+            merchant, category_name, LOGICAL_OR(is_uncategorized) AS is_uncategorized, COUNT(*) AS n,
+            SUM(amt) AS amt, SUM(weighted_amt) AS weighted_amt
         FROM tx
         GROUP BY 1, 2
     ),
     splits AS (
-        SELECT merchant, ARRAY_AGG(STRUCT(category_name, n) ORDER BY n DESC) AS categories, COUNT(*) AS category_count
+        SELECT
+            merchant,
+            ARRAY_AGG(STRUCT(category_name, n) ORDER BY n DESC) AS categories,
+            COUNT(*) AS category_count,
+            -- Dollars in categories other than the main (largest) one, plus uncategorized dollars.
+            SUM(amt) - MAX(IF(is_uncategorized, 0, amt)) AS misfiled_amount,
+            {UNCATEGORIZED_WEIGHT} * SUM(IF(is_uncategorized, weighted_amt, 0))
+                + SUM(IF(is_uncategorized, 0, weighted_amt)) - MAX(IF(is_uncategorized, 0, weighted_amt))
+                AS impact_score
         FROM by_cat
         GROUP BY 1
     ),
@@ -329,7 +351,7 @@ def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dic
             COUNT(*) AS txn_count,
             ROUND(SUM(amt), 2) AS total_amount,
             ROUND(APPROX_QUANTILES(amt, 2)[OFFSET(1)], 2) AS typical_amount,
-            COUNTIF(category_id IS NULL OR LOWER(category_name) = 'uncategorized') AS uncategorized_count,
+            COUNTIF(is_uncategorized) AS uncategorized_count,
             LOGICAL_OR(COALESCE(is_recurring, FALSE)) AS is_recurring,
             LOGICAL_OR(COALESCE(is_income, FALSE) OR LOWER(COALESCE(group_name, '')) = 'income') AS touches_income,
             LOGICAL_OR(LOWER(COALESCE(group_name, '')) LIKE '%transfer%') AS touches_transfer
@@ -338,20 +360,20 @@ def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dic
     )
     SELECT
         m.merchant, m.txn_count, m.total_amount, m.typical_amount, m.uncategorized_count, m.is_recurring,
-        s.categories
+        ROUND(s.misfiled_amount, 2) AS misfiled_amount, ROUND(s.impact_score, 2) AS impact_score, s.categories
     FROM m
     JOIN splits s USING (merchant)
     WHERE NOT m.touches_income
       AND NOT m.touches_transfer
       AND (m.uncategorized_count > 0 OR s.category_count > 1)
-    ORDER BY m.uncategorized_count DESC, m.txn_count DESC, m.total_amount DESC
+    ORDER BY s.impact_score DESC, m.uncategorized_count DESC, m.txn_count DESC
     LIMIT {int(pool_size)}
     """
     rows = []
     for r in bq.query(sql).result():
         row = dict(r.items())
         # BigQuery returns NUMERIC as Decimal, which json.dumps (prompt, stored review) cannot encode.
-        for key in ("total_amount", "typical_amount"):
+        for key in ("total_amount", "typical_amount", "misfiled_amount", "impact_score"):
             row[key] = float(row[key]) if row.get(key) is not None else None
         row["txn_count"] = int(row["txn_count"])
         row["uncategorized_count"] = int(row["uncategorized_count"])
@@ -607,9 +629,10 @@ def record_decisions(bq: bigquery.Client, items: list[dict], decision: str, sour
         logger.warning(f"Could not record category decisions: {e}")
 
 
-def _transaction_ids_to_change(bq: bigquery.Client, merchant: str, category_id: str) -> list[str]:
+def _transactions_to_change(bq: bigquery.Client, merchant: str, category_id: str) -> tuple[list[str], float]:
+    """IDs of the merchant's transactions not yet in category_id, and their total (absolute) amount."""
     sql = f"""
-    SELECT transaction_id
+    SELECT transaction_id, ABS(amount) AS amt
     FROM {_table("raw_transactions")}
     WHERE LOWER(COALESCE(clean_merchant_name, merchant_name)) = LOWER(@merchant)
       AND pending IS NOT TRUE
@@ -623,7 +646,8 @@ def _transaction_ids_to_change(bq: bigquery.Client, merchant: str, category_id: 
             bigquery.ScalarQueryParameter("category_id", "STRING", category_id),
         ]
     )
-    return [str(r["transaction_id"]) for r in bq.query(sql, job_config=cfg).result()]
+    rows = list(bq.query(sql, job_config=cfg).result())
+    return [str(r["transaction_id"]) for r in rows], round(sum(float(r["amt"] or 0) for r in rows), 2)
 
 
 def save_review(bq: bigquery.Client, review: dict) -> None:
@@ -720,21 +744,32 @@ def propose_category_review(
     conventions += [
         {"merchant": value, "category_name": r["category_name"]} for r in monarch_rules for _, value in r["criteria"]
     ]
-    rule_based, to_research = split_by_memory(find_review_candidates(bq), decisions, monarch_rules=monarch_rules)
+    candidates = find_review_candidates(bq)
+    rule_based, to_research = split_by_memory(candidates, decisions, monarch_rules=monarch_rules)
 
-    items = rule_based[:max_merchants]
-    if len(items) < max_merchants and to_research:
-        # Research a few extra: some will come back as "leave" or low confidence.
-        batch = to_research[: (max_merchants - len(items)) + RESEARCH_CHUNK_SIZE]
+    # Rule-based and researched merchants compete on the same impact ranking. Take the top of it,
+    # with a few extra to research because some come back as "leave" or low confidence.
+    by_merchant = {i["merchant"]: i for i in rule_based}
+    researchable = {id(c) for c in to_research}
+    pool = [c for c in candidates if c["merchant"] in by_merchant or id(c) in researchable]
+    pool = pool[: max_merchants + RESEARCH_CHUNK_SIZE]
+    items = [by_merchant[c["merchant"]] for c in pool if c["merchant"] in by_merchant]
+    batch = [c for c in pool if id(c) in researchable]
+    if batch:
         researched, skipped = research_candidates(batch, categories, conventions, research_client)
-        items += researched[: max_merchants - len(items)]
+        items += researched
         record_decisions(bq, skipped, "AI_SKIPPED", "research", None, user_email)
 
     for item in items:
-        item["transaction_ids"] = _transaction_ids_to_change(bq, item["merchant"], item["category_id"])
+        item["transaction_ids"], item["change_amount"] = _transactions_to_change(
+            bq, item["merchant"], item["category_id"]
+        )
         # A merchant already covered by a Monarch rule needs no new one.
         item["create_rule"] = item.get("source") != "monarch_rule"
+    # Biggest fixes first: the dollars that actually move, then how many transactions.
     items = [i for i in items if i["transaction_ids"]]
+    items.sort(key=lambda i: (i["change_amount"], len(i["transaction_ids"])), reverse=True)
+    items = items[:max_merchants]
     if not items:
         return {"status": "none_found", "message": "No confident category fixes found right now."}
 
@@ -755,8 +790,15 @@ def propose_category_review(
         "review_id": review_id,
         "merchant_count": len(items),
         "transaction_count": sum(len(i["transaction_ids"]) for i in items),
+        "amount": round(sum(i["change_amount"] for i in items), 2),
         "suggestions": [
-            {"merchant": i["merchant"], "category": i["category_name"], "reason": i["reason"]} for i in items
+            {
+                "merchant": i["merchant"],
+                "category": i["category_name"],
+                "amount": i["change_amount"],
+                "reason": i["reason"],
+            }
+            for i in items
         ],
         "card": card,
     }
@@ -788,6 +830,7 @@ def build_review_card(review_id: str, items: list[dict], user_email: str, timest
     apply_action = get_chat_action_target("apply_category_review")
     reject_action = get_chat_action_target("reject_category_review")
     txn_total = sum(len(i["transaction_ids"]) for i in items)
+    amount_total = sum(i.get("change_amount") or 0 for i in items)
 
     widgets = []
     for item in items:
@@ -800,7 +843,7 @@ def build_review_card(review_id: str, items: list[dict], user_email: str, timest
         widgets.append(
             {
                 "decoratedText": {
-                    "topLabel": f"{len(item['transaction_ids'])} txns · now: {current}",
+                    "topLabel": f"${item.get('change_amount') or 0:,.0f} · {len(item['transaction_ids'])} txns · now: {current}",
                     "text": f"<b>{html.escape(item['merchant'])}</b> → <b>{html.escape(item['category_name'])}</b>",
                     "bottomLabel": f"{badge} · {item['reason']}"[:200],
                     "wrapText": True,
@@ -867,7 +910,7 @@ def build_review_card(review_id: str, items: list[dict], user_email: str, timest
         "card": {
             "header": {
                 "title": "Category Review",
-                "subtitle": f"{len(items)} merchants · {txn_total} transactions",
+                "subtitle": f"{len(items)} merchants · {txn_total} transactions · ${amount_total:,.0f}",
                 "imageUrl": "https://raw.githubusercontent.com/n0012/family-financial-intelligence-hub/main/static/avatar.png",
                 "imageType": "CIRCLE",
             },
