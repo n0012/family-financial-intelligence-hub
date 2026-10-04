@@ -59,6 +59,28 @@ class TestMemory(unittest.TestCase):
         self.assertEqual([c["merchant"] for c in to_research], ["Stream Co", "Old No", "Brand New"])
 
 
+class TestCandidates(unittest.TestCase):
+    def test_bigquery_decimals_become_json_safe(self):
+        from decimal import Decimal
+
+        row = MagicMock()
+        row.items.return_value = {
+            "merchant": "Corner Cafe",
+            "txn_count": 3,
+            "total_amount": Decimal("36.00"),
+            "typical_amount": Decimal("12.00"),
+            "uncategorized_count": 3,
+            "is_recurring": False,
+            "categories": [{"category_name": "Uncategorized", "n": 3}],
+        }.items()
+        bq = MagicMock()
+        bq.query.return_value.result.return_value = [row]
+        cands = cr.find_review_candidates(bq)
+        self.assertEqual(cands[0]["typical_amount"], 12.0)
+        json.dumps(cands)
+        cr.build_research_prompt(cands, CATEGORIES, [])
+
+
 class TestResearch(unittest.TestCase):
     def test_prompt_lists_spend_categories_and_never_totals(self):
         prompt = cr.build_research_prompt([_cand("SQ *CORNER CAFE", {"Uncategorized": 3})], CATEGORIES, [])

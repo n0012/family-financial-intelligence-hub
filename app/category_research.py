@@ -350,6 +350,11 @@ def find_review_candidates(bq: bigquery.Client, pool_size: int = 60) -> list[dic
     rows = []
     for r in bq.query(sql).result():
         row = dict(r.items())
+        # BigQuery returns NUMERIC as Decimal, which json.dumps (prompt, stored review) cannot encode.
+        for key in ("total_amount", "typical_amount"):
+            row[key] = float(row[key]) if row.get(key) is not None else None
+        row["txn_count"] = int(row["txn_count"])
+        row["uncategorized_count"] = int(row["uncategorized_count"])
         row["categories"] = [{"category_name": c["category_name"], "n": int(c["n"])} for c in row["categories"]]
         rows.append(row)
     return rows
@@ -628,7 +633,7 @@ def save_review(bq: bigquery.Client, review: dict) -> None:
             query_parameters=[
                 bigquery.ScalarQueryParameter("review_id", "STRING", review["review_id"]),
                 bigquery.ScalarQueryParameter("user_email", "STRING", review["user_email"]),
-                bigquery.ScalarQueryParameter("items_json", "STRING", json.dumps(review["items"])),
+                bigquery.ScalarQueryParameter("items_json", "STRING", json.dumps(review["items"], default=str)),
                 bigquery.ScalarQueryParameter("sig", "STRING", review["signature"]),
             ]
         )
