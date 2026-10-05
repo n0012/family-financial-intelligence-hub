@@ -31,6 +31,7 @@ from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, BUSINESS_TAG, get_chat_acti
 from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
     CURRENT_USER_EMAIL,
+    SigningSecretMissing,
     get_monarch_client,
     get_mutation_hmac_secret,
     log_mutation_audit,
@@ -147,7 +148,10 @@ def verify_trip_signature(
     age = abs(int(datetime.now(UTC).timestamp()) - timestamp)
     if age > max_age_seconds:
         return False, f"Trip review expired (card age: {age}s > limit: {max_age_seconds}s). Run /trip again."
-    expected = generate_trip_signature(trip_id, item_count, user_email, timestamp)
+    try:
+        expected = generate_trip_signature(trip_id, item_count, user_email, timestamp)
+    except SigningSecretMissing as e:
+        return False, str(e)
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch. Review parameters may have been altered."
     return True, "Valid"

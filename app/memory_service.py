@@ -15,7 +15,7 @@ from datetime import UTC
 import google.auth
 from google.auth.transport.requests import Request
 
-from app.monarch_service import CURRENT_USER_EMAIL
+from app.monarch_service import CURRENT_TURN_HAS_ATTACHMENTS, CURRENT_USER_EMAIL
 
 logger = logging.getLogger("memory_service")
 
@@ -378,6 +378,13 @@ def store_user_preference(preference_or_rule: str) -> str:
     Args:
         preference_or_rule: The concise rule, goal, or preference statement to store.
     """
+    if CURRENT_TURN_HAS_ATTACHMENTS.get():
+        # Text in an attached receipt or document could carry planted instructions, and a saved preference
+        # steers every later answer, so preferences are only saved from messages the user typed.
+        return (
+            "Refused: preferences are only saved from a typed message, not while reading an attachment. "
+            "Ask the user to send the preference again as text."
+        )
     is_valid, validation_msg = validate_user_preference(preference_or_rule)
     if not is_valid:
         return f"Refused: {validation_msg}"

@@ -116,7 +116,7 @@ When payroll deposits arrive, `/sweep` protects essential cash reserves before a
 
 Users can paste photos or PDFs of receipts and invoices directly into Google Chat:
 1. **Gemini 2.5 Flash Vision**: Extracts merchant name, transaction date, total amount, sales tax, tip, and itemized line items.
-2. **Zero-PII Scrubbing**: Deterministically redacts SSNs, EINs, and credit card PANs before saving to BigQuery.
+2. **Zero-PII Scrubbing**: Deterministically redacts SSNs, EINs, credit card PANs, IBANs and labelled bank account numbers (`Account #`, `Acct No.`, `A/C`) before saving to BigQuery. Invoice and order numbers and last-four references are kept. Attachments over 15 MB are refused without being read in full.
 3. **IRS Deductibility Analysis**: Evaluates items against IRS IRC §162 (Schedule C business expenses), IRC §213(d) (HSA/FSA medical expenses), and IRC §170 (501(c)(3) charitable donations).
 4. **Asymmetric Bank Matcher**: Searches `raw_transactions` in a `[-3 days, +10 days]` window, accommodating delayed batch posting and restaurant tips up to +35%.
 5. **Interactive Review Card**: Displays parsed data with one-click verification.
@@ -127,7 +127,7 @@ Users can paste photos or PDFs of receipts and invoices directly into Google Cha
 
 When modifying categories or making ledger changes in Monarch Money, FinSage enforces physical confirmation:
 * **Interactive Card v2 Confirmation Widget**: Shows transaction details, original category, and proposed new category.
-* **Cryptographic Tamper Protection**: Action buttons include an HMAC-SHA256 signature containing transaction ID, category ID, the requesting user, and timestamp. Signatures expire in 15 minutes. The key is `mutation-hmac-secret`.
+* **Cryptographic Tamper Protection**: Action buttons include an HMAC-SHA256 signature containing transaction ID, category ID, the requesting user, and timestamp. Signatures expire in 15 minutes. The key is `mutation-hmac-secret`. In production a missing key fails closed: no card is signed and none is accepted.
 * **Bound to the requester**: Only the person who asked for the change can confirm it, even in a shared space. A proposal that can't be attributed to a Chat user is never created.
 * **Signed snoozes**: Alert snooze buttons carry the same kind of signature, and unsigned or expired snoozes are rejected.
 * **Audit Trail**: Every confirmed or canceled mutation is permanently recorded in BigQuery `mutation_audit_log`.
@@ -173,3 +173,4 @@ FinSage integrates with Vertex AI Agent Platform to persist family financial pre
 * Remembers user-specific targets (e.g. *"Our dining goal is under $600/month"*, *"Prioritize paying off the HELOC before the auto loan"*).
 * Resolves conflicting preferences autonomously.
 * Injects consolidated financial rules directly into Gemini's reasoning context. Stored facts are sanitized and presented as data, not instructions, so a saved "preference" can't rewrite the prompt.
+* Saves preferences only from typed messages. While a turn includes an attachment (receipt, report, screenshot) the save tool refuses, so text inside a file can't plant a standing rule.

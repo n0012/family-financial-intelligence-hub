@@ -43,6 +43,15 @@ logger = logging.getLogger("monarch-gemini.receipt_service")
 SSN_PATTERN = re.compile(r"\b\d{3}([- ]?)\d{2}\1\d{4}\b")
 EIN_PATTERN = re.compile(r"\b\d{2}-\d{7}\b")
 CARD_PAN_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
+# Bank account numbers have no fixed length, so only digits that follow an account label are redacted;
+# unlabeled numbers (invoice, order, phone) are left alone. Routing numbers are bare 9-digit runs, which
+# the SSN pattern already redacts.
+ACCOUNT_NUMBER_PATTERN = re.compile(
+    r"\b((?:account|acct|a/c|iban)\b\.?\s*(?:(?:no|number|num)\b\.?|#)?\s*[:#]?\s*)([a-z]{0,4}\d[\d -]{4,30}\d)\b",
+    re.IGNORECASE,
+)
+# IBANs mix letters into the digit groups, so they get their own shape: country code, check digits, groups.
+IBAN_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,3})?\b")
 
 # Tax classification constants
 VALID_TAX_CATEGORIES = {
@@ -65,11 +74,13 @@ TAX_CATEGORY_LABELS = {
 
 
 def scrub_pii(text: str | None) -> str:
-    """Deterministically scrub SSNs, EINs, and credit card PANs from text before storage or logging."""
+    """Deterministically scrub SSNs, EINs, card PANs, routing and labeled bank account numbers from text."""
     if not text:
         return ""
-    # Cards first, so a 16-digit PAN is never partially consumed by the SSN pattern.
-    scrubbed = CARD_PAN_PATTERN.sub("[REDACTED_CARD]", text)
+    scrubbed = IBAN_PATTERN.sub("[REDACTED_ACCOUNT]", text)
+    scrubbed = ACCOUNT_NUMBER_PATTERN.sub(r"\1[REDACTED_ACCOUNT]", scrubbed)
+    # Cards before SSNs, so a 16-digit PAN is never partially consumed by the SSN pattern.
+    scrubbed = CARD_PAN_PATTERN.sub("[REDACTED_CARD]", scrubbed)
     scrubbed = SSN_PATTERN.sub("[REDACTED_SSN]", scrubbed)
     scrubbed = EIN_PATTERN.sub("[REDACTED_EIN]", scrubbed)
     return scrubbed

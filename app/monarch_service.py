@@ -36,6 +36,7 @@ from app.config import (
     BQ_DATASET_ID,
     BQ_PROJECT_ID,
     BUSINESS_TAG,
+    IS_PROD,
     get_account_overrides,
     get_chat_action_target,
     get_decommissioned_account_ids,
@@ -57,6 +58,10 @@ PLAID_REFRESH_COOLDOWN_MINUTES = 60
 CURRENT_USER_EMAIL: contextvars.ContextVar[str] = contextvars.ContextVar("CURRENT_USER_EMAIL", default="unknown")
 CURRENT_PROPOSED_CARD: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "CURRENT_PROPOSED_CARD", default=None
+)
+# True while answering a message that carried an image or document, whose text the user didn't write.
+CURRENT_TURN_HAS_ATTACHMENTS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "CURRENT_TURN_HAS_ATTACHMENTS", default=False
 )
 
 # HMAC signing configuration for human-in-the-loop mutation confirmation
@@ -731,6 +736,10 @@ def request_plaid_refresh(institution_name: str) -> str:
 _EPHEMERAL_HMAC_SECRET = secrets.token_hex(32)
 
 
+class SigningSecretMissing(RuntimeError):
+    """No card signing secret is configured in production."""
+
+
 def get_mutation_hmac_secret() -> str:
     """Retrieves or derives the secret key used to sign mutation confirmation cards."""
     configured = (
@@ -740,6 +749,11 @@ def get_mutation_hmac_secret() -> str:
     )
     if configured:
         return configured
+    if IS_PROD:
+        # A per-process key would make cards fail on any other instance, and quietly running without a
+        # configured secret hides a broken deployment. Refuse instead.
+        logger.error("No mutation signing secret configured; refusing to sign or verify confirmation cards")
+        raise SigningSecretMissing("Card signing is not configured, so no changes can be confirmed.")
     logger.warning("No mutation signing secret configured; using an ephemeral per-process key")
     return _EPHEMERAL_HMAC_SECRET
 
@@ -774,7 +788,10 @@ def verify_mutation_signature(
             False,
             f"Confirmation expired (card age: {age}s > limit: {max_age_seconds}s). Please request a fresh confirmation.",
         )
-    expected = generate_mutation_signature(transaction_id, category_id, user_email, timestamp)
+    try:
+        expected = generate_mutation_signature(transaction_id, category_id, user_email, timestamp)
+    except SigningSecretMissing as e:
+        return False, str(e)
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch. Action parameters may have been altered."
     return True, "Valid"
@@ -808,7 +825,10 @@ def verify_snooze_signature(
             False,
             f"Snooze confirmation expired (card age: {age}s > limit: {max_age_seconds}s).",
         )
-    expected = generate_snooze_signature(alert_key, days, timestamp)
+    try:
+        expected = generate_snooze_signature(alert_key, days, timestamp)
+    except SigningSecretMissing as e:
+        return False, str(e)
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch on snooze action."
     return True, "Valid"
@@ -846,7 +866,10 @@ def verify_batch_signature(
             False,
             f"Batch confirmation expired (card age: {age}s > limit: {max_age_seconds}s). Please request a fresh confirmation.",
         )
-    expected = generate_batch_signature(batch_id, category_id, count, user_email, timestamp)
+    try:
+        expected = generate_batch_signature(batch_id, category_id, count, user_email, timestamp)
+    except SigningSecretMissing as e:
+        return False, str(e)
     if not secrets.compare_digest(expected, signature):
         return False, "Cryptographic signature mismatch. Batch parameters may have been altered."
     return True, "Valid"

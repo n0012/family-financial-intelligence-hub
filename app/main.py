@@ -57,6 +57,7 @@ from app.memory_service import (
 )
 from app.monarch_service import (
     CURRENT_PROPOSED_CARD,
+    CURRENT_TURN_HAS_ATTACHMENTS,
     CURRENT_USER_EMAIL,
     build_batch_recategorization_cancelled_card,
     build_batch_recategorization_success_card,
@@ -700,6 +701,23 @@ def patch_chat_card(message_name: str, cards_v2: list, text: str | None = None) 
         return False
 
 
+MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
+
+
+def _read_capped(resp, limit: int = MAX_ATTACHMENT_BYTES) -> bytes | None:
+    """Read a streamed response body, giving up as soon as it passes the limit."""
+    declared = resp.headers.get("Content-Length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        return None
+    chunks, total = [], 0
+    for chunk in resp.iter_content(chunk_size=64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
     """Download an uploaded media attachment from Google Chat using bot credentials."""
     try:
@@ -717,6 +735,9 @@ def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
         if not resource_name:
             logger.warning("No resourceName found for attachment")
             return None
+        if any(bad in name for name in (resource_name, alt_resource_name or "") for bad in ("..", "?", "#")):
+            logger.warning("Rejected attachment with a malformed resourceName")
+            return None
 
         # Build candidate URLs for media download
         candidate_urls = [
@@ -728,11 +749,15 @@ def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
 
         for url in candidate_urls:
             try:
-                resp = requests.get(url, headers=headers, timeout=20)
-                if resp.status_code == 200 and resp.content:
-                    if len(resp.content) > 15 * 1024 * 1024:
-                        logger.warning(f"Attachment exceeds 15MB byte limit ({len(resp.content)} bytes); skipping.")
-                        return None
+                with requests.get(url, headers=headers, timeout=20, stream=True) as resp:
+                    if resp.status_code != 200:
+                        logger.debug(f"Media download from {url} returned {resp.status_code}")
+                        continue
+                    content = _read_capped(resp)
+                if content is None:
+                    logger.warning("Attachment exceeds 15MB byte limit; skipping.")
+                    return None
+                if content:
                     content_name = attachment.get("contentName", "").lower()
                     mime_map = {
                         ".png": "image/png",
@@ -747,10 +772,8 @@ def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
                     }
                     ext = os.path.splitext(content_name)[1]
                     content_type = mime_map.get(ext) or "image/jpeg"
-                    logger.info(f"Successfully downloaded attachment ({len(resp.content)} bytes, type={content_type})")
-                    return resp.content, content_type
-                else:
-                    logger.debug(f"Media download from {url} returned {resp.status_code}")
+                    logger.info(f"Successfully downloaded attachment ({len(content)} bytes, type={content_type})")
+                    return content, content_type
             except Exception as e:
                 logger.debug(f"Media download request to {url} failed: {e}")
 
@@ -1869,6 +1892,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
 
     CURRENT_USER_EMAIL.set(user_email)
     CURRENT_PROPOSED_CARD.set(None)
+    CURRENT_TURN_HAS_ATTACHMENTS.set(bool(downloaded_files))
 
     loop = asyncio.get_event_loop()
     # run_in_executor does not carry contextvars into the worker; without this copy the Gemini
