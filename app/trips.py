@@ -489,12 +489,17 @@ def match_expense_amounts(rows: list[dict], trip: dict) -> tuple[dict[str, dict]
 
 
 def match_trip_charges(rows: list[dict], trip: dict, business_tag: str = BUSINESS_TAG) -> dict:
-    """Splits the window's charges into trip items, already-tagged charges and an account-filter note."""
+    """
+    Splits the window's charges into trip items, already-tagged charges and an account-filter note. With an
+    expense report, its amounts decide the ticks: the report is the list of what was expensed, so name and
+    date heuristics only offer other charges unticked. A charge tagged for a different trip is never offered.
+    """
     trip_tag = trip_tag_name(trip).lower()
     hint = trip["account_hint"]
     hint_applies = bool(hint) and any(account_matches(hint, r.get("account_name")) for r in rows)
     receipts, unmatched = match_expense_amounts(rows, trip)
-    items, already = [], 0
+    has_report = bool(trip.get("expenses"))
+    items, already, other_trip = [], 0, 0
     for r in rows:
         receipt = receipts.get(r["transaction_id"])
         if hint_applies and not receipt and not account_matches(hint, r.get("account_name")):
@@ -502,11 +507,16 @@ def match_trip_charges(rows: list[dict], trip: dict, business_tag: str = BUSINES
         found = classify_charge(r, trip)
         if receipt:  # an amount the user pasted beats every heuristic
             found = (found[0] if found else "travel", True)
+        elif found and has_report:
+            found = (found[0], False)
         if not found:
             continue
         lowered = {t.lower() for t in r.get("tags") or []}
         if business_tag.lower() in lowered and trip_tag in lowered:
             already += 1
+            continue
+        if any(t.startswith("trip:") and t != trip_tag for t in lowered):
+            other_trip += 1
             continue
         kind, ticked = found
         items.append({**r, "kind": kind, "ticked": ticked, "receipt": bool(receipt)})
@@ -514,9 +524,12 @@ def match_trip_charges(rows: list[dict], trip: dict, business_tag: str = BUSINES
     return {
         "items": items[:MAX_TRIP_ITEMS],
         "already_tagged": already,
+        "other_trip": other_trip,
+        "has_report": has_report,
         "account_note": "" if not hint or hint_applies else f"No account matched '{hint}', so all cards are shown.",
         "expense_count": len(trip.get("expenses") or []),
         "unmatched_expenses": unmatched,
+        "matched_expenses": list(receipts.values()),
     }
 
 
@@ -526,7 +539,10 @@ def match_trip_charges(rows: list[dict], trip: dict, business_tag: str = BUSINES
 
 
 def _json_items(items: list[dict]) -> list[dict]:
-    keep = ("transaction_id", "transaction_date", "amount", "merchant", "category_name", "account_name", "kind")
+    keep = (
+        "transaction_id", "transaction_date", "amount", "merchant", "category_name", "account_name", "kind", "ticked",
+        "receipt",
+    )  # fmt: skip
     return [{k: (str(i[k]) if k == "transaction_date" else i.get(k)) for k in keep} for i in items]
 
 
@@ -631,6 +647,12 @@ def propose_trip_review(
     }
     details["expense_count"] = matched["expense_count"]
     details["unmatched_expenses"] = len(matched["unmatched_expenses"])
+    # The parsed report lines, kept so a trip can be audited later (the attachment itself is not stored).
+    matched_ids = {id(e) for e in matched["matched_expenses"]}
+    details["expenses"] = [
+        {**e, "date": e["date"].isoformat() if e["date"] else "", "matched": id(e) in matched_ids}
+        for e in trip.get("expenses") or []
+    ]
     trip_row = {
         "trip_id": trip_id,
         "user_email": user_email,
@@ -710,10 +732,14 @@ def build_trip_card(trip_row: dict, items: list[dict], matched: dict, timestamp:
         f"Ticked charges get the tags <b>{html.escape(', '.join(trip_tag_names(trip_row)))}</b> in Monarch. "
         "Categories don't change and no rules are created."
     ]
-    if not trip_row["details"].get("include_meals"):
+    if matched.get("has_report"):
+        notes.append("Only charges matching the report's amounts are ticked; the rest are listed for you to check.")
+    elif not trip_row["details"].get("include_meals"):
         notes.append("Meals are unticked; tick the work ones, or run /trip again with 'include meals'.")
     if matched["already_tagged"]:
         notes.append(f"{matched['already_tagged']} charge(s) already tagged for this trip are not listed.")
+    if matched.get("other_trip"):
+        notes.append(f"{matched['other_trip']} charge(s) tagged for another trip are not listed.")
     if matched["account_note"]:
         notes.append(html.escape(matched["account_note"]))
     if matched.get("expense_count"):

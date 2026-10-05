@@ -38,7 +38,7 @@ Only the dates are required. Everything else improves the default ticks:
 | Card | Only charges on matching accounts are listed. If nothing matches, all cards are shown and the card says so. |
 | `include meals` | Restaurant charges during the trip are ticked (they are listed unticked otherwise). |
 | `reimbursed` | Adds a `Reimbursable` tag (`REIMBURSABLE_TAG`). |
-| Amounts | Charges of exactly those amounts are ticked (see below). |
+| Amounts | Charges of exactly those amounts are ticked, and nothing else is (see below). |
 
 ### Paste or attach an expense report
 
@@ -61,7 +61,9 @@ own it goes to the general advisor. Older `.xls` workbooks aren't read; save the
 `/trip`; describing a trip in plain language passes your words, not your files.
 
 Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its
-merchant, category or card. A dated line matches a charge posted from a day before to 3 days after it; an
+merchant, category or card. With a report, **only** those charges are ticked: the report is the list of what
+was expensed, so an airline or hotel it mentions doesn't tick that airline's charges from earlier trips, and
+everything else the dates and names turn up is listed unticked for you to check. A dated line matches a charge posted from a day before to 3 days after it; an
 undated amount only matches a charge that looks like travel or falls within the trip. The card lists any
 amounts with no matching charge (not posted yet, or paid another way). Mileage, per diem and cash lines are
 skipped.
@@ -78,6 +80,10 @@ transactions are matched in code:
 - Airline brand names that are also ordinary words (for example a youth club or a utility sharing an
   airline's name) only count when they are the whole merchant name.
 - Food delivery never counts as ground transport.
+- A charge already tagged for a different trip (any `Trip: …` tag other than this trip's) is not listed.
+
+Each saved trip keeps the parsed report lines (amount, merchant, date, matched or not) and which charges were
+ticked or amount-matched, so a trip can be checked later; the attachment itself is not stored.
 
 The card lists up to 40 charges grouped by airfare, lodging, ground transport, meals and other travel.
 **Tag selected** adds the business tag, the trip tag and (if reimbursed) `Reimbursable` to the ticked charges
