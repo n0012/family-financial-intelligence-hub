@@ -5,10 +5,28 @@ and schema application.
 """
 
 import json
+import pathlib
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 
 from app import bq_service
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+class TestDdlIsValidBigQuery(unittest.TestCase):
+    def test_no_not_null_arrays(self):
+        # BigQuery rejects NOT NULL on an ARRAY column, even in CREATE TABLE IF NOT EXISTS for a table that
+        # already exists, so the statement fails and anything after it in the same try block never runs.
+        bad = re.compile(r"ARRAY<[^>]*>\s+NOT\s+NULL", re.IGNORECASE)
+        offenders = [
+            f"{path.relative_to(ROOT)}:{n}"
+            for path in [ROOT / "schema.sql", *sorted((ROOT / "app").glob("*.py"))]
+            for n, line in enumerate(path.read_text().splitlines(), 1)
+            if bad.search(line)
+        ]
+        self.assertEqual(offenders, [])
 
 
 class TestRunReadonlySql(unittest.TestCase):

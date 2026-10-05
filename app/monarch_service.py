@@ -1633,7 +1633,7 @@ async def save_pending_batch_async(batch: dict) -> None:
                 merchant_name STRING NOT NULL,
                 category_id STRING NOT NULL,
                 category_name STRING NOT NULL,
-                transaction_ids ARRAY<STRING> NOT NULL,
+                transaction_ids ARRAY<STRING>,
                 transaction_count INT64 NOT NULL,
                 total_amount NUMERIC NOT NULL,
                 created_at TIMESTAMP NOT NULL,
