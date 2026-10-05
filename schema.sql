@@ -32,8 +32,12 @@ CREATE TABLE IF NOT EXISTS `family_finance.raw_transactions` (
     notes STRING,
     is_recurring BOOL,
     pending BOOL,
-    updated_at TIMESTAMP
+    updated_at TIMESTAMP,
+    tags ARRAY<STRING>,        -- Monarch tag names
+    is_business BOOL           -- carries the business tag (BUSINESS_TAG); excluded from household spend
 );
+ALTER TABLE `family_finance.raw_transactions` ADD COLUMN IF NOT EXISTS tags ARRAY<STRING>;
+ALTER TABLE `family_finance.raw_transactions` ADD COLUMN IF NOT EXISTS is_business BOOL;
 
 -- Staging Transactions Table (for idempotent MERGE / dedup)
 CREATE TABLE IF NOT EXISTS `family_finance.staging_transactions` (
@@ -48,7 +52,9 @@ CREATE TABLE IF NOT EXISTS `family_finance.staging_transactions` (
     notes STRING,
     is_recurring BOOL,
     pending BOOL,
-    updated_at TIMESTAMP
+    updated_at TIMESTAMP,
+    tags ARRAY<STRING>,
+    is_business BOOL
 );
 
 -- 3. Raw Categories Table
@@ -486,6 +492,7 @@ SELECT
     COUNT(*) AS transaction_count
 FROM `family_finance.raw_transactions`
 WHERE NOT COALESCE(pending, FALSE)
+  AND NOT COALESCE(is_business, FALSE)
 GROUP BY 1, 2, 3;
 
 -- VIEW C1: Account Classification & Lifecycle Intelligence (Dynamic Resolution)
@@ -671,6 +678,7 @@ WITH monthly_food AS (
         OR LOWER(category_name) LIKE '%bar%')
       AND amount < 0
       AND pending = FALSE
+      AND NOT COALESCE(is_business, FALSE)
     GROUP BY 1, 2
 )
 SELECT
@@ -702,6 +710,7 @@ FROM `family_finance.raw_transactions`
 WHERE amount < 0
   AND ABS(amount) < 35.00
   AND pending = FALSE
+  AND NOT COALESCE(is_business, FALSE)
   AND transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
 GROUP BY 1, 2
 HAVING frequency_90d >= 4

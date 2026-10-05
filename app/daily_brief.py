@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, resolve_secret
+from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, HOUSEHOLD_SPEND_SQL, resolve_secret
 
 try:
     from google.cloud import bigquery
@@ -98,7 +98,8 @@ def _sql_list(values: tuple[str, ...]) -> str:
 
 SPEND_WHERE = (
     "amount < 0 AND NOT COALESCE(pending, FALSE) "
-    f"AND LOWER(COALESCE(category_name, '')) NOT IN ({_sql_list(NON_SPEND_CATEGORIES)})"
+    f"AND LOWER(COALESCE(category_name, '')) NOT IN ({_sql_list(NON_SPEND_CATEGORIES)}) "
+    f"AND {HOUSEHOLD_SPEND_SQL}"
 )
 # Recent activity, month-to-date and goal pacing include pending charges, since Monarch posts a day or two late.
 SPEND_INCL_PENDING_WHERE = SPEND_WHERE.replace("AND NOT COALESCE(pending, FALSE) ", "")
@@ -189,7 +190,7 @@ def fetch_cap_spend(bq: Any, table: str, goal: str) -> dict[str, float]:
         SUM(IF(transaction_date >= DATE_TRUNC({TODAY}, MONTH), -amount, 0)) AS mtd,
         SUM(IF(transaction_date < DATE_TRUNC({TODAY}, MONTH), -amount, 0)) AS last_month
     FROM `{table}`
-    WHERE amount < 0 AND {GOAL_FILTERS[goal]}
+    WHERE amount < 0 AND {HOUSEHOLD_SPEND_SQL} AND {GOAL_FILTERS[goal]}
       AND transaction_date >= DATE_TRUNC(DATE_SUB({TODAY}, INTERVAL 1 MONTH), MONTH)
     """
     r = _rows(bq, sql)[0]

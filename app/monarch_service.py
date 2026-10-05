@@ -35,6 +35,7 @@ from app.bq_service import get_bq_client
 from app.config import (
     BQ_DATASET_ID,
     BQ_PROJECT_ID,
+    BUSINESS_TAG,
     get_account_overrides,
     get_chat_action_target,
     get_decommissioned_account_ids,
@@ -302,6 +303,30 @@ async def sync_all_categories(
     return len(cat_rows)
 
 
+def transaction_tag_names(txn: dict) -> list[str]:
+    """Names of the Monarch tags on a transaction, in Monarch's order."""
+    return [str(t["name"]) for t in (txn.get("tags") or []) if isinstance(t, dict) and t.get("name")]
+
+
+def is_business_tagged(tag_names: list[str]) -> bool:
+    return BUSINESS_TAG.strip().lower() in {t.strip().lower() for t in tag_names}
+
+
+_TAG_COLUMNS_READY = False
+
+
+def ensure_tag_columns(bq: bigquery.Client, table_ref: str) -> None:
+    """Adds the tag columns to an existing raw_transactions table before the first MERGE that writes them."""
+    global _TAG_COLUMNS_READY
+    if _TAG_COLUMNS_READY:
+        return
+    bq.query(
+        f"ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS tags ARRAY<STRING>; "
+        f"ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS is_business BOOL;"
+    ).result()
+    _TAG_COLUMNS_READY = True
+
+
 async def sync_transactions(
     client: MonarchMoney,
     bq: bigquery.Client,
@@ -364,6 +389,7 @@ async def sync_transactions(
 
         cat = txn.get("category") or {}
         merchant = txn.get("merchant") or {}
+        tags = transaction_tag_names(txn)
         txn_rows.append(
             {
                 "transaction_id": str(txn.get("id")),
@@ -380,6 +406,8 @@ async def sync_transactions(
                 "is_recurring": txn.get("isRecurring", False),
                 "pending": txn.get("pending", False),
                 "updated_at": now_ts,
+                "tags": tags,
+                "is_business": is_business_tagged(tags),
             }
         )
 
@@ -402,7 +430,10 @@ async def sync_transactions(
         bigquery.SchemaField("is_recurring", "BOOLEAN"),
         bigquery.SchemaField("pending", "BOOLEAN"),
         bigquery.SchemaField("updated_at", "TIMESTAMP"),
+        bigquery.SchemaField("tags", "STRING", mode="REPEATED"),
+        bigquery.SchemaField("is_business", "BOOLEAN"),
     ]
+    await asyncio.to_thread(lambda: ensure_tag_columns(bq, target_ref))
     job_config = bigquery.LoadJobConfig(
         schema=txn_schema,
         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
@@ -425,10 +456,12 @@ async def sync_transactions(
         T.notes = S.notes,
         T.is_recurring = S.is_recurring,
         T.pending = S.pending,
-        T.updated_at = S.updated_at
+        T.updated_at = S.updated_at,
+        T.tags = S.tags,
+        T.is_business = S.is_business
     WHEN NOT MATCHED THEN
-      INSERT (transaction_id, account_id, transaction_date, amount, merchant_name, clean_merchant_name, category_id, category_name, notes, is_recurring, pending, updated_at)
-      VALUES (S.transaction_id, S.account_id, S.transaction_date, S.amount, S.merchant_name, S.clean_merchant_name, S.category_id, S.category_name, S.notes, S.is_recurring, S.pending, S.updated_at);
+      INSERT (transaction_id, account_id, transaction_date, amount, merchant_name, clean_merchant_name, category_id, category_name, notes, is_recurring, pending, updated_at, tags, is_business)
+      VALUES (S.transaction_id, S.account_id, S.transaction_date, S.amount, S.merchant_name, S.clean_merchant_name, S.category_id, S.category_name, S.notes, S.is_recurring, S.pending, S.updated_at, S.tags, S.is_business);
     """
     await asyncio.to_thread(lambda: bq.query(merge_query).result())
     return len(txn_rows)
