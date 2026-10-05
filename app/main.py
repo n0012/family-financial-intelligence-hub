@@ -463,7 +463,7 @@ def ask_gemini_brain(
             "    - For a single specific transaction, call `propose_transaction_recategorization(transaction_id, new_category)`.\n"
             "    - Proactive Next Recommendations: You are equipped with `get_recategorization_recommendations(exclude_merchant)`. After proposing or executing a batch recategorization, or when auditing transactions, proactively run this tool to identify the next high-confidence misclassified merchant and suggest fixing it.\n"
             "    - Category clean-up across many merchants (e.g. 'review my categories', 'fix uncategorized transactions'): call `start_category_review(max_merchants)`. It researches each merchant on the web and posts one review card where the user ticks the fixes to apply. Summarize its suggestions briefly; do not repeat the card.\n"
-            "    - Business trips (e.g. 'I was in Denver for work March 3-6', 'tag my business trip'): call `start_business_trip_review(trip_description)` with the user's own words. It posts a card of the trip's airfare, hotel and ground transport to tag as Business; categories never change. If the user gave no dates, ask for them instead of calling it.\n"
+            "    - Business trips (e.g. 'I was in Denver for work March 3-6', 'tag my business trip'): call `start_business_trip_review(trip_description)` with the user's own words, including any pasted expense report or receipts verbatim (their amounts are matched to charges). It posts a card of the trip's airfare, hotel and ground transport to tag as Business; categories never change. If the user gave no dates, ask for them instead of calling it.\n"
             "    - Never attempt to mutate transactions directly; both tools strictly prepare HMAC-signed confirmation cards requiring the user's interactive confirmation in Google Chat.\n"
             "13. Persistent User Preferences & Memory Consolidation: You are equipped with `store_user_preference(preference_or_rule)` to persist family goals, spending limits, debt acceleration targets, budget caps, categorization guidelines, or alert preferences into the long-term Memory Bank. Proactively call this tool whenever the user sets a budget cap, establishes a payoff target, establishes a merchant categorization rule, asks you to remember something, or defines an enduring financial preference.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
@@ -1807,7 +1807,9 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         if not trip_text:
             return respond(
                 "Tell me the trip dates, plus anything that helps: destination, airline, hotel, card, "
-                "'include meals', 'reimbursed'. For example: `/trip Springfield Mar 10-14, flew Example Air`"
+                "'include meals', 'reimbursed'. For example: `/trip Springfield Mar 10-14, flew Example Air`. "
+                "Paste an expense report or confirmation emails after `/trip` and charges with the same amounts "
+                "are ticked."
             )
         interim = "🧳 *Finding trip charges...* The card will follow in this thread."
 
