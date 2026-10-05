@@ -50,6 +50,26 @@ class TestValidate(unittest.TestCase):
         single = tr.validate_trip({"start_date": "2026-03-10", "end_date": ""}, TODAY)
         self.assertEqual(single["end_date"], date(2026, 3, 10))
 
+    def test_report_line_dates_stand_in_for_missing_trip_dates(self):
+        lines = [
+            {"amount": 480, "merchant": "Example Air", "date": "2026-02-01"},  # booked weeks ahead
+            {"amount": 600, "merchant": "Harbor Hotel", "date": "2026-03-13"},
+            {"amount": 25, "merchant": "Example Taxi", "date": "2026-03-10"},
+            {"amount": 18, "merchant": "Corner Bistro", "date": ""},
+        ]
+        trip = tr.validate_trip({"start_date": "", "end_date": "", "expenses": lines}, TODAY)
+        self.assertEqual((trip["start_date"], trip["end_date"]), (date(2026, 3, 10), date(2026, 3, 13)))
+        self.assertEqual(len(trip["expenses"]), 4)  # the early booking is still matched by amount
+        single = tr.validate_trip({"expenses": [{"amount": 25, "merchant": "Taxi", "date": "2026-03-10"}]}, TODAY)
+        self.assertEqual((single["start_date"], single["end_date"]), (date(2026, 3, 10), date(2026, 3, 10)))
+        with self.assertRaisesRegex(ValueError, "a date on each line"):
+            tr.validate_trip({"expenses": [{"amount": 25, "merchant": "Taxi", "date": ""}]}, TODAY)
+
+    def test_stated_trip_dates_win_over_report_lines(self):
+        lines = [{"amount": 25, "merchant": "Taxi", "date": "2026-03-20"}]
+        trip = tr.validate_trip({"start_date": "2026-03-10", "end_date": "2026-03-13", "expenses": lines}, TODAY)
+        self.assertEqual(trip["start_date"], date(2026, 3, 10))
+
     def test_future_and_overlong_trips_are_refused(self):
         with self.assertRaises(ValueError):
             _trip(start_date="2026-05-01", end_date="2026-05-03")
