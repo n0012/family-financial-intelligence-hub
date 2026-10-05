@@ -469,6 +469,52 @@ class TestChatHandlers(unittest.TestCase):
         self.assertIn("Finding trip charges", post.call_args_list[0].args[0])
         self.assertEqual(post.call_args_list[1].kwargs["cards_v2"], [proposal["card"]])
 
+    def _send(self, text, attachment, file_tuple):
+        message = {
+            "name": "spaces/AAAA/messages/m3",
+            "attachment": [attachment],
+            "space": {"name": "spaces/AAAA"},
+            "thread": {"name": "spaces/AAAA/threads/t3"},
+        }
+        if text is not None:
+            message["text"] = text
+        event = {
+            "chat": {
+                "user": {"email": "user@example.com", "displayName": "User"},
+                "messagePayload": {"message": message},
+            }
+        }
+        push = {"message": {"data": base64.b64encode(json.dumps(event).encode()).decode()}}
+        with (
+            patch("app.main.download_chat_attachment", return_value=file_tuple),
+            patch("app.main.propose_trip_review", return_value={"status": "none_found", "message": "x"}) as propose,
+            patch("app.main.post_to_chat_thread"),
+            patch("app.main.ask_gemini_brain", return_value={"answer": "ok"}) as brain,
+            patch("app.main.save_session_history"),
+            patch("app.main.get_session_history", return_value=[]),
+        ):
+            asyncio.run(main.google_chat_webhook(push))
+        return propose, brain
+
+    def test_spreadsheet_sent_on_its_own_is_a_trip_report(self):
+        # Chat sends a file as its own message, often with no text at all.
+        xlsx = (b"xlsx-bytes", tr.XLSX_MIME)
+        propose, brain = self._send(None, {"contentName": "Expense Report.xlsx", "name": "media/1"}, xlsx)
+        propose.assert_called_once_with("user@example.com", "", files=[xlsx])
+        brain.assert_not_called()
+        propose, _ = self._send("here's my Springfield report", {"contentName": "report.csv", "name": "media/2"},
+                                (b"a,b", "text/csv"))  # fmt: skip
+        self.assertEqual(propose.call_args.args[1], "here's my Springfield report")
+
+    def test_other_commands_and_pdfs_are_not_turned_into_trips(self):
+        propose, _ = self._send("/help", {"contentName": "report.xlsx", "name": "media/1"}, (b"x", tr.XLSX_MIME))
+        propose.assert_not_called()
+        propose, brain = self._send(
+            None, {"contentName": "statement.pdf", "name": "media/4"}, (b"%PDF", "application/pdf")
+        )
+        propose.assert_not_called()  # a lone PDF is still a document for the general agent
+        brain.assert_called_once()
+
     def test_trip_command_with_only_an_attached_report(self):
         event = {
             "chat": {

@@ -55,7 +55,9 @@ Mar 12 Example Taxi        $25.00
 Or attach the report to a `/trip` message instead of pasting it: **xlsx** (as Concur exports it), **csv**, **txt**,
 **pdf** or a screenshot. Spreadsheets and text files are converted to text in code (up to 40,000 characters);
 PDFs and images go to Gemini as files. With an attachment, `/trip` alone is enough when the report states its
-travel period. Older `.xls` workbooks aren't read; save them as xlsx or csv. Attachments are read only by
+travel period, and a spreadsheet or text file sent on its own (Chat often sends a file as a separate message)
+is read as a trip report without `/trip`. A PDF or image still needs `/trip` in the same message, since on its
+own it goes to the general advisor. Older `.xls` workbooks aren't read; save them as xlsx or csv. Attachments are read only by
 `/trip`; describing a trip in plain language passes your words, not your files.
 
 Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its

@@ -1543,6 +1543,11 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     clean_text = re.sub(r"@(FinSage|Sage|Family\s*Finance\s*Copilot)", "", raw_text, flags=re.IGNORECASE)
     clean_text = re.sub(r"@\S+", "", clean_text).strip()
 
+    # Spreadsheets and text files are only read by /trip, and Chat often sends a file as its own message with
+    # no text or a short note, so a message carrying one is a trip report unless it is another command.
+    if len(downloaded_files) > len(downloaded_images) and not clean_text.startswith("/"):
+        clean_text = f"/trip {clean_text}".strip()
+
     if not clean_text and downloaded_images:
         clean_text = "Please carefully examine the attached financial screenshot/document. Parse all numbers, projections, and line items, and provide a strategic financial analysis and recommendations."
 
@@ -1822,7 +1827,8 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 "Tell me the trip dates, plus anything that helps: destination, airline, hotel, card, "
                 "'include meals', 'reimbursed'. For example: `/trip Springfield Mar 10-14, flew Example Air`. "
                 "Paste an expense report or confirmation emails after `/trip`, or attach the report (xlsx, csv, "
-                "pdf, txt or a screenshot), and charges with the same amounts are ticked."
+                "pdf, txt or a screenshot), and charges with the same amounts are ticked. A spreadsheet or text "
+                "file sent on its own is read as a trip report too."
             )
         interim = "🧳 *Finding trip charges...* The card will follow in this thread."
 
