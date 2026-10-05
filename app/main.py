@@ -89,7 +89,14 @@ from app.receipt_service import (
     get_tax_deduction_analysis,
     process_receipt_bytes,
 )
-from app.trips import apply_trip_review, propose_trip_review, start_business_trip_review, verify_trip_signature
+from app.trips import (
+    TRIP_DOCUMENT_EXTENSIONS,
+    XLSX_MIME,
+    apply_trip_review,
+    propose_trip_review,
+    start_business_trip_review,
+    verify_trip_signature,
+)
 
 try:
     from google import genai
@@ -733,6 +740,10 @@ def download_chat_attachment(attachment: dict) -> tuple[bytes, str] | None:
                         ".jpeg": "image/jpeg",
                         ".webp": "image/webp",
                         ".pdf": "application/pdf",
+                        ".xlsx": XLSX_MIME,
+                        ".csv": "text/csv",
+                        ".tsv": "text/tab-separated-values",
+                        ".txt": "text/plain",
                     }
                     ext = os.path.splitext(content_name)[1]
                     content_type = mime_map.get(ext) or "image/jpeg"
@@ -1514,16 +1525,18 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
         logger.info("Bot removed from space")
         return {}
 
-    # 2. Extract attachments (images / screenshots)
+    # 2. Extract attachments (images / screenshots, plus spreadsheets and text files for /trip)
     attachments = message.get("attachment") or message.get("attachments") or []
-    downloaded_images = []
+    downloaded_files = []
     if attachments and isinstance(attachments, list):
         for att in attachments:
             content_name = att.get("contentName", "")
-            if content_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".pdf")):
-                img_tuple = download_chat_attachment(att)
-                if img_tuple:
-                    downloaded_images.append(img_tuple)
+            if content_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".pdf", *TRIP_DOCUMENT_EXTENSIONS)):
+                file_tuple = download_chat_attachment(att)
+                if file_tuple:
+                    downloaded_files.append(file_tuple)
+    # Gemini takes images and PDFs directly; spreadsheets and text files are only read by /trip.
+    downloaded_images = [f for f in downloaded_files if f[1].startswith("image/") or f[1] == "application/pdf"]
 
     # 3. Extract text and strip @mention anywhere (beginning, middle, or end)
     raw_text = message.get("argumentText") or message.get("text") or ""
@@ -1804,18 +1817,18 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
     # Command: /trip, tag a business trip's charges
     if lower_text.startswith("/trip"):
         trip_text = clean_text[len("/trip") :].strip()
-        if not trip_text:
+        if not trip_text and not downloaded_files:
             return respond(
                 "Tell me the trip dates, plus anything that helps: destination, airline, hotel, card, "
                 "'include meals', 'reimbursed'. For example: `/trip Springfield Mar 10-14, flew Example Air`. "
-                "Paste an expense report or confirmation emails after `/trip` and charges with the same amounts "
-                "are ticked."
+                "Paste an expense report or confirmation emails after `/trip`, or attach the report (xlsx, csv, "
+                "pdf, txt or a screenshot), and charges with the same amounts are ticked."
             )
         interim = "🧳 *Finding trip charges...* The card will follow in this thread."
 
         async def build_trip_review() -> tuple[str, list | None]:
             try:
-                res = await asyncio.to_thread(propose_trip_review, user_email, trip_text)
+                res = await asyncio.to_thread(propose_trip_review, user_email, trip_text, files=downloaded_files)
             except Exception as e:
                 logger.error(f"Trip review failed: {e}", exc_info=True)
                 return f"⚠️ Trip review failed: {e}", None
