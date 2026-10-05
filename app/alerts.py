@@ -22,7 +22,7 @@ try:
 except ImportError:
     bigquery = None
 
-from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, get_chat_action_target, resolve_secret
+from app.config import BQ_DATASET_ID, BQ_PROJECT_ID, HOUSEHOLD_SPEND_SQL, get_chat_action_target, resolve_secret
 
 logger = logging.getLogger("monarch-gemini.alerts")
 
@@ -690,6 +690,7 @@ def check_memory_budget_limits(
         )
         AND amount < 0
         AND NOT COALESCE(pending, FALSE)
+        AND {HOUSEHOLD_SPEND_SQL}
         AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'));
         """
         try:
@@ -745,6 +746,7 @@ def check_memory_budget_limits(
         )
         AND amount < 0
         AND NOT COALESCE(pending, FALSE)
+        AND {HOUSEHOLD_SPEND_SQL}
         AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'));
         """
         try:
@@ -957,6 +959,7 @@ def generate_daily_brief_synopsis(
         FROM `{project_id}.{dataset_id}.raw_transactions`
         WHERE amount < 0
           AND NOT COALESCE(pending, FALSE)
+          AND {HOUSEHOLD_SPEND_SQL}
           AND FORMAT_DATE('%Y-%m', transaction_date) = FORMAT_DATE('%Y-%m', CURRENT_DATE('America/New_York'))
           AND LOWER(COALESCE(category_name, '')) NOT IN (
               'transfer', 'credit card payment', 'balance transfer',
@@ -1764,6 +1767,7 @@ def generate_executive_digest(
           AND t.transaction_date <= p.end_date
           AND t.amount < 0
           AND NOT COALESCE(t.pending, FALSE)
+          AND NOT COALESCE(t.is_business, FALSE)
           AND LOWER(COALESCE(t.category_name, '')) NOT IN (
               'transfer', 'credit card payment', 'balance transfer',
               'loan payment', 'investment', 'savings'
@@ -1857,6 +1861,7 @@ def generate_executive_digest(
       AND t.transaction_date <= p.end_date
       AND t.amount < 0
       AND NOT COALESCE(t.pending, FALSE)
+      AND NOT COALESCE(t.is_business, FALSE)
       AND LOWER(COALESCE(t.category_name, '')) NOT IN (
           'transfer', 'credit card payment', 'balance transfer',
           'loan payment', 'investment', 'savings'
@@ -1884,6 +1889,7 @@ def generate_executive_digest(
       AND t.transaction_date <= p.end_date
       AND t.amount < 0
       AND NOT COALESCE(t.pending, FALSE)
+      AND NOT COALESCE(t.is_business, FALSE)
       AND LOWER(COALESCE(t.category_name, '')) NOT IN (
           'transfer', 'credit card payment', 'balance transfer',
           'loan payment', 'investment', 'savings'

@@ -26,6 +26,11 @@ BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "family_finance")
 
 IS_PROD = bool(os.getenv("K_SERVICE"))
 
+# Transactions carrying this Monarch tag are business spending: they keep their category but are left out
+# of household spend totals, trends, pacing and alerts.
+BUSINESS_TAG = os.getenv("BUSINESS_TAG", "Business")
+HOUSEHOLD_SPEND_SQL = "NOT COALESCE(is_business, FALSE)"
+
 DEFAULT_DECOMMISSIONED_ACCOUNT_IDS: set[str] = set()
 DEFAULT_ACCOUNT_OVERRIDES: dict[str, dict] = {}
 DEFAULT_EXCLUDED_INSTITUTIONS: set[str] = set()
