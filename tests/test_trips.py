@@ -120,6 +120,37 @@ class TestClassify(unittest.TestCase):
     def test_groceries_are_never_trip_charges(self):
         self.assertIsNone(tr.classify_charge(_txn("Big Market", "Groceries", "2026-03-11"), _trip()))
 
+    def test_travel_agency_booking_counts_as_airfare(self):
+        trip = _trip()
+        self.assertEqual(
+            tr.classify_charge(_txn("AMEXGBT", "Travel & Vacation", "2026-03-11"), trip), ("airfare", True)
+        )
+        self.assertEqual(
+            tr.classify_charge(_txn("Example Expedia Trip", "Travel", "2026-02-20"), trip), ("airfare", False)
+        )
+
+    def test_small_fees_from_earlier_trips_are_dropped(self):
+        trip = _trip()
+        self.assertIsNone(tr.classify_charge(_txn("Example Airlines", "Airfare", "2026-02-01", amount=12.0), trip))
+        # During the trip a bag fee still belongs to it.
+        self.assertEqual(
+            tr.classify_charge(_txn("Example Airlines", "Airfare", "2026-03-10", amount=12.0), trip), ("airfare", True)
+        )
+
+    def test_earlier_hotels_only_when_named_or_in_destination(self):
+        trip = _trip()
+        self.assertIsNone(tr.classify_charge(_txn("Harbor Hotel", "Travel & Vacation", "2026-02-15"), trip))
+        self.assertEqual(
+            tr.classify_charge(_txn("Springfield Harbor Hotel", "Travel & Vacation", "2026-02-15"), trip),
+            ("lodging", False),  # listed, but you confirm a prepaid stay
+        )
+        named = _trip(lodging=["Harbor Hotel"])
+        self.assertEqual(tr.classify_charge(_txn("Harbor Hotel", "Hotel", "2026-02-15"), named), ("lodging", True))
+
+    def test_other_travel_uses_category_not_group(self):
+        game = _txn("Game Store", "Entertainment & Recreation", "2026-03-11", group="Travel & Lifestyle")
+        self.assertIsNone(tr.classify_charge(game, _trip()))
+
 
 class TestMatch(unittest.TestCase):
     def test_account_hint_limits_cards_when_it_matches(self):
