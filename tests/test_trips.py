@@ -217,8 +217,8 @@ class TestExpenseAmounts(unittest.TestCase):
         self.assertEqual(
             trip["expenses"],
             [
-                {"amount": 400.0, "merchant": "Example Air", "date": date(2026, 3, 2)},
-                {"amount": 25.0, "merchant": "", "date": None},
+                {"amount": 400.0, "merchant": "Example Air", "date": date(2026, 3, 2), "kind": "other"},
+                {"amount": 25.0, "merchant": "", "date": None, "kind": "other"},
             ],
         )
 
@@ -232,7 +232,7 @@ class TestExpenseAmounts(unittest.TestCase):
         got = {i["transaction_id"]: (i["kind"], i["ticked"], i["receipt"]) for i in out["items"]}
         self.assertEqual(got["booking"], ("travel", True, True))
         self.assertEqual(got["dinner"], ("meal", True, True))  # meals are unticked unless matched or asked
-        self.assertEqual(got["other_trip"], ("airfare", False, False))
+        self.assertNotIn("other_trip", got)  # an unmatched flight booked before the trip is the report's job
         self.assertEqual((out["expense_count"], out["unmatched_expenses"]), (2, []))
 
     def test_dated_expense_needs_a_nearby_charge(self):
@@ -278,7 +278,7 @@ class TestExpenseAmounts(unittest.TestCase):
             rows, _trip(airlines=["Example Airlines"], expenses=[_exp(480.0, "", "2026-03-10")])
         )
         ticks = {i["transaction_id"]: i["ticked"] for i in out["items"]}
-        self.assertEqual(ticks, {"flight": True, "earlier_trip": False, "ride_not_on_report": False})
+        self.assertEqual(ticks, {"flight": True, "ride_not_on_report": False})  # earlier trip not even listed
         self.assertTrue(out["has_report"])
 
     def test_charges_tagged_for_another_trip_are_not_offered(self):
@@ -306,14 +306,59 @@ class TestExpenseAmounts(unittest.TestCase):
         self.assertEqual(
             row["details"]["expenses"],
             [
-                {"amount": 600.0, "merchant": "Harbor Hotel", "date": "2026-03-13", "matched": True},
-                {"amount": 45.5, "merchant": "Airport Parking", "date": "", "matched": False},
+                {"amount": 600.0, "merchant": "Harbor Hotel", "date": "2026-03-13", "kind": "other", "matched": True},
+                {"amount": 45.5, "merchant": "Airport Parking", "date": "", "kind": "other", "matched": False},
             ],
         )
         json.dumps(row["details"])  # storable
         self.assertEqual({i["transaction_id"]: (i["ticked"], i["receipt"]) for i in row["items"]},
                          {"hotel": (True, True), "ride": (False, False)})  # fmt: skip
         self.assertIn("Only charges matching the report", json.dumps(res["card"]))
+
+    def test_company_paid_lines_are_skipped_and_counted(self):
+        lines = [
+            {"amount": 600, "merchant": "Harbor Hotel", "date": "2026-03-13", "kind": "lodging", "company_paid": False},
+            {"amount": 38.4, "merchant": "Corner Bistro", "date": "2026-03-11", "kind": "meal", "company_paid": True},
+        ]
+        trip = _trip(expenses=lines)
+        self.assertEqual([e["amount"] for e in trip["expenses"]], [600.0])
+        self.assertEqual(trip["company_paid_lines"], 1)
+        rows = [_txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0)]
+        out = tr.match_trip_charges(rows, trip)
+        self.assertEqual((out["unmatched_expenses"], out["company_paid_lines"]), ([], 1))  # not reported missing
+        with patch.object(tr, "get_chat_action_target", return_value="fn"):
+            row = {"trip_id": "t", "user_email": "user@example.com", "destination": "", "start_date": "2026-03-10",
+                   "end_date": "2026-03-13", "trip_tag": "Trip: Mar 10 2026", "details": {}, "signature": "s"}  # fmt: skip
+            card = json.dumps(tr.build_trip_card(row, out["items"], out, 0))
+        self.assertIn("1 company-paid report line(s)", card)
+
+    def test_report_lists_only_matches_and_unmatched_charges_during_the_trip(self):
+        rows = [
+            _txn("Example Airlines", "Airfare", "2026-02-20", amount=318.0, txn_id="advance_other_booking"),
+            _txn("Harbor Hotel", "Hotel", "2026-03-16", amount=140.0, txn_id="late_other_folio"),
+            _txn("Uber", "Taxi & Ride Shares", "2026-03-09", amount=25.0, txn_id="ride_day_before"),
+            _txn("Corner Bistro", "Restaurants & Bars", "2026-03-11", amount=60.0, txn_id="dinner"),
+            _txn("Travel Desk Co", "Airfare", "2026-02-25", amount=480.0, txn_id="flight"),
+        ]
+        out = tr.match_trip_charges(rows, _trip(expenses=[_exp(480.0, "Travel Desk", "2026-02-25")]))
+        ticks = {i["transaction_id"]: i["ticked"] for i in out["items"]}
+        self.assertEqual(ticks, {"flight": True, "ride_day_before": False})  # unmatched meals are personal
+
+    def test_trip_dates_from_a_report_skip_the_booking_day(self):
+        lines = [
+            {"amount": 972, "merchant": "Example Air", "date": "2026-03-03", "kind": "airfare"},  # booked 3 days out
+            {"amount": 60, "merchant": "Uber", "date": "2026-03-06", "kind": "ground"},
+            {"amount": 245, "merchant": "Harbor Hotel", "date": "2026-03-08", "kind": "lodging"},
+        ]
+        trip = tr.validate_trip({"expenses": lines}, TODAY)
+        self.assertEqual((trip["start_date"], trip["end_date"]), (date(2026, 3, 6), date(2026, 3, 8)))
+        only_air = tr.validate_trip({"expenses": lines[:1]}, TODAY)
+        self.assertEqual(only_air["start_date"], date(2026, 3, 3))
+
+    def test_hints_come_only_from_the_description(self):
+        prompt = tr.build_parse_prompt("", TODAY, "Date\tVendor\tPayment Type\n", 0)
+        self.assertIn("only from the description inside <trip>, never from an attachment", prompt)
+        self.assertIn("I paid myself", prompt)
 
     def test_card_marks_matches_and_lists_missing_amounts(self):
         rows = [_txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0)]
@@ -327,7 +372,7 @@ class TestExpenseAmounts(unittest.TestCase):
         with patch.object(tr, "get_chat_action_target", return_value="fn"):
             card = tr.build_trip_card(row, matched["items"], matched, 0)
         widgets = card["card"]["sections"][0]["widgets"]
-        self.assertIn("1 of 2 pasted amounts matched", widgets[0]["textParagraph"]["text"])
+        self.assertIn("1 of 2 report amounts matched", widgets[0]["textParagraph"]["text"])
         self.assertIn("$45.50 Airport Parking (Mar 13)", widgets[0]["textParagraph"]["text"])
         self.assertTrue(widgets[1]["selectionInput"]["items"][0]["text"].startswith("🧾 "))
 

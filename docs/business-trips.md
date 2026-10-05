@@ -61,16 +61,27 @@ own it goes to the general advisor. Older `.xls` workbooks aren't read; save the
 are read only by `/trip`; describing a trip in plain language passes your words, not your files.
 
 Dates you give, or a travel period stated in the report, set the trip window. Otherwise it comes from the
-report's line dates: the run of dates ending at the last line, stopping at a gap of more than a week, so a
-flight booked weeks ahead doesn't stretch the trip (it is still matched by amount).
+report's line dates: the run of dates ending at the last line, stopping at a gap of more than a week. Airfare
+lines are left out of that when the report has others, because a flight is usually charged the day it is
+booked; it is still matched by amount.
 
 Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its
-merchant, category or card. With a report, **only** those charges are ticked: the report is the list of what
-was expensed, so an airline or hotel it mentions doesn't tick that airline's charges from earlier trips, and
-everything else the dates and names turn up is listed unticked for you to check. A dated line matches a charge posted from a day before to 3 days after it; an
+merchant, category or card. A dated line matches a charge posted from a day before to 3 days after it; an
 undated amount only matches a charge that looks like travel or falls within the trip. The card lists any
-amounts with no matching charge (not posted yet, or paid another way). Mileage, per diem and cash lines are
-skipped.
+amounts with no matching charge (not posted yet, or paid another way).
+
+With a report, the report decides:
+
+- **Only matched charges are ticked.** The report is the list of what was expensed.
+- **Unticked rows are limited to flights, hotels and rides from the day before the trip to the day after**,
+  in case the report left one out. Advance bookings and late folios that didn't match, meals, and other
+  travel are not listed: the report covers bookings, and a meal left off a work report is personal.
+- **Only lines you paid are matched.** Lines whose payment type says the company paid (corporate card,
+  company paid, direct bill) are skipped, since they never reach your accounts, and the card counts them;
+  "I paid myself", a personal card, or no payment type are matched. Mileage, per diem and cash lines are
+  skipped.
+- **Airline, hotel and card hints come only from what you type**, never from the report, so a vendor or a
+  "Corporate Card" column doesn't steer the matching.
 
 Gemini reads only the trip description and any attachments, to pull out dates, hints and amounts;
 transactions are matched in code:
