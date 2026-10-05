@@ -245,6 +245,56 @@ class TestExpenseAmounts(unittest.TestCase):
         out = tr.match_trip_charges(rows, _trip(account_hint="Amex", expenses=[_exp(600.0)]))
         self.assertEqual({i["merchant"] for i in out["items"]}, {"Uber", "Harbor Hotel"})
 
+    def test_with_a_report_only_matched_amounts_are_ticked(self):
+        # A report naming an airline must not tick that airline's charges from earlier trips.
+        rows = [
+            _txn("Example Airlines", "Airfare", "2026-02-01", amount=261.0, txn_id="earlier_trip"),
+            _txn("Travel Desk Co", "Airfare", "2026-03-10", amount=480.0, txn_id="flight"),
+            _txn("Uber", "Taxi & Ride Shares", "2026-03-11", amount=31.0, txn_id="ride_not_on_report"),
+        ]
+        without_report = tr.match_trip_charges(rows, _trip(airlines=["Example Airlines"]))
+        self.assertTrue(next(i for i in without_report["items"] if i["transaction_id"] == "earlier_trip")["ticked"])
+        out = tr.match_trip_charges(
+            rows, _trip(airlines=["Example Airlines"], expenses=[_exp(480.0, "", "2026-03-10")])
+        )
+        ticks = {i["transaction_id"]: i["ticked"] for i in out["items"]}
+        self.assertEqual(ticks, {"flight": True, "earlier_trip": False, "ride_not_on_report": False})
+        self.assertTrue(out["has_report"])
+
+    def test_charges_tagged_for_another_trip_are_not_offered(self):
+        rows = [
+            _txn("Example Airlines", "Airfare", "2026-02-20", tags=["Business", "Trip: Riverside Feb 2026"]),
+            _txn("Uber", "Taxi & Ride Shares", "2026-03-11"),
+        ]
+        out = tr.match_trip_charges(rows, _trip())
+        self.assertEqual([i["merchant"] for i in out["items"]], ["Uber"])
+        self.assertEqual(out["other_trip"], 1)
+
+    def test_report_lines_and_ticks_are_saved_for_audit(self):
+        rows = [_txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0, txn_id="hotel"),
+                _txn("Uber", "Taxi & Ride Shares", "2026-03-11", amount=31.0, txn_id="ride")]  # fmt: skip
+        parsed = _trip(expenses=[_exp(600.0, "Harbor Hotel", "2026-03-13"), _exp(45.5, "Airport Parking")])
+        with (
+            patch.object(tr, "parse_trip_request", return_value=parsed),
+            patch.object(tr, "ensure_trip_table"),
+            patch.object(tr, "fetch_trip_window", return_value=rows),
+            patch.object(tr, "save_trip") as save,
+            patch.object(tr, "get_chat_action_target", return_value="fn"),
+        ):
+            res = tr.propose_trip_review("user@example.com", "", bq=MagicMock())
+        row = save.call_args[0][1]
+        self.assertEqual(
+            row["details"]["expenses"],
+            [
+                {"amount": 600.0, "merchant": "Harbor Hotel", "date": "2026-03-13", "matched": True},
+                {"amount": 45.5, "merchant": "Airport Parking", "date": "", "matched": False},
+            ],
+        )
+        json.dumps(row["details"])  # storable
+        self.assertEqual({i["transaction_id"]: (i["ticked"], i["receipt"]) for i in row["items"]},
+                         {"hotel": (True, True), "ride": (False, False)})  # fmt: skip
+        self.assertIn("Only charges matching the report", json.dumps(res["card"]))
+
     def test_card_marks_matches_and_lists_missing_amounts(self):
         rows = [_txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0)]
         trip = _trip(expenses=[_exp(600.0), _exp(45.5, "Airport Parking", "2026-03-13")])

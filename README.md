@@ -7,7 +7,7 @@
 [![Google BigQuery](https://img.shields.io/badge/Warehouse-Google%20BigQuery-669DF6.svg)](https://cloud.google.com/bigquery)
 [![Gemini Flash](https://img.shields.io/badge/AI%20Model-Gemini%20Flash-8E24AA.svg)](https://deepmind.google/technologies/gemini/)
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC.svg)](https://www.terraform.io/)
-[![Tests: 294 Passing](https://img.shields.io/badge/Tests-294%20Passing-brightgreen.svg)](tests/)
+[![Tests: 297 Passing](https://img.shields.io/badge/Tests-297%20Passing-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
