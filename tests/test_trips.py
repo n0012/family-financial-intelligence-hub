@@ -72,6 +72,7 @@ class TestValidate(unittest.TestCase):
                 "account_hint": "",
                 "include_meals": True,
                 "reimbursed": False,
+                "expenses": [{"amount": 400, "merchant": "Example Air", "date": "2026-03-02"}],
             }
         )
         trip = tr.parse_trip_request("Springfield Mar 10-13, flew Example Air, include meals", TODAY, client)
@@ -183,6 +184,81 @@ class TestMatch(unittest.TestCase):
         ]
         kinds = [(i["kind"], i["ticked"]) for i in tr.match_trip_charges(rows, _trip())["items"]]
         self.assertEqual(kinds, [("airfare", True), ("airfare", False), ("lodging", True), ("meal", False)])
+
+
+def _exp(amount, merchant="", day=""):
+    return {"amount": amount, "merchant": merchant, "date": day}
+
+
+class TestExpenseAmounts(unittest.TestCase):
+    def test_parsed_expenses_are_cleaned(self):
+        trip = _trip(expenses=[_exp(-400, "Example Air", "2026-03-02"), _exp(0), _exp("n/a"), _exp(25.004)])
+        self.assertEqual(
+            trip["expenses"],
+            [
+                {"amount": 400.0, "merchant": "Example Air", "date": date(2026, 3, 2)},
+                {"amount": 25.0, "merchant": "", "date": None},
+            ],
+        )
+
+    def test_pasted_amount_ticks_a_charge_the_heuristics_leave_unticked(self):
+        rows = [
+            _txn("Travel Desk Co", "Shopping", "2026-02-20", amount=612.40, txn_id="booking"),  # not travel-looking
+            _txn("Example Airlines", "Airfare", "2026-02-25", amount=380.00, txn_id="other_trip"),
+            _txn("Corner Bistro", "Restaurants & Bars", "2026-03-11", amount=48.15, txn_id="dinner"),
+        ]
+        out = tr.match_trip_charges(rows, _trip(expenses=[_exp(612.40, "Travel Desk", "2026-02-19"), _exp(48.15)]))
+        got = {i["transaction_id"]: (i["kind"], i["ticked"], i["receipt"]) for i in out["items"]}
+        self.assertEqual(got["booking"], ("travel", True, True))
+        self.assertEqual(got["dinner"], ("meal", True, True))  # meals are unticked unless matched or asked
+        self.assertEqual(got["other_trip"], ("airfare", False, False))
+        self.assertEqual((out["expense_count"], out["unmatched_expenses"]), (2, []))
+
+    def test_dated_expense_needs_a_nearby_charge(self):
+        rows = [_txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0)]
+        out = tr.match_trip_charges(rows, _trip(expenses=[_exp(600.0, "Harbor Hotel", "2026-03-01")]))
+        self.assertFalse(out["items"][0]["receipt"])
+        self.assertEqual([e["amount"] for e in out["unmatched_expenses"]], [600.0])
+
+    def test_undated_common_amount_does_not_pull_in_an_unrelated_purchase(self):
+        rows = [_txn("Bookstore", "Shopping", "2026-02-01", amount=20.0)]
+        out = tr.match_trip_charges(rows, _trip(expenses=[_exp(20.0)]))
+        self.assertEqual(out["items"], [])
+        self.assertEqual(len(out["unmatched_expenses"]), 1)
+
+    def test_each_charge_matches_one_expense_preferring_the_merchant(self):
+        rows = [
+            _txn("Example Taxi", "Taxi & Ride Shares", "2026-03-11", amount=25.0, txn_id="taxi"),
+            _txn("Corner Bistro", "Restaurants & Bars", "2026-03-11", amount=25.0, txn_id="bistro"),
+        ]
+        two = tr.match_expense_amounts(rows, _trip(expenses=[_exp(25.0, "Corner Bistro"), _exp(25.0, "Taxi")]))[0]
+        self.assertEqual({k: v["merchant"] for k, v in two.items()}, {"bistro": "Corner Bistro", "taxi": "Taxi"})
+        receipts, missing = tr.match_expense_amounts(rows, _trip(expenses=[_exp(25.0, "Corner Bistro")] * 3))
+        self.assertEqual((sorted(receipts), len(missing)), (["bistro", "taxi"], 1))  # names on reports vary
+
+    def test_matched_charge_on_another_card_is_kept(self):
+        rows = [
+            _txn("Uber", "Taxi & Ride Shares", "2026-03-11", account="American Express Gold"),
+            _txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0, account="Household Visa", txn_id="hotel"),
+        ]
+        out = tr.match_trip_charges(rows, _trip(account_hint="Amex", expenses=[_exp(600.0)]))
+        self.assertEqual({i["merchant"] for i in out["items"]}, {"Uber", "Harbor Hotel"})
+
+    def test_card_marks_matches_and_lists_missing_amounts(self):
+        rows = [_txn("Harbor Hotel", "Hotel", "2026-03-13", amount=600.0)]
+        trip = _trip(expenses=[_exp(600.0), _exp(45.5, "Airport Parking", "2026-03-13")])
+        matched = tr.match_trip_charges(rows, trip)
+        row = {
+            "trip_id": "t1", "user_email": "user@example.com", "destination": "Springfield",
+            "start_date": "2026-03-10", "end_date": "2026-03-13", "trip_tag": "Trip: Springfield Mar 2026",
+            "details": {"include_meals": True}, "signature": "sig",
+        }  # fmt: skip
+        with patch.object(tr, "get_chat_action_target", return_value="fn"):
+            card = tr.build_trip_card(row, matched["items"], matched, 0)
+        widgets = card["card"]["sections"][0]["widgets"]
+        self.assertIn("1 of 2 pasted amounts matched", widgets[0]["textParagraph"]["text"])
+        self.assertIn("$45.50 Airport Parking (Mar 13)", widgets[0]["textParagraph"]["text"])
+        self.assertTrue(widgets[1]["selectionInput"]["items"][0]["text"].startswith("🧾 "))
 
 
 def _proposal(bq=None):

@@ -38,8 +38,27 @@ Only the dates are required. Everything else improves the default ticks:
 | Card | Only charges on matching accounts are listed. If nothing matches, all cards are shown and the card says so. |
 | `include meals` | Restaurant charges during the trip are ticked (they are listed unticked otherwise). |
 | `reimbursed` | Adds a `Reimbursable` tag (`REIMBURSABLE_TAG`). |
+| Amounts | Charges of exactly those amounts are ticked (see below). |
 
-Gemini reads only the trip description, to pull out dates and hints; transactions are matched in code.
+### Paste an expense report
+
+Paste an expense report, receipts or booking confirmations after `/trip` (up to 8,000 characters; one line of
+dates is still needed if the report doesn't state its travel period):
+
+```
+/trip Springfield Mar 10-14
+Mar 2  Example Air        $400.00
+Mar 14 Example Hotel      $600.00
+Mar 12 Example Taxi        $25.00
+```
+
+Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its
+merchant, category or card. A dated line matches a charge posted from a day before to 3 days after it; an
+undated amount only matches a charge that looks like travel or falls within the trip. The card lists any
+amounts with no matching charge (not posted yet, or paid another way). Mileage, per diem and cash lines are
+skipped.
+
+Gemini reads only the trip description, to pull out dates, hints and amounts; transactions are matched in code.
 Airline brand names that are also ordinary words (for example a youth club or a utility sharing an airline's
 name) only count when they are the whole merchant name. Food delivery never counts as ground transport.
 
