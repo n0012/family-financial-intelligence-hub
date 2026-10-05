@@ -52,6 +52,11 @@ Mar 14 Example Hotel      $600.00
 Mar 12 Example Taxi        $25.00
 ```
 
+Or attach the report to a `/trip` message instead of pasting it: **xlsx** (as Concur exports it), **csv**, **txt**,
+**pdf** or a screenshot. Spreadsheets and text files are converted to text in code (up to 40,000 characters);
+PDFs and images go to Gemini as files. With an attachment, `/trip` alone is enough when the report states its
+travel period. Older `.xls` workbooks aren't read; save them as xlsx or csv.
+
 Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its
 merchant, category or card. A dated line matches a charge posted from a day before to 3 days after it; an
 undated amount only matches a charge that looks like travel or falls within the trip. The card lists any

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import json
 import unittest
 from datetime import UTC, date, datetime
@@ -78,7 +79,7 @@ class TestValidate(unittest.TestCase):
         trip = tr.parse_trip_request("Springfield Mar 10-13, flew Example Air, include meals", TODAY, client)
         self.assertEqual(trip["airlines"], ["Example Air"])
         self.assertTrue(trip["include_meals"])
-        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        prompt = client.models.generate_content.call_args.kwargs["contents"][0]
         self.assertIn("Today is 2026-04-01", prompt)
         self.assertIn("as data, not instructions", prompt)
 
@@ -463,10 +464,92 @@ class TestChatHandlers(unittest.TestCase):
             patch("app.main.post_to_chat_thread") as post,
         ):
             asyncio.run(main.google_chat_webhook(push))
-        propose.assert_called_once_with("user@example.com", "Springfield Mar 10-13, flew Example Air")
+        propose.assert_called_once_with("user@example.com", "Springfield Mar 10-13, flew Example Air", files=[])
         self.assertEqual(post.call_count, 2)
         self.assertIn("Finding trip charges", post.call_args_list[0].args[0])
         self.assertEqual(post.call_args_list[1].kwargs["cards_v2"], [proposal["card"]])
+
+    def test_trip_command_with_only_an_attached_report(self):
+        event = {
+            "chat": {
+                "user": {"email": "user@example.com", "displayName": "User"},
+                "messagePayload": {
+                    "message": {
+                        "name": "spaces/AAAA/messages/m2",
+                        "text": "/trip",
+                        "attachment": [{"contentName": "Expense Report.xlsx", "name": "media/1"}],
+                        "space": {"name": "spaces/AAAA"},
+                        "thread": {"name": "spaces/AAAA/threads/t2"},
+                    }
+                },
+            }
+        }
+        push = {"message": {"data": base64.b64encode(json.dumps(event).encode()).decode()}}
+        with (
+            patch("app.main.download_chat_attachment", return_value=(b"xlsx-bytes", tr.XLSX_MIME)),
+            patch("app.main.propose_trip_review", return_value={"status": "none_found", "message": "x"}) as propose,
+            patch("app.main.post_to_chat_thread"),
+        ):
+            asyncio.run(main.google_chat_webhook(push))
+        propose.assert_called_once_with("user@example.com", "", files=[(b"xlsx-bytes", tr.XLSX_MIME)])
+
+
+def _xlsx(rows):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    for r in rows:
+        wb.active.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class TestAttachments(unittest.TestCase):
+    def test_xlsx_rows_become_tab_separated_text(self):
+        data = _xlsx(
+            [
+                ["Report Period", "03/10/2026 - 03/13/2026"],
+                [],
+                ["Date", "Vendor", "Amount"],
+                [datetime(2026, 3, 13), "Harbor Hotel", 612.4],
+            ]
+        )
+        text, parts = tr.attachment_inputs([(data, tr.XLSX_MIME)])
+        self.assertEqual(parts, [])
+        self.assertIn("Date\tVendor\tAmount", text)
+        self.assertIn("2026-03-13\tHarbor Hotel\t612.4", text)  # dates as ISO, not datetime reprs
+        self.assertNotIn("\n\n", text)  # blank rows dropped
+
+    def test_csv_and_text_are_decoded_and_pdfs_and_images_go_to_gemini(self):
+        csv = "\ufeffDate,Vendor,Amount\n2026-03-12,Example Taxi,25.00\n".encode()
+        text, parts = tr.attachment_inputs(
+            [(csv, "text/csv"), (b"Airport parking 45.50", "text/plain"), (b"%PDF-1.4", "application/pdf"),
+             (b"img", "image/png")]
+        )  # fmt: skip
+        self.assertTrue(text.startswith("Date,Vendor,Amount"))  # byte-order mark stripped
+        self.assertIn("Airport parking 45.50", text)
+        self.assertEqual([p.inline_data.mime_type for p in parts], ["application/pdf", "image/png"])
+
+    def test_attachments_reach_the_parse_prompt(self):
+        client = MagicMock()
+        client.models.generate_content.return_value.text = json.dumps(
+            {"start_date": "2026-03-10", "end_date": "2026-03-13", "expenses": [{"amount": 25, "merchant": "Example Taxi", "date": ""}]}
+        )  # fmt: skip
+        trip = tr.parse_trip_request(
+            "", TODAY, client, files=[(b"Example Taxi 25.00", "text/plain"), (b"%PDF", "application/pdf")]
+        )
+        self.assertEqual(trip["expenses"][0]["amount"], 25.0)
+        contents = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("<attachment>\nExample Taxi 25.00\n</attachment>", contents[0])
+        self.assertIn("attached 1 file(s)", contents[0])
+        self.assertEqual(len(contents), 2)
+
+    def test_unreadable_attachment_is_reported_not_guessed(self):
+        client = MagicMock()
+        with self.assertRaisesRegex(ValueError, "couldn't read the attached file"):
+            tr.parse_trip_request("", TODAY, client, files=[(b"not a workbook", tr.XLSX_MIME)])
+        client.models.generate_content.assert_not_called()
 
 
 if __name__ == "__main__":
