@@ -7,7 +7,7 @@
 [![Google BigQuery](https://img.shields.io/badge/Warehouse-Google%20BigQuery-669DF6.svg)](https://cloud.google.com/bigquery)
 [![Gemini Flash](https://img.shields.io/badge/AI%20Model-Gemini%20Flash-8E24AA.svg)](https://deepmind.google/technologies/gemini/)
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC.svg)](https://www.terraform.io/)
-[![Tests: 243 Passing](https://img.shields.io/badge/Tests-243%20Passing-brightgreen.svg)](tests/)
+[![Tests: 275 Passing](https://img.shields.io/badge/Tests-275%20Passing-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
@@ -37,6 +37,7 @@ FinSage documentation is broken out into dedicated guides:
 * **Paycheck Surplus Sweep & Debt Acceleration**: Automatically models 30-day fixed overhead burn baselines plus upcoming lump-sum bills. When payroll deposits land, FinSage calculates safe checking reserves and computes the exact sweep amount to pay down high-carry debt, reporting daily, monthly, and annual compound interest saved.
 * **Multimodal Vision & Tax Ingestion**: Paste receipts or invoices directly into Google Chat. Gemini Vision extracts itemized lines, scrubs sensitive PII (SSN, EIN, card numbers), categorizes tax deductibility (Schedule C, HSA/FSA, Charities), and asymmetrically matches against posted bank debits with tip authorization handling.
 * **Researched Category Clean-up**: `/categorize` researches uncategorized and inconsistently categorized merchants on the web, starts from your live Monarch categories and rules, proposes fixes for up to 10 merchants on one card, ranked by dollars at stake, and applies the ticked ones in Monarch Money: past transactions are recategorized and a Monarch rule is added so future ones are categorized automatically. Rejected suggestions are not proposed again.
+* **Business Trips & Tags**: `/trip Springfield Mar 10-14, flew Example Air` finds the trip's airfare, hotel and ground transport and tags the ticked charges `Business` plus a trip tag in Monarch, without changing categories or adding rules. Business-tagged spending is left out of household totals, trends, pacing and alerts. See [docs/business-trips.md](docs/business-trips.md).
 * **Guarded Mutations & Cryptographic Confirmation**: When modifying transaction categories or updating records, FinSage requires physical confirmation via interactive Google Chat Cards v2 with HMAC-SHA256 tokens and an append-only BigQuery audit trail.
 * **Private-Ingress Perimeter Security**: Cloud Run runs with `--ingress internal` and `--no-allow-unauthenticated`. Chat events reach it only through a **Google Cloud Pub/Sub push subscription** (`monarch-chat-push` → `/chat/pubsub`) authenticated with an OIDC token, so the service has no public endpoint.
 * **Scale-to-Zero Efficiency**: The Cloud Run service runs with `--min-instances 0` and request-based CPU, so it costs nothing while idle. Batch work runs as short Cloud Run Jobs. See the [cost profile](docs/deployment.md#7-operating-cost-profile).

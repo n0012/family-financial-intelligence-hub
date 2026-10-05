@@ -89,6 +89,7 @@ from app.receipt_service import (
     get_tax_deduction_analysis,
     process_receipt_bytes,
 )
+from app.trips import apply_trip_review, propose_trip_review, start_business_trip_review, verify_trip_signature
 
 try:
     from google import genai
@@ -462,6 +463,7 @@ def ask_gemini_brain(
             "    - For a single specific transaction, call `propose_transaction_recategorization(transaction_id, new_category)`.\n"
             "    - Proactive Next Recommendations: You are equipped with `get_recategorization_recommendations(exclude_merchant)`. After proposing or executing a batch recategorization, or when auditing transactions, proactively run this tool to identify the next high-confidence misclassified merchant and suggest fixing it.\n"
             "    - Category clean-up across many merchants (e.g. 'review my categories', 'fix uncategorized transactions'): call `start_category_review(max_merchants)`. It researches each merchant on the web and posts one review card where the user ticks the fixes to apply. Summarize its suggestions briefly; do not repeat the card.\n"
+            "    - Business trips (e.g. 'I was in Denver for work March 3-6', 'tag my business trip'): call `start_business_trip_review(trip_description)` with the user's own words. It posts a card of the trip's airfare, hotel and ground transport to tag as Business; categories never change. If the user gave no dates, ask for them instead of calling it.\n"
             "    - Never attempt to mutate transactions directly; both tools strictly prepare HMAC-signed confirmation cards requiring the user's interactive confirmation in Google Chat.\n"
             "13. Persistent User Preferences & Memory Consolidation: You are equipped with `store_user_preference(preference_or_rule)` to persist family goals, spending limits, debt acceleration targets, budget caps, categorization guidelines, or alert preferences into the long-term Memory Bank. Proactively call this tool whenever the user sets a budget cap, establishes a payoff target, establishes a merchant categorization rule, asks you to remember something, or defines an enduring financial preference.\n"
             "14. Proactive Alert Suppression & Snooze: If the user asks to dismiss, snooze, or stop alerting about a specific merchant, habit, overlap, or price increase (e.g. 'snooze Netflix alert for 30 days', 'mute food leakage alerts'), call `snooze_spend_alert(alert_key_or_name, days)`. This updates BigQuery alert suppression so the item will not be repeatedly flagged in daily scans.\n"
@@ -493,6 +495,7 @@ def ask_gemini_brain(
                     propose_batch_recategorization,
                     get_recategorization_recommendations,
                     start_category_review,
+                    start_business_trip_review,
                     store_user_preference,
                     snooze_spend_alert,
                     get_daily_morning_brief,
@@ -1418,6 +1421,77 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
                 return respond(summary)
             return respond(summary, cards_v2=[result["card"]])
 
+        elif action_name in ("apply_trip_review", "cancel_trip_review"):
+            trip_id = action_params.get("trip_id", "")
+            target_user = action_params.get("user_email", "unknown")
+            sig = action_params.get("signature", "")
+            is_apply = action_name == "apply_trip_review"
+
+            allowed, rate_msg = check_mutation_rate_limit(user_email)
+            if not allowed:
+                log_mutation_audit(
+                    action_type="BUSINESS_TRIP",
+                    target_id=trip_id,
+                    user_email=user_email,
+                    status="RATE_LIMITED",
+                    details=rate_msg,
+                )
+                return respond(f"⛔ {rate_msg}")
+
+            if not target_user or target_user == "unknown" or user_email.lower() != target_user.lower():
+                log_mutation_audit(
+                    action_type="BUSINESS_TRIP",
+                    target_id=trip_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    details=f"Trip action attempted by a user other than {target_user}",
+                )
+                return respond(f"⛔ Only {target_user} can act on this trip.")
+
+            try:
+                ts = int(action_params.get("timestamp", "0"))
+                item_count = int(action_params.get("item_count", "0"))
+            except ValueError:
+                ts, item_count = 0, -1
+            is_valid, reason = verify_trip_signature(trip_id, item_count, target_user, ts, sig)
+            if not is_valid:
+                log_mutation_audit(
+                    action_type="BUSINESS_TRIP",
+                    target_id=trip_id,
+                    user_email=user_email,
+                    status="REJECTED",
+                    signature_valid=False,
+                    details=reason,
+                )
+                return respond(f"⛔ Trip review rejected: {reason}")
+
+            indexes: list[int] | None = None
+            if is_apply:
+                ticked = extract_card_form_values(raw_payload, "selected")
+                if ticked is None:
+                    return respond(
+                        "⚠️ I couldn't read which charges you ticked, so nothing was tagged. "
+                        "Tick at least one and press *Tag selected* again, or use *Cancel*."
+                    )
+                indexes = [int(v) for v in ticked if v.isdigit()]
+                if not indexes:
+                    return respond("Nothing was ticked, so nothing was tagged. Use *Cancel* to close this trip.")
+
+            result = await apply_trip_review(trip_id, indexes, user_email)
+            if not result.get("success"):
+                return respond(f"⚠️ {result.get('error', 'Trip tagging failed.')}")
+            tagged = result["tagged"]
+            if result["status"] == "CANCELLED":
+                summary = "🚫 Trip cancelled. Nothing was tagged."
+            else:
+                summary = f"✅ Tagged {len(tagged)} charge(s) as business travel in Monarch."
+                if result.get("failed_count"):
+                    summary += f" {result['failed_count']} could not be tagged."
+            if msg_name:
+                patch_chat_card(msg_name, [result["card"]], text=summary)
+                return respond(summary)
+            return respond(summary, cards_v2=[result["card"]])
+
         return respond("ℹ️ Action received.")
 
     # 1. Bot added to space or 1:1 DM
@@ -1472,6 +1546,7 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             "• `/sweep` to calculate safe surplus cash to pay down variable debt (HELOC)\n"
             "• `/tax` to review annual tax-deductible expense summaries\n"
             "• `/categorize` to research and fix miscategorized merchants in one batch\n"
+            "• `/trip Springfield Mar 10-14, flew Example Air` to tag a business trip's charges\n"
             "• *You can also paste receipts, invoices, or financial documents!*"
         )
         return respond(help_text)
@@ -1724,6 +1799,43 @@ async def google_chat_webhook(request: dict, is_pubsub_override: bool = False):
             post_to_chat_thread(review_text, thread_name, space_name, cards_v2=review_cards)
 
         asyncio.create_task(post_category_review())
+        return respond(interim)
+
+    # Command: /trip, tag a business trip's charges
+    if lower_text.startswith("/trip"):
+        trip_text = clean_text[len("/trip") :].strip()
+        if not trip_text:
+            return respond(
+                "Tell me the trip dates, plus anything that helps: destination, airline, hotel, card, "
+                "'include meals', 'reimbursed'. For example: `/trip Springfield Mar 10-14, flew Example Air`"
+            )
+        interim = "🧳 *Finding trip charges...* The card will follow in this thread."
+
+        async def build_trip_review() -> tuple[str, list | None]:
+            try:
+                res = await asyncio.to_thread(propose_trip_review, user_email, trip_text)
+            except Exception as e:
+                logger.error(f"Trip review failed: {e}", exc_info=True)
+                return f"⚠️ Trip review failed: {e}", None
+            if res.get("card"):
+                return (
+                    f"🧳 *{res['trip_tag']}* ({res['dates']}): {res['charge_count']} possible charges, "
+                    f"{res['ticked_count']} ticked (${res['ticked_amount']:,.2f}). Adjust the ticks, then press "
+                    "*Tag selected*.",
+                    [res["card"]],
+                )
+            return f"ℹ️ {res.get('message', 'No trip charges found.')}", None
+
+        if is_pubsub and not is_pubsub_override:
+            respond(interim)
+            trip_reply, trip_cards = await build_trip_review()
+            return respond(trip_reply, cards_v2=trip_cards)
+
+        async def post_trip_review():
+            trip_reply, trip_cards = await build_trip_review()
+            post_to_chat_thread(trip_reply, thread_name, space_name, cards_v2=trip_cards)
+
+        asyncio.create_task(post_trip_review())
         return respond(interim)
 
     # Natural language query -> Conversational Analytics Agent
