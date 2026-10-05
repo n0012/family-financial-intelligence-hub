@@ -40,7 +40,7 @@ Only the dates are required. Everything else improves the default ticks:
 | `reimbursed` | Adds a `Reimbursable` tag (`REIMBURSABLE_TAG`). |
 | Amounts | Charges of exactly those amounts are ticked (see below). |
 
-### Paste an expense report
+### Paste or attach an expense report
 
 Paste an expense report, receipts or booking confirmations after `/trip` (up to 8,000 characters; one line of
 dates is still needed if the report doesn't state its travel period):
@@ -55,7 +55,8 @@ Mar 12 Example Taxi        $25.00
 Or attach the report to a `/trip` message instead of pasting it: **xlsx** (as Concur exports it), **csv**, **txt**,
 **pdf** or a screenshot. Spreadsheets and text files are converted to text in code (up to 40,000 characters);
 PDFs and images go to Gemini as files. With an attachment, `/trip` alone is enough when the report states its
-travel period. Older `.xls` workbooks aren't read; save them as xlsx or csv.
+travel period. Older `.xls` workbooks aren't read; save them as xlsx or csv. Attachments are read only by
+`/trip`; describing a trip in plain language passes your words, not your files.
 
 Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its
 merchant, category or card. A dated line matches a charge posted from a day before to 3 days after it; an
@@ -63,9 +64,18 @@ undated amount only matches a charge that looks like travel or falls within the 
 amounts with no matching charge (not posted yet, or paid another way). Mileage, per diem and cash lines are
 skipped.
 
-Gemini reads only the trip description, to pull out dates, hints and amounts; transactions are matched in code.
-Airline brand names that are also ordinary words (for example a youth club or a utility sharing an airline's
-name) only count when they are the whole merchant name. Food delivery never counts as ground transport.
+Gemini reads only the trip description and any attachments, to pull out dates, hints and amounts;
+transactions are matched in code:
+
+- Travel agencies (Amex GBT, Egencia, Navan, Concur, Expedia, Priceline, Booking.com) count as airfare.
+- Airfare under $40 charged before the trip (seat, bag and wifi fees from an earlier trip) is skipped unless it
+  is from the airline you named.
+- A hotel charged before the trip is listed only if you named it or its name contains the destination; other
+  early hotel charges belong to earlier trips.
+- Other travel-category charges are offered unticked during the trip.
+- Airline brand names that are also ordinary words (for example a youth club or a utility sharing an
+  airline's name) only count when they are the whole merchant name.
+- Food delivery never counts as ground transport.
 
 The card lists up to 40 charges grouped by airfare, lodging, ground transport, meals and other travel.
 **Tag selected** adds the business tag, the trip tag and (if reimbursed) `Reimbursable` to the ticked charges
@@ -84,4 +94,4 @@ details, proposed charges, status). Gemini can also start a trip review through 
 |---|---|---|
 | `BUSINESS_TAG` | `Business` | Monarch tag that marks business spending |
 | `REIMBURSABLE_TAG` | `Reimbursable` | Tag added when a trip is reimbursed |
-| `TRIP_PARSE_MODEL` | `CATEGORY_RESEARCH_MODEL` | Model that reads the trip description |
+| `TRIP_PARSE_MODEL` | `CATEGORY_RESEARCH_MODEL` | Model that reads the trip description and attachments |

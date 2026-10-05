@@ -54,6 +54,7 @@ The legacy streaming-pull worker (`app/chat_worker.py`) is still available by se
 | **`/tax [YYYY]`** | Displays annual tax deductibility summary (Schedule C, HSA, Charities). | `v_tax_deductible_summary` |
 | **`/digest [weekly\|monthly]`** | Generates an executive CFO performance briefing. | `v_debt_summary`, `v_spend_classification` |
 | **`/categorize [N]`** | Researches up to N (default 10) uncategorized or split merchants on the web and posts one review card of category fixes to tick and apply. | `app/category_research.py`, `merchant_category_decisions` |
+| **`/trip <dates> [details]`** *(optional expense report)* | Finds a business trip's airfare, hotel and ground transport and posts one card to tag the ticked charges `Business` plus a trip tag in Monarch. A pasted or attached expense report (xlsx, csv, pdf, txt, image) ticks the charges with matching amounts. | `app/trips.py`, `business_trips` |
 | **`/sync`** | Triggers immediate Monarch Money ingestion into BigQuery. | `monarch_service.sync_accounts_to_bq()` |
 | **`/receipt`** *(with image)* | Extracts line items, scrubs PII, classifies tax deductibility, and matches bank ledger. | Gemini Vision, `raw_transactions` |
 | **`/help`** | Displays quick command reference and suggested natural language prompts. | Built-in |
@@ -73,7 +74,11 @@ Gemini automatically maps user intent to BigQuery analytical views using Automat
 * *"Where are our top micro-transaction leaks under $35?"*  
   → Queries `v_micro_transaction_leakage` for coffee shops and convenience spending.
 * *"How much safe surplus can we sweep from checking to pay down debt today?"*  
-  → Queries `v_paycheck_surplus_allocation` to determin## 4. Daily Brief (`/brief`) and Full Alert Scan (`/alerts`)
+  → Queries `v_paycheck_surplus_allocation` to determine safe paydown allocation.
+
+---
+
+## 4. Daily Brief (`/brief`) and Full Alert Scan (`/alerts`)
 
 Every morning at 08:00 AM the `monarch-alerts-job` posts a short **daily brief** card. Ask for it any time with `/brief`, or in plain words (*"show me today's summary"*, *"daily brief"*). The card has four sections:
 
@@ -143,7 +148,26 @@ The card carries the same protections as other mutations: it is signed for the r
 
 ---
 
-## 9. Vertex AI Long-Term Memory Bank
+## 9. Business Trips (`/trip`)
+
+`/trip Springfield Mar 10-14, flew Example Air` (or *"I was in Springfield for work March 10-14"*) tags a work
+trip's charges without changing their categories:
+
+1. **Parse**: Gemini reads the description, and any expense report pasted after `/trip` or attached to the
+   message (xlsx, csv, txt, pdf or image), for the dates, destination, airline, hotel, card and amounts.
+2. **Match in code**: airfare from 60 days before the trip, lodging until 3 days after, ground transport
+   around the trip, and meals during it. Each expense-report amount ticks the one charge of exactly that
+   amount; amounts with no charge are listed on the card.
+3. **One card**: up to 40 charges, grouped by kind and ticked by likelihood. **Tag selected** adds `Business`,
+   the trip tag and (if reimbursed) `Reimbursable` in Monarch, keeping existing tags. No rules are created.
+
+Business-tagged spending is then left out of household totals, alerts, pacing and trends. The card has the
+same protections as other mutations and is audited as `BUSINESS_TRIP`. See
+[Business Trips and Business Tags](business-trips.md) for the matching rules and settings.
+
+---
+
+## 10. Vertex AI Long-Term Memory Bank
 
 FinSage integrates with Vertex AI Agent Platform to persist family financial preferences across conversation threads:
 * Remembers user-specific targets (e.g. *"Our dining goal is under $600/month"*, *"Prioritize paying off the HELOC before the auto loan"*).

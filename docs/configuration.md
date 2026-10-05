@@ -112,6 +112,9 @@ In Google Cloud production, credentials and configuration are stored in **Secret
 | `CHAT_SUBSCRIPTION` | Pull subscription used only when `ENABLE_CHAT_PULL_WORKER=true` | No | `monarch-chat-sub` |
 | `CATEGORY_RESEARCH_MODEL` | Model that researches merchants for `/categorize` (needs Google Search grounding) | No | `gemini-3.8-flash` |
 | `GEMINI_VISION_MODEL` | Model for receipt and invoice extraction | No | `gemini-2.5-flash` |
+| `BUSINESS_TAG` | Monarch tag that marks business spending; tagged transactions are left out of household totals, alerts and trends | No | `Business` |
+| `REIMBURSABLE_TAG` | Tag `/trip` adds when a trip is reimbursed | No | `Reimbursable` |
+| `TRIP_PARSE_MODEL` | Model that reads `/trip` descriptions and expense reports | No | `CATEGORY_RESEARCH_MODEL` |
 
 ---
 
