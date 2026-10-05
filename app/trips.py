@@ -59,6 +59,9 @@ AIRLINE_WORDS = (
 # Brand names that are also ordinary words ("Colorado United Soccer", "Southwest Gas") only count as an
 # airline when they are the whole merchant name.
 AIRLINE_EXACT = {"united", "southwest", "delta", "american", "alaska", "frontier", "spirit", "hawaiian"}
+# Corporate and online travel agencies book flights (and often hotels) as one charge.
+TRAVEL_AGENCY_WORDS = ("amex gbt", "amexgbt", "egencia", "navan", "concur", "expedia", "priceline", "booking.com")
+MIN_EARLY_AIRFARE = 40.0  # seat, bag and wifi fees on earlier trips are noise before the trip starts
 LODGING_WORDS = (
     "hotel", "hotels", " inn", "suites", "resort", "lodge", "motel", "marriott", "hilton", "hyatt", "westin",
     "sheraton", "ihg", "holiday inn", "hampton", "courtyard", "residence inn", "autograph", "kimpton", "airbnb",
@@ -294,7 +297,6 @@ def classify_charge(txn: dict, trip: dict) -> tuple[str, bool] | None:
     """Returns (kind, ticked_by_default) for a charge that may belong to the trip, or None."""
     merchant = f" {str(txn.get('merchant') or '').lower()} "
     cat = str(txn.get("category_name") or "").lower()
-    group = str(txn.get("group_name") or "").lower()
     d = txn["transaction_date"]
     start, end = trip["start_date"], trip["end_date"]
     days_before = (start - d).days
@@ -303,15 +305,26 @@ def classify_charge(txn: dict, trip: dict) -> tuple[str, bool] | None:
 
     if _has(merchant, FOOD_DELIVERY_WORDS):
         return None
-    is_airline = _has(merchant, AIRLINE_WORDS) or merchant.strip() in AIRLINE_EXACT
+    is_airline = (
+        _has(merchant, AIRLINE_WORDS) or merchant.strip() in AIRLINE_EXACT or _has(merchant, TRAVEL_AGENCY_WORDS)
+    )
+    named_lodging = _matches_any(merchant, trip["lodging"])
     if _has(cat, AIRFARE_CATEGORIES) or is_airline or _matches_any(merchant, trip["airlines"]):
         if not (-((end - start).days) <= days_before <= AIRFARE_LOOKBACK_DAYS):
+            return None
+        booked_early = d < start - timedelta(days=1)
+        if booked_early and txn["amount"] < MIN_EARLY_AIRFARE and not _matches_any(merchant, trip["airlines"]):
             return None
         if trip["airlines"]:
             return "airfare", _matches_any(merchant, trip["airlines"])
         return "airfare", start - timedelta(days=1) <= d <= end
-    if _has(cat, LODGING_CATEGORIES) or _has(merchant, LODGING_WORDS) or _matches_any(merchant, trip["lodging"]):
+    if _has(cat, LODGING_CATEGORIES) or _has(merchant, LODGING_WORDS) or named_lodging:
         if d > end + timedelta(days=LODGING_TRAILING_DAYS):
+            return None
+        # Before the trip, only a prepaid stay you named (or one in the destination's name) is plausible;
+        # anything else is an earlier trip.
+        in_destination = len(destination) >= 3 and destination in merchant
+        if d < start - timedelta(days=1) and not (named_lodging or in_destination):
             return None
         if trip["lodging"]:
             return "lodging", _matches_any(merchant, trip["lodging"])
@@ -324,7 +337,7 @@ def classify_charge(txn: dict, trip: dict) -> tuple[str, bool] | None:
         if in_trip:
             return "meal", trip["include_meals"] or (len(destination) >= 3 and destination in merchant)
         return None
-    if "travel" in cat or "travel" in group:
+    if "travel" in cat:
         if start <= d <= end + timedelta(days=GROUND_TRAILING_DAYS):
             return "travel", False
     return None
