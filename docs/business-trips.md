@@ -28,7 +28,8 @@ category. Use Monarch's per-transaction *hide from budget* if that matters for a
 /trip Springfield Mar 10-14, flew Example Air, Example Hotel, rewards card, include meals, reimbursed
 ```
 
-Only the dates are required. Everything else improves the default ticks:
+Only the dates are required, and an expense report with a date on each line supplies them. Everything else
+improves the default ticks:
 
 | Detail | Effect |
 |---|---|
@@ -42,11 +43,11 @@ Only the dates are required. Everything else improves the default ticks:
 
 ### Paste or attach an expense report
 
-Paste an expense report, receipts or booking confirmations after `/trip` (up to 8,000 characters; one line of
-dates is still needed if the report doesn't state its travel period):
+Paste an expense report, receipts or booking confirmations after `/trip` (up to 8,000 characters). Trip dates
+are optional when the lines are dated:
 
 ```
-/trip Springfield Mar 10-14
+/trip Springfield
 Mar 2  Example Air        $400.00
 Mar 14 Example Hotel      $600.00
 Mar 12 Example Taxi        $25.00
@@ -54,11 +55,14 @@ Mar 12 Example Taxi        $25.00
 
 Or attach the report to a `/trip` message instead of pasting it: **xlsx** (as Concur exports it), **csv**, **txt**,
 **pdf** or a screenshot. Spreadsheets and text files are converted to text in code (up to 40,000 characters);
-PDFs and images go to Gemini as files. With an attachment, `/trip` alone is enough when the report states its
-travel period, and a spreadsheet or text file sent on its own (Chat often sends a file as a separate message)
+PDFs and images go to Gemini as files. With an attachment, `/trip` alone is enough, and a spreadsheet or text file sent on its own (Chat often sends a file as a separate message)
 is read as a trip report without `/trip`. A PDF or image still needs `/trip` in the same message, since on its
-own it goes to the general advisor. Older `.xls` workbooks aren't read; save them as xlsx or csv. Attachments are read only by
-`/trip`; describing a trip in plain language passes your words, not your files.
+own it goes to the general advisor. Older `.xls` workbooks aren't read; save them as xlsx or csv. Attachments
+are read only by `/trip`; describing a trip in plain language passes your words, not your files.
+
+Dates you give, or a travel period stated in the report, set the trip window. Otherwise it comes from the
+report's line dates: the run of dates ending at the last line, stopping at a gap of more than a week, so a
+flight booked weeks ahead doesn't stretch the trip (it is still matched by amount).
 
 Each amount is matched to one charge of exactly that amount, which is ticked and marked 🧾 whatever its
 merchant, category or card. With a report, **only** those charges are ticked: the report is the list of what
